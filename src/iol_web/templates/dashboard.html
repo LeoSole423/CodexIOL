@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <h1>Portafolio en ARS</h1>
+    <div class="hero-row">
+      <div class="kpi">
+        <div class="kpi-label">Total</div>
+        <div class="kpi-value" id="kpiTotal">-</div>
+        <div class="kpi-meta" id="kpiDate">-</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Delta diario</div>
+        <div class="kpi-value" id="kpiDailyDelta">-</div>
+        <div class="kpi-meta" id="kpiDailyPct">-</div>
+      </div>
+      <div class="kpi kpi-wide">
+        <div class="kpi-label">Retornos</div>
+        <div class="kpi-grid">
+          <div class="kpi-mini"><div class="k">Sem</div><div class="v" id="retWeekly">-</div></div>
+          <div class="kpi-mini"><div class="k">Mes</div><div class="v" id="retMonthly">-</div></div>
+          <div class="kpi-mini"><div class="k">YTD</div><div class="v" id="retYtd">-</div></div>
+          <div class="kpi-mini"><div class="k">Año</div><div class="v" id="retYearly">-</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <div class="card-head">
+        <h2>Evolución</h2>
+        <div class="segmented" id="rangeButtons">
+          <button data-range="30" class="seg on">1M</button>
+          <button data-range="90" class="seg">3M</button>
+          <button data-range="365" class="seg">1Y</button>
+          <button data-range="all" class="seg">All</button>
+        </div>
+      </div>
+      <div style="height:260px">
+        <canvas id="chartTotal"></canvas>
+      </div>
+      <div class="hint" id="noDataHint" style="display:none;">
+        No hay snapshots todavía. Corre <code>iol snapshot run</code> o levanta el scheduler.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Allocation</h2>
+        <div class="controls">
+          <select id="allocGroupBy" class="select">
+            <option value="symbol">Por símbolo</option>
+            <option value="type">Por tipo</option>
+            <option value="market">Por mercado</option>
+            <option value="currency">Por moneda</option>
+          </select>
+          <label class="toggle">
+            <input type="checkbox" id="allocCash" />
+            <span>Incluir cash</span>
+          </label>
+        </div>
+      </div>
+      <div class="alloc">
+        <div class="alloc-chart">
+          <canvas id="chartAlloc"></canvas>
+        </div>
+        <div class="alloc-legend" id="allocLegend"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section-head">
+    <div class="section-title">
+      <h2>Top movers</h2>
+      <div class="badge" id="moversPeriodBadge">día</div>
+    </div>
+    <div class="section-controls">
+      <div class="segmented" id="moversPeriodButtons">
+        <button data-period="daily" class="seg on">Día</button>
+        <button data-period="weekly" class="seg">Semana</button>
+        <button data-period="monthly" class="seg">Mes</button>
+        <button data-period="yearly" class="seg">Año</button>
+        <button data-period="ytd" class="seg">YTD</button>
+      </div>
+      <div class="picker" id="moversPicker" style="display:none;">
+        <button class="pick-btn" id="moversPickPrev" type="button">‹</button>
+        <div class="pick-label" id="moversPickLabel">-</div>
+        <button class="pick-btn" id="moversPickNext" type="button">›</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <div class="card-head"><h2>Top ganadores</h2></div>
+      <div class="table" id="tblGainersDaily"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Top perdidas</h2></div>
+      <div class="table" id="tblLosersDaily"></div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <div class="card-head"><h2>Top ganadores (acumulado)</h2></div>
+      <div class="table" id="tblGainersTotal"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Top perdidas (acumulado)</h2></div>
+      <div class="table" id="tblLosersTotal"></div>
+    </div>
+  </section>
+{% endblock %}

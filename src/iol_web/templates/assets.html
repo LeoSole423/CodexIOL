@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <h1>Activos</h1>
+    <p class="sub">Último snapshot: <span id="assetsSnap">-</span></p>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Tabla</h2>
+      <div class="controls">
+        <input id="assetsFilter" class="input" placeholder="Filtrar (símbolo/desc/tipo)..." />
+        <select id="assetsSort" class="select">
+          <option value="total_value_desc">Valor desc</option>
+          <option value="daily_var_points_desc">Diario desc</option>
+          <option value="daily_var_points_asc">Diario asc</option>
+          <option value="gain_amount_desc">Ganancia desc</option>
+          <option value="gain_amount_asc">Ganancia asc</option>
+        </select>
+      </div>
+    </div>
+    <div class="table" id="assetsTable"></div>
+  </section>
+{% endblock %}
+
