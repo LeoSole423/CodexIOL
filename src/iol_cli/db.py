@@ -36,6 +36,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             minutes_from_close INTEGER,
             source TEXT,
             titles_value REAL,
+            cash_total_ars REAL,
             cash_disponible_ars REAL,
             cash_disponible_usd REAL,
             raw_json TEXT
@@ -93,13 +94,29 @@ def init_db(conn: sqlite3.Connection) -> None:
             symbol TEXT,
             market TEXT,
             side TEXT,
+            side_norm TEXT,
             quantity REAL,
             price REAL,
             plazo TEXT,
             order_type TEXT,
             created_at TEXT,
             updated_at TEXT,
+            operated_at TEXT,
+            ordered_qty REAL,
+            executed_qty REAL,
+            limit_price REAL,
+            avg_price REAL,
+            operated_amount REAL,
+            currency TEXT,
             raw_json TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_state (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
         """
     )
@@ -163,6 +180,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_advisor_logs_created ON advisor_logs(created_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_account_balances_date ON account_balances(snapshot_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_batch_ops_run ON batch_ops(run_id)")
@@ -174,8 +192,23 @@ def init_db(conn: sqlite3.Connection) -> None:
         "portfolio_snapshots",
         {
             "titles_value": "REAL",
+            "cash_total_ars": "REAL",
             "cash_disponible_ars": "REAL",
             "cash_disponible_usd": "REAL",
+        },
+    )
+    ensure_columns(
+        conn,
+        "orders",
+        {
+            "side_norm": "TEXT",
+            "operated_at": "TEXT",
+            "ordered_qty": "REAL",
+            "executed_qty": "REAL",
+            "limit_price": "REAL",
+            "avg_price": "REAL",
+            "operated_amount": "REAL",
+            "currency": "TEXT",
         },
     )
 

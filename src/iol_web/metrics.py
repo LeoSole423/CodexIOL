@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from .db import Snapshot
 
@@ -41,8 +41,54 @@ def compute_return(latest: Optional[Snapshot], base: Optional[Snapshot]) -> Retu
         pct=_pct_change(base_v, latest_v),
     )
 
+def compute_daily_return_from_assets(latest: Optional[Snapshot], assets: Iterable[Dict[str, Any]]) -> ReturnBlock:
+    """
+    Fallback for "Delta diario" when there is only one snapshot in the DB.
+
+    Uses IOL-provided per-asset daily variation (daily_var_pct) on the latest snapshot to build a
+    portfolio-level delta for titles. This does not require a previous snapshot.
+    """
+    if not latest:
+        return compute_return(None, None)
+
+    delta = 0.0
+    denom_assets = 0.0
+    for a in assets or []:
+        try:
+            v = float(a.get("total_value") or 0.0)
+        except Exception:
+            v = 0.0
+        pct = a.get("daily_var_pct")
+        if pct is None:
+            continue
+        try:
+            pct_f = float(pct)
+        except Exception:
+            continue
+        delta += v * pct_f / 100.0
+        denom_assets += v
+
+    denom = None
+    if latest.titles_value is not None:
+        try:
+            denom = float(latest.titles_value)
+        except Exception:
+            denom = None
+    if denom is None:
+        denom = denom_assets
+
+    pct_out = None
+    if denom:
+        pct_out = delta / denom * 100.0
+
+    return ReturnBlock(
+        from_date=latest.snapshot_date,
+        to_date=latest.snapshot_date,
+        delta=delta,
+        pct=pct_out,
+    )
+
 
 def target_date(latest_date: str, days: int) -> str:
     d = date.fromisoformat(latest_date)
     return (d - timedelta(days=days)).isoformat()
-

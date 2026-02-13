@@ -19,8 +19,11 @@
           <div class="kpi-mini"><div class="k">Sem</div><div class="v" id="retWeekly">-</div></div>
           <div class="kpi-mini"><div class="k">Mes</div><div class="v" id="retMonthly">-</div></div>
           <div class="kpi-mini"><div class="k">YTD</div><div class="v" id="retYtd">-</div></div>
-          <div class="kpi-mini"><div class="k">Año</div><div class="v" id="retYearly">-</div></div>
+          <div class="kpi-mini"><div class="k">A&ntilde;o</div><div class="v" id="retYearly">-</div></div>
+          <div class="kpi-mini"><div class="k">IPC mes</div><div class="v" id="inflMonthly">-</div></div>
+          <div class="kpi-mini"><div class="k">Real mes</div><div class="v" id="realMonthly">-</div></div>
         </div>
+        <div class="hint" id="returnsHint" style="display:none;"></div>
       </div>
     </div>
   </section>
@@ -28,7 +31,7 @@
   <section class="grid">
     <div class="card">
       <div class="card-head">
-        <h2>Evolución</h2>
+        <h2>Evoluci&oacute;n</h2>
         <div class="segmented" id="rangeButtons">
           <button data-range="30" class="seg on">1M</button>
           <button data-range="90" class="seg">3M</button>
@@ -40,7 +43,7 @@
         <canvas id="chartTotal"></canvas>
       </div>
       <div class="hint" id="noDataHint" style="display:none;">
-        No hay snapshots todavía. Corre <code>iol snapshot run</code> o levanta el scheduler.
+        No hay snapshots todav&iacute;a. Corre <code>iol snapshot run</code> o levanta el scheduler.
       </div>
     </div>
 
@@ -49,7 +52,7 @@
         <h2>Allocation</h2>
         <div class="controls">
           <select id="allocGroupBy" class="select">
-            <option value="symbol">Por símbolo</option>
+            <option value="symbol">Por s&iacute;mbolo</option>
             <option value="type">Por tipo</option>
             <option value="market">Por mercado</option>
             <option value="currency">Por moneda</option>
@@ -69,26 +72,35 @@
     </div>
   </section>
 
+  <section class="card">
+    <div class="card-head">
+      <h2>Inflaci&oacute;n vs retorno (mensual)</h2>
+    </div>
+    <div class="table" id="tblInflationCompare"><div class="hint">Cargando inflaci&oacute;n...</div></div>
+    <div class="hint" id="inflationHint" style="display:none;"></div>
+  </section>
+
   <section class="section-head">
     <div class="section-title">
       <h2>Top movers</h2>
-      <div class="badge" id="moversPeriodBadge">día</div>
+      <div class="badge" id="moversPeriodBadge">d&iacute;a</div>
     </div>
     <div class="section-controls">
       <div class="segmented" id="moversPeriodButtons">
-        <button data-period="daily" class="seg on">Día</button>
+        <button data-period="daily" class="seg on">D&iacute;a</button>
         <button data-period="weekly" class="seg">Semana</button>
         <button data-period="monthly" class="seg">Mes</button>
-        <button data-period="yearly" class="seg">Año</button>
+        <button data-period="yearly" class="seg">A&ntilde;o</button>
         <button data-period="ytd" class="seg">YTD</button>
       </div>
       <div class="picker" id="moversPicker" style="display:none;">
-        <button class="pick-btn" id="moversPickPrev" type="button">‹</button>
+        <button class="pick-btn" id="moversPickPrev" type="button">&lsaquo;</button>
         <div class="pick-label" id="moversPickLabel">-</div>
-        <button class="pick-btn" id="moversPickNext" type="button">›</button>
+        <button class="pick-btn" id="moversPickNext" type="button">&rsaquo;</button>
       </div>
     </div>
   </section>
+  <div class="hint" id="moversHint" style="display:none;"></div>
 
   <section class="grid">
     <div class="card">
@@ -96,8 +108,19 @@
       <div class="table" id="tblGainersDaily"></div>
     </div>
     <div class="card">
-      <div class="card-head"><h2>Top perdidas</h2></div>
+      <div class="card-head"><h2>Top p&eacute;rdidas</h2></div>
       <div class="table" id="tblLosersDaily"></div>
+    </div>
+  </section>
+
+  <section class="grid" id="moversUsdGrid" style="display:none;">
+    <div class="card">
+      <div class="card-head"><h2>Top ganadores (USD)</h2></div>
+      <div class="table" id="tblGainersDailyUSD"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Top p&eacute;rdidas (USD)</h2></div>
+      <div class="table" id="tblLosersDailyUSD"></div>
     </div>
   </section>
 
@@ -107,7 +130,7 @@
       <div class="table" id="tblGainersTotal"></div>
     </div>
     <div class="card">
-      <div class="card-head"><h2>Top perdidas (acumulado)</h2></div>
+      <div class="card-head"><h2>Top p&eacute;rdidas (acumulado)</h2></div>
       <div class="table" id="tblLosersTotal"></div>
     </div>
   </section>

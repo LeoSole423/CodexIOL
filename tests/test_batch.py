@@ -52,6 +52,7 @@ def _tmp_config(db_path: str) -> Config:
         commission_min=0.0,
         db_path=db_path,
         market_tz="America/Argentina/Buenos_Aires",
+        market_open_time="11:00",
         market_close_time="18:00",
         store_raw=False,
     )

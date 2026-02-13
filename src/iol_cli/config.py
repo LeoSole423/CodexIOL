@@ -15,6 +15,7 @@ class Config:
     commission_min: float
     db_path: str
     market_tz: str
+    market_open_time: str
     market_close_time: str
     store_raw: bool
 
@@ -76,6 +77,7 @@ def load_config() -> Config:
     commission_min = _get_float("IOL_COMMISSION_MIN", 0.0)
     db_path = os.getenv("IOL_DB_PATH", "data/iol_history.db").strip()
     market_tz = os.getenv("IOL_MARKET_TZ", "America/Argentina/Buenos_Aires").strip()
+    market_open_time = os.getenv("IOL_MARKET_OPEN_TIME", "11:00").strip()
     market_close_time = os.getenv("IOL_MARKET_CLOSE_TIME", "18:00").strip()
     store_raw = _get_bool("IOL_STORE_RAW", False)
 
@@ -88,6 +90,7 @@ def load_config() -> Config:
         commission_min=commission_min,
         db_path=db_path,
         market_tz=market_tz,
+        market_open_time=market_open_time,
         market_close_time=market_close_time,
         store_raw=store_raw,
     )

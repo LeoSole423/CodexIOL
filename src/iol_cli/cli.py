@@ -578,10 +578,33 @@ def snapshot_run(
     ctx: typer.Context,
     country: str = typer.Option("argentina", "--country"),
     source: str = typer.Option("manual", "--source"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite an existing snapshot even if it is closer to the market close time.",
+    ),
+    mode: str = typer.Option(
+        "close",
+        "--mode",
+        help="Snapshot mode: 'close' (default) keeps daily semantics; 'live' uses today's date intraday.",
+    ),
+    only_market_open: bool = typer.Option(
+        False,
+        "--only-market-open",
+        help="If set, skips snapshot when the market is closed (uses IOL_MARKET_OPEN_TIME/IOL_MARKET_CLOSE_TIME).",
+    ),
 ):
     client = _get_client(ctx.obj)
     try:
-        result = run_snapshot(client, ctx.obj.config, country, source=source)
+        result = run_snapshot(
+            client,
+            ctx.obj.config,
+            country,
+            source=source,
+            force=force,
+            mode=mode,
+            only_market_open=only_market_open,
+        )
         _print_json(result)
     except Exception as exc:
         console.print(f"Snapshot error: {exc}")

@@ -2,7 +2,7 @@
 {% block content %}
   <section class="hero">
     <h1>Historia</h1>
-    <p class="sub">Evolución del total del portafolio (ARS).</p>
+    <p class="sub">Evoluci&oacute;n del total del portafolio (ARS).</p>
   </section>
 
   <section class="card">
@@ -13,5 +13,26 @@
       <canvas id="chartHistory"></canvas>
     </div>
   </section>
-{% endblock %}
 
+  <section class="grid">
+    <div class="card">
+      <div class="card-head">
+        <h2>Portfolio vs Inflaci&oacute;n (base 100)</h2>
+      </div>
+      <div style="height:360px">
+        <canvas id="chartInflationSeries"></canvas>
+      </div>
+      <div class="hint" id="inflationSeriesHint" style="display:none;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Retorno anual vs Inflaci&oacute;n anual</h2>
+      </div>
+      <div style="height:360px">
+        <canvas id="chartInflationAnnual"></canvas>
+      </div>
+      <div class="hint" id="inflationAnnualHint" style="display:none;"></div>
+    </div>
+  </section>
+{% endblock %}

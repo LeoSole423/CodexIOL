@@ -90,6 +90,12 @@ def validate_plan(plan: Dict[str, Any]) -> None:
             symbol = op.get("symbol")
             if not symbol:
                 raise BatchError(f"op[{idx}].symbol is required")
+            if "notional_divisor" in op and op.get("notional_divisor") is not None:
+                try:
+                    if float(op.get("notional_divisor")) <= 0:
+                        raise BatchError(f"op[{idx}].notional_divisor must be > 0")
+                except ValueError:
+                    raise BatchError(f"op[{idx}].notional_divisor must be a number")
             order_type = str(op.get("order_type") or "limit").lower().strip()
             if order_type not in ("limit", "market"):
                 raise BatchError(f"op[{idx}].order_type must be 'limit' or 'market'")
@@ -237,6 +243,15 @@ def _risk_warnings(kind: str, op: Dict[str, Any], snapshot_ctx: Dict[str, Any], 
         symbol = str(op.get("symbol") or "")
         qty = op.get("quantity")
         amt = op.get("amount")
+        # Some instruments (e.g. AR bonds) are quoted "per 100 nominal" in IOL.
+        # Plans may specify a divisor to make cash/notional warnings comparable to ARS cash.
+        notional_divisor = op.get("notional_divisor", 1)
+        try:
+            notional_divisor_f = float(notional_divisor)
+            if notional_divisor_f <= 0:
+                notional_divisor_f = 1.0
+        except Exception:
+            notional_divisor_f = 1.0
         if side == "sell" and qty is not None:
             owned = float(holdings.get(symbol, 0.0) or 0.0)
             if float(qty) > owned + 1e-9:
@@ -249,7 +264,7 @@ def _risk_warnings(kind: str, op: Dict[str, Any], snapshot_ctx: Dict[str, Any], 
                         if float(amt) > cash_ars_f + 1e-9:
                             warnings.append(f"BUY amount {amt} ARS > cash_disponible_ars {cash_ars_f} (snapshot)")
                     elif qty is not None and implied_price is not None:
-                        notional = float(qty) * float(implied_price)
+                        notional = float(qty) * float(implied_price) / notional_divisor_f
                         if notional > cash_ars_f + 1e-9:
                             warnings.append(f"BUY notional {notional:.2f} ARS > cash_disponible_ars {cash_ars_f} (snapshot)")
                 except Exception:

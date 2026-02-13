@@ -18,7 +18,9 @@ IOL_COMMISSION_RATE=0.0
 IOL_COMMISSION_MIN=0.0
 IOL_DB_PATH=data/iol_history.db
 IOL_MARKET_TZ=America/Argentina/Buenos_Aires
+IOL_MARKET_OPEN_TIME=11:00
 IOL_MARKET_CLOSE_TIME=18:00
+IOL_SNAPSHOT_INTERVAL_MIN=5
 IOL_STORE_RAW=0
 ```
 
@@ -27,6 +29,15 @@ Levantar contenedor persistente:
 
 ```
 docker compose up -d --build
+```
+
+## Autoarranque (Windows)
+- Este `docker-compose.yml` incluye `restart: unless-stopped`, asi que los contenedores se levantan solos cuando Docker arranca.
+- Asegurate de tener habilitado en Docker Desktop: `Settings -> General -> Start Docker Desktop when you log in`.
+- Opcional: instalar una tarea programada (por usuario) que corre `docker compose up -d` al iniciar sesion:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_startup_task.ps1
 ```
 
 ## Web dashboard (portfolio)
@@ -48,6 +59,13 @@ Ejecutar comandos:
 docker exec -it iol-cli iol auth test
 ```
 
+Atajo opcional (PowerShell) para no repetir `docker exec`:
+
+```powershell
+function iolc { docker exec -it iol-cli iol @args }
+# ejemplo: iolc advisor context
+```
+
 Scheduler de snapshots (cron + catch-up al iniciar):
 
 ```
@@ -55,6 +73,9 @@ docker exec -it iol-scheduler tail -n 50 /var/log/cron.log
 ```
 
 ## Comandos principales
+
+Nota: los comandos `iol ...` de esta seccion asumen que estas dentro del contenedor.
+Si estas en host, antepone `docker exec -it iol-cli` (o usa `iolc`).
 
 ```
 iol portfolio --country argentina
@@ -142,6 +163,7 @@ Evidencia (JSON crudo, opcional):
 ## Notas
 - `IOL_API_URL` define la URL de la API (no se usa sandbox).
 - El snapshot diario guarda `cash_disponible_ars`/`cash_disponible_usd` y usa `totalEnPesos` de `/api/v2/estadocuenta` para el total.
+- `iol snapshot run` evita pisar un snapshot existente si el nuevo estÃ¡ mÃ¡s lejos del horario de cierre (por ejemplo, si lo corrÃ©s durante horario de mercado). UsÃ¡ `iol snapshot run --force` para sobrescribir igualmente.
 - Las ordenes individuales requieren confirmacion (prompt interactivo o `--confirm CONFIRMAR`).
 - `iol batch run` solo ejecuta si pasas `--confirm CONFIRMAR` (sin eso se comporta como dry-run).
 - Para automatizacion, podes ejecutar sin prompt interactivo usando `--confirm CONFIRMAR` (igual sigue siendo una orden real).

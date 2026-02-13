@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from iol_web import db as webdb
-from iol_web.metrics import compute_return, target_date
+from iol_web.metrics import compute_daily_return_from_assets, compute_return, target_date
 
 
 def _mk_conn():
@@ -71,6 +71,20 @@ class TestWebMetrics(unittest.TestCase):
         block = compute_return(latest, base)
         self.assertEqual(block.delta, 10.0)
         self.assertIsNone(block.pct)
+
+    def test_daily_return_from_assets_fallback(self):
+        latest = webdb.Snapshot(snapshot_date="2026-02-06", total_value=1000.0, titles_value=500.0)
+        assets = [
+            {"symbol": "AAA", "total_value": 200.0, "daily_var_pct": 10.0},   # +20
+            {"symbol": "BBB", "total_value": 300.0, "daily_var_pct": -2.0},   # -6
+            {"symbol": "CCC", "total_value": 0.0, "daily_var_pct": 5.0},      # 0
+            {"symbol": "DDD", "total_value": 10.0, "daily_var_pct": None},    # ignored
+        ]
+        block = compute_daily_return_from_assets(latest, assets)
+        self.assertEqual(block.from_date, "2026-02-06")
+        self.assertEqual(block.to_date, "2026-02-06")
+        self.assertAlmostEqual(block.delta, 14.0)
+        self.assertAlmostEqual(block.pct, 14.0 / 500.0 * 100.0)
 
     def test_target_date(self):
         self.assertEqual(target_date("2026-02-06", 7), "2026-01-30")

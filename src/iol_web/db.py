@@ -12,8 +12,13 @@ class Snapshot:
     total_value: float
     currency: Optional[str] = None
     titles_value: Optional[float] = None
+    cash_total_ars: Optional[float] = None
     cash_disponible_ars: Optional[float] = None
     cash_disponible_usd: Optional[float] = None
+    retrieved_at: Optional[str] = None
+    close_time: Optional[str] = None
+    minutes_from_close: Optional[int] = None
+    source: Optional[str] = None
 
 
 def resolve_db_path() -> str:
@@ -44,19 +49,28 @@ def _row_to_snapshot(row: sqlite3.Row) -> Snapshot:
         total_value=float(row["total_value"] or 0.0),
         currency=row["currency"] if "currency" in keys else None,
         titles_value=float(row["titles_value"]) if ("titles_value" in keys and row["titles_value"] is not None) else None,
+        cash_total_ars=float(row["cash_total_ars"])
+        if ("cash_total_ars" in keys and row["cash_total_ars"] is not None)
+        else None,
         cash_disponible_ars=float(row["cash_disponible_ars"])
         if ("cash_disponible_ars" in keys and row["cash_disponible_ars"] is not None)
         else None,
         cash_disponible_usd=float(row["cash_disponible_usd"])
         if ("cash_disponible_usd" in keys and row["cash_disponible_usd"] is not None)
         else None,
+        retrieved_at=str(row["retrieved_at"]) if ("retrieved_at" in keys and row["retrieved_at"] is not None) else None,
+        close_time=str(row["close_time"]) if ("close_time" in keys and row["close_time"] is not None) else None,
+        minutes_from_close=int(row["minutes_from_close"])
+        if ("minutes_from_close" in keys and row["minutes_from_close"] is not None)
+        else None,
+        source=str(row["source"]) if ("source" in keys and row["source"] is not None) else None,
     )
 
 
 def latest_snapshot(conn: sqlite3.Connection) -> Optional[Snapshot]:
     row = conn.execute(
         """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd
+        SELECT *
         FROM portfolio_snapshots
         ORDER BY snapshot_date DESC
         LIMIT 1
@@ -68,7 +82,7 @@ def latest_snapshot(conn: sqlite3.Connection) -> Optional[Snapshot]:
 def earliest_snapshot(conn: sqlite3.Connection) -> Optional[Snapshot]:
     row = conn.execute(
         """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd
+        SELECT *
         FROM portfolio_snapshots
         ORDER BY snapshot_date ASC
         LIMIT 1
@@ -80,7 +94,7 @@ def earliest_snapshot(conn: sqlite3.Connection) -> Optional[Snapshot]:
 def snapshot_before(conn: sqlite3.Connection, before_date: str) -> Optional[Snapshot]:
     row = conn.execute(
         """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd
+        SELECT *
         FROM portfolio_snapshots
         WHERE snapshot_date < ?
         ORDER BY snapshot_date DESC
@@ -94,7 +108,7 @@ def snapshot_before(conn: sqlite3.Connection, before_date: str) -> Optional[Snap
 def snapshot_on_or_before(conn: sqlite3.Connection, target_date: str) -> Optional[Snapshot]:
     row = conn.execute(
         """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd
+        SELECT *
         FROM portfolio_snapshots
         WHERE snapshot_date <= ?
         ORDER BY snapshot_date DESC
@@ -109,7 +123,7 @@ def first_snapshot_of_year(conn: sqlite3.Connection, year: int, latest_date: str
     start = date(year, 1, 1).isoformat()
     row = conn.execute(
         """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd
+        SELECT *
         FROM portfolio_snapshots
         WHERE snapshot_date >= ? AND snapshot_date <= ?
         ORDER BY snapshot_date ASC
@@ -123,7 +137,7 @@ def first_snapshot_of_year(conn: sqlite3.Connection, year: int, latest_date: str
 def first_snapshot_in_range(conn: sqlite3.Connection, start_date: str, end_date: str) -> Optional[Snapshot]:
     row = conn.execute(
         """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd
+        SELECT *
         FROM portfolio_snapshots
         WHERE snapshot_date >= ? AND snapshot_date <= ?
         ORDER BY snapshot_date ASC
@@ -137,7 +151,7 @@ def first_snapshot_in_range(conn: sqlite3.Connection, start_date: str, end_date:
 def last_snapshot_in_range(conn: sqlite3.Connection, start_date: str, end_date: str) -> Optional[Snapshot]:
     row = conn.execute(
         """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd
+        SELECT *
         FROM portfolio_snapshots
         WHERE snapshot_date >= ? AND snapshot_date <= ?
         ORDER BY snapshot_date DESC
@@ -165,6 +179,51 @@ def snapshots_series(conn: sqlite3.Connection, date_from: Optional[str], date_to
         (f, t),
     ).fetchall()
     return [(str(r["snapshot_date"]), float(r["total_value"] or 0.0)) for r in rows]
+
+
+def monthly_first_last_series(conn: sqlite3.Connection, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+    """
+    Calendar-month aggregation of snapshots.
+
+    Returns one row per month (YYYY-MM) with first/last snapshot dates and values inside [date_from, date_to].
+    """
+    rows = conn.execute(
+        """
+        WITH monthly AS (
+          SELECT
+            substr(snapshot_date, 1, 7) AS month,
+            MIN(snapshot_date) AS first_date,
+            MAX(snapshot_date) AS last_date
+          FROM portfolio_snapshots
+          WHERE snapshot_date >= ? AND snapshot_date <= ?
+          GROUP BY month
+        )
+        SELECT
+          m.month AS month,
+          m.first_date AS first_date,
+          m.last_date AS last_date,
+          s1.total_value AS first_value,
+          s2.total_value AS last_value
+        FROM monthly m
+        JOIN portfolio_snapshots s1 ON s1.snapshot_date = m.first_date
+        JOIN portfolio_snapshots s2 ON s2.snapshot_date = m.last_date
+        ORDER BY m.month ASC
+        """,
+        (date_from, date_to),
+    ).fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows or []:
+        out.append(
+            {
+                "month": str(r["month"]),
+                "first_date": str(r["first_date"]),
+                "last_date": str(r["last_date"]),
+                "first_value": float(r["first_value"] or 0.0),
+                "last_value": float(r["last_value"] or 0.0),
+            }
+        )
+    return out
 
 
 def assets_for_snapshot(conn: sqlite3.Connection, snapshot_date: str) -> List[Dict[str, Any]]:
@@ -223,3 +282,104 @@ def allocation(conn: sqlite3.Connection, snapshot_date: str, group_by: str) -> L
         out.append((str(key), float(r["v"] or 0.0)))
     out.sort(key=lambda kv: kv[1], reverse=True)
     return out
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {r[1] for r in rows}  # r[1] = column name
+    except Exception:
+        return set()
+
+
+def orders_cashflows_by_symbol(
+    conn: sqlite3.Connection,
+    dt_from: str,
+    dt_to: str,
+    currency: str = "peso_Argentino",
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, int]]:
+    """
+    Aggregate executed order cashflows for the period [dt_from, dt_to].
+
+    Returns (cashflows_by_symbol, stats)
+      cashflows_by_symbol[symbol] = {"buy_amount": x, "sell_amount": y}
+      stats = {"total": n, "classified": n, "unclassified": n, "amount_missing": n}
+    """
+    cols = _table_columns(conn, "orders")
+    if not cols:
+        return {}, {"total": 0, "classified": 0, "unclassified": 0, "amount_missing": 0}
+
+    ts_col = "operated_at" if "operated_at" in cols else ("updated_at" if "updated_at" in cols else "created_at")
+    side_col = "side_norm" if "side_norm" in cols else ("side" if "side" in cols else None)
+    has_amount = "operated_amount" in cols
+    has_currency = "currency" in cols
+
+    if side_col is None:
+        return {}, {"total": 0, "classified": 0, "unclassified": 0, "amount_missing": 0}
+
+    where = [
+        "status = 'terminada'",
+        "symbol IS NOT NULL",
+        "TRIM(symbol) <> ''",
+        f"COALESCE({ts_col}, created_at) >= ?",
+        f"COALESCE({ts_col}, created_at) <= ?",
+    ]
+    params: List[Any] = [dt_from, dt_to]
+    if has_currency and currency and currency not in ("all",):
+        if currency == "unknown":
+            where.append("(currency IS NULL OR TRIM(currency) = '')")
+        elif currency == "peso_Argentino":
+            # Back-compat: older/newer IOL payloads may not include currency. Treat missing as ARS for dashboard PnL,
+            # otherwise we'd incorrectly show sold positions as -100% due to missing cashflows.
+            where.append("(currency = ? OR currency IS NULL OR TRIM(currency) = '')")
+            params.append(currency)
+        else:
+            where.append("currency = ?")
+            params.append(currency)
+
+    amount_expr = "operated_amount" if has_amount else "(COALESCE(quantity, 0) * COALESCE(price, 0))"
+    sql = f"""
+        SELECT
+            symbol AS symbol,
+            {side_col} AS side,
+            {amount_expr} AS amount
+        FROM orders
+        WHERE {" AND ".join(where)}
+    """
+    rows = conn.execute(sql, tuple(params)).fetchall()
+
+    def _norm_side(v: Any) -> Optional[str]:
+        s = str(v or "").strip().lower()
+        if s in ("buy", "compra"):
+            return "buy"
+        if s in ("sell", "venta"):
+            return "sell"
+        return None
+
+    out: Dict[str, Dict[str, float]] = {}
+    total = classified = unclassified = amount_missing = 0
+    for r in rows:
+        total += 1
+        sym = str(r["symbol"])
+        side = _norm_side(r["side"])
+        amt = r["amount"]
+        if amt is None:
+            amount_missing += 1
+            continue
+        try:
+            amt_f = float(amt)
+        except Exception:
+            amount_missing += 1
+            continue
+        if side is None:
+            unclassified += 1
+            continue
+        classified += 1
+        bucket = out.setdefault(sym, {"buy_amount": 0.0, "sell_amount": 0.0})
+        if side == "buy":
+            bucket["buy_amount"] += amt_f
+        else:
+            bucket["sell_amount"] += amt_f
+
+    stats = {"total": total, "classified": classified, "unclassified": unclassified, "amount_missing": amount_missing}
+    return out, stats
