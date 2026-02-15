@@ -54,8 +54,46 @@ Desktop.ini
 
 # ---- Project data / outputs ----
 # These often contain personal portfolio history, API responses, or generated reports.
-data/
-reports/
+# Keep only folder structure (README/.gitkeep), never real contents.
+data/*
+reports/*
+
+# Allow directory skeleton metadata
+!data/README.md
+!data/.gitkeep
+!data/context/
+data/context/*
+!data/context/.gitkeep
+!data/evidence/
+data/evidence/*
+!data/evidence/.gitkeep
+!data/cache/
+data/cache/*
+!data/cache/.gitkeep
+!data/plans/
+data/plans/*
+!data/plans/.gitkeep
+
+!reports/README.md
+!reports/.gitkeep
+!reports/analisis/
+reports/analisis/*
+!reports/analisis/.gitkeep
+!reports/macro/
+reports/macro/*
+!reports/macro/.gitkeep
+!reports/rebalance/
+reports/rebalance/*
+!reports/rebalance/.gitkeep
+!reports/rebalance/archive/
+reports/rebalance/archive/*
+!reports/rebalance/archive/.gitkeep
+!reports/dca/
+reports/dca/*
+!reports/dca/.gitkeep
+!reports/latest/
+reports/latest/*
+!reports/latest/.gitkeep
 
 # Databases (extra safety if created elsewhere)
 *.db

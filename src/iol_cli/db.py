@@ -147,6 +147,117 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS advisor_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            symbol TEXT,
+            snapshot_date TEXT,
+            due_date TEXT,
+            closed_at TEXT,
+            closed_reason TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advisor_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            symbol TEXT,
+            snapshot_date TEXT,
+            alert_id INTEGER,
+            payload_json TEXT,
+            FOREIGN KEY(alert_id) REFERENCES advisor_alerts(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advisor_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            query TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            published_date TEXT,
+            retrieved_at_utc TEXT NOT NULL,
+            claim TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            date_confidence TEXT NOT NULL,
+            notes TEXT,
+            conflict_key TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_symbol_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            market TEXT NOT NULL DEFAULT 'bcba',
+            last_price REAL,
+            bid REAL,
+            ask REAL,
+            spread_pct REAL,
+            daily_var_pct REAL,
+            operations_count REAL,
+            volume_amount REAL,
+            source TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advisor_opportunity_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at_utc TEXT NOT NULL,
+            as_of TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            universe TEXT NOT NULL,
+            budget_ars REAL NOT NULL,
+            top_n INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            config_json TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advisor_opportunity_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            candidate_type TEXT NOT NULL,
+            score_total REAL NOT NULL,
+            score_risk REAL NOT NULL,
+            score_value REAL NOT NULL,
+            score_momentum REAL NOT NULL,
+            score_catalyst REAL NOT NULL,
+            entry_low REAL,
+            entry_high REAL,
+            suggested_weight_pct REAL,
+            suggested_amount_ars REAL,
+            reason_summary TEXT NOT NULL,
+            risk_flags_json TEXT,
+            filters_passed INTEGER NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES advisor_opportunity_runs(id)
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS batch_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_utc TEXT NOT NULL,
@@ -182,6 +293,15 @@ def init_db(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_advisor_logs_created ON advisor_logs(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_advisor_alerts_status_due ON advisor_alerts(status, due_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_advisor_alerts_symbol ON advisor_alerts(symbol)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_advisor_events_created ON advisor_events(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_advisor_events_alert ON advisor_events(alert_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_evidence_symbol_date ON advisor_evidence(symbol, retrieved_at_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_market_snapshots_symbol_date ON market_symbol_snapshots(symbol, snapshot_date)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_market_snapshots_day_symbol_source ON market_symbol_snapshots(snapshot_date, symbol, source)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_runs_asof ON advisor_opportunity_runs(as_of)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_candidates_run_score ON advisor_opportunity_candidates(run_id, score_total DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_account_balances_date ON account_balances(snapshot_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_batch_ops_run ON batch_ops(run_id)")
     conn.commit()
