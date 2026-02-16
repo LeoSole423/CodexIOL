@@ -14,6 +14,10 @@ class TestUnionMoversPnL(unittest.TestCase):
         self.assertEqual(row["base_total_value"], 100.0)
         self.assertAlmostEqual(row["delta_value"], 20.0)
         self.assertAlmostEqual(row["delta_pct"], 20.0)
+        self.assertTrue(row["closed_position"])
+        self.assertTrue(row["liquidated_to_cash"])
+        self.assertFalse(row["cashflow_missing_for_close"])
+        self.assertEqual(row["flow_tag"], "liquidated")
 
     def test_roundtrip_buy_sell_flat_end_value(self):
         base = []
@@ -33,6 +37,20 @@ class TestUnionMoversPnL(unittest.TestCase):
         row = next(r for r in out if r["symbol"] == "CCC")
         self.assertAlmostEqual(row["delta_value"], -20.0)
         self.assertAlmostEqual(row["delta_pct"], -20.0)
+        self.assertFalse(row["closed_position"])
+        self.assertEqual(row["flow_tag"], "none")
+
+    def test_closed_position_without_cashflow_is_flagged(self):
+        base = [{"symbol": "DDD", "description": "D", "total_value": 100.0}]
+        end = []
+        out = build_union_movers_pnl(base, end, {})
+        row = next(r for r in out if r["symbol"] == "DDD")
+        self.assertAlmostEqual(row["delta_value"], -100.0)
+        self.assertAlmostEqual(row["delta_pct"], -100.0)
+        self.assertTrue(row["closed_position"])
+        self.assertFalse(row["liquidated_to_cash"])
+        self.assertTrue(row["cashflow_missing_for_close"])
+        self.assertEqual(row["flow_tag"], "missing_cashflow")
 
     def test_includes_symbols_seen_only_in_orders(self):
         base = []
@@ -46,4 +64,3 @@ class TestUnionMoversPnL(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -303,19 +304,24 @@ def orders_cashflows_by_symbol(
 
     Returns (cashflows_by_symbol, stats)
       cashflows_by_symbol[symbol] = {"buy_amount": x, "sell_amount": y}
-      stats = {"total": n, "classified": n, "unclassified": n, "amount_missing": n}
+      stats = {"total": n, "classified": n, "unclassified": n, "amount_missing": n, "ignored": n}
     """
     cols = _table_columns(conn, "orders")
     if not cols:
-        return {}, {"total": 0, "classified": 0, "unclassified": 0, "amount_missing": 0}
+        return {}, {"total": 0, "classified": 0, "unclassified": 0, "amount_missing": 0, "ignored": 0}
 
     ts_col = "operated_at" if "operated_at" in cols else ("updated_at" if "updated_at" in cols else "created_at")
-    side_col = "side_norm" if "side_norm" in cols else ("side" if "side" in cols else None)
-    has_amount = "operated_amount" in cols
+    side_expr = None
+    if "side_norm" in cols and "side" in cols:
+        side_expr = "COALESCE(NULLIF(TRIM(side_norm), ''), side)"
+    elif "side_norm" in cols:
+        side_expr = "side_norm"
+    elif "side" in cols:
+        side_expr = "side"
     has_currency = "currency" in cols
 
-    if side_col is None:
-        return {}, {"total": 0, "classified": 0, "unclassified": 0, "amount_missing": 0}
+    if side_expr is None:
+        return {}, {"total": 0, "classified": 0, "unclassified": 0, "amount_missing": 0, "ignored": 0}
 
     where = [
         "status = 'terminada'",
@@ -337,12 +343,17 @@ def orders_cashflows_by_symbol(
             where.append("currency = ?")
             params.append(currency)
 
-    amount_expr = "operated_amount" if has_amount else "(COALESCE(quantity, 0) * COALESCE(price, 0))"
+    operated_amount_expr = "operated_amount" if "operated_amount" in cols else "NULL"
+    quantity_expr = "quantity" if "quantity" in cols else "NULL"
+    price_expr = "price" if "price" in cols else "NULL"
+
     sql = f"""
         SELECT
             symbol AS symbol,
-            {side_col} AS side,
-            {amount_expr} AS amount
+            {side_expr} AS side,
+            {operated_amount_expr} AS operated_amount,
+            {quantity_expr} AS quantity,
+            {price_expr} AS price
         FROM orders
         WHERE {" AND ".join(where)}
     """
@@ -350,30 +361,52 @@ def orders_cashflows_by_symbol(
 
     def _norm_side(v: Any) -> Optional[str]:
         s = str(v or "").strip().lower()
-        if s in ("buy", "compra"):
+        if not s:
+            return None
+        s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+        s = " ".join(s.split())
+        if s in ("buy", "compra", "suscripcion fci"):
             return "buy"
-        if s in ("sell", "venta"):
+        if s in ("sell", "venta", "rescate fci", "pago de amortizacion"):
             return "sell"
+        if s in ("pago de dividendos", "pago de renta", "ignore"):
+            return "ignore"
         return None
 
     out: Dict[str, Dict[str, float]] = {}
-    total = classified = unclassified = amount_missing = 0
+    total = classified = unclassified = amount_missing = ignored = 0
     for r in rows:
         total += 1
         sym = str(r["symbol"])
         side = _norm_side(r["side"])
-        amt = r["amount"]
-        if amt is None:
-            amount_missing += 1
-            continue
-        try:
-            amt_f = float(amt)
-        except Exception:
-            amount_missing += 1
-            continue
         if side is None:
             unclassified += 1
             continue
+        if side == "ignore":
+            ignored += 1
+            continue
+
+        amt_f: Optional[float]
+        op_amount = r["operated_amount"]
+        qty = r["quantity"]
+        price = r["price"]
+        if op_amount is not None:
+            try:
+                amt_f = float(op_amount)
+            except Exception:
+                amt_f = None
+        elif qty is not None and price is not None:
+            try:
+                amt_f = float(qty) * float(price)
+            except Exception:
+                amt_f = None
+        else:
+            amt_f = None
+
+        if amt_f is None:
+            amount_missing += 1
+            continue
+
         classified += 1
         bucket = out.setdefault(sym, {"buy_amount": 0.0, "sell_amount": 0.0})
         if side == "buy":
@@ -381,5 +414,11 @@ def orders_cashflows_by_symbol(
         else:
             bucket["sell_amount"] += amt_f
 
-    stats = {"total": total, "classified": classified, "unclassified": unclassified, "amount_missing": amount_missing}
+    stats = {
+        "total": total,
+        "classified": classified,
+        "unclassified": unclassified,
+        "amount_missing": amount_missing,
+        "ignored": ignored,
+    }
     return out, stats

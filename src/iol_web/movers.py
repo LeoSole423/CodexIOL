@@ -75,6 +75,14 @@ def build_union_movers_pnl(
         pnl = (end_total - base_total) + sells - buys
         exposure = base_total + buys
         pct = None if exposure == 0 else (pnl / exposure * 100.0)
+        closed_position = (base_total > 0.0) and (end_total == 0.0)
+        liquidated_to_cash = closed_position and (sells > 0.0)
+        cashflow_missing_for_close = closed_position and (sells == 0.0)
+        flow_tag = "none"
+        if liquidated_to_cash:
+            flow_tag = "liquidated"
+        elif cashflow_missing_for_close:
+            flow_tag = "missing_cashflow"
 
         out.append(
             {
@@ -94,6 +102,10 @@ def build_union_movers_pnl(
                 "buy_amount": buys,
                 "sell_amount": sells,
                 "exposure": exposure,
+                "closed_position": closed_position,
+                "liquidated_to_cash": liquidated_to_cash,
+                "cashflow_missing_for_close": cashflow_missing_for_close,
+                "flow_tag": flow_tag,
             }
         )
     return out

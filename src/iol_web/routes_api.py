@@ -650,7 +650,7 @@ def movers(
                 orders_stats = stats
                 if stats.get("total", 0) == 0:
                     warnings.append("ORDERS_NONE")
-                elif stats.get("classified", 0) == 0 or stats.get("unclassified", 0) > 0 or stats.get("amount_missing", 0) > 0:
+                elif stats.get("unclassified", 0) > 0 or stats.get("amount_missing", 0) > 0:
                     warnings.append("ORDERS_INCOMPLETE")
                 enriched = build_union_movers_pnl(base_assets, end_assets_period, cashflows)
 

@@ -1,5 +1,6 @@
 import os
 import json
+import unicodedata
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -132,10 +133,16 @@ def _sum_disponible(accounts: List[Dict[str, Any]], currency: str) -> float:
 
 def _norm_side(side: Any) -> Optional[str]:
     v = str(side or "").strip().lower()
-    if v in ("buy", "compra"):
+    if not v:
+        return None
+    v = "".join(ch for ch in unicodedata.normalize("NFKD", v) if not unicodedata.combining(ch))
+    v = " ".join(v.split())
+    if v in ("buy", "compra", "suscripcion fci"):
         return "buy"
-    if v in ("sell", "venta"):
+    if v in ("sell", "venta", "rescate fci", "pago de amortizacion"):
         return "sell"
+    if v in ("pago de dividendos", "pago de renta"):
+        return "ignore"
     return None
 
 

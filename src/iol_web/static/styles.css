@@ -254,6 +254,32 @@ body {
 .pos { color: var(--ok); }
 .neg { color: var(--danger); }
 .muted { color: var(--muted2); }
+.desc-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.row-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.row-badge-liquidated {
+  color: #d1fae5;
+  background: rgba(52, 211, 153, 0.16);
+  border-color: rgba(52, 211, 153, 0.45);
+}
+.row-badge-missing {
+  color: #fecdd3;
+  background: rgba(251, 113, 133, 0.18);
+  border-color: rgba(251, 113, 133, 0.45);
+}
 
 .footer {
   padding: 18px 22px;

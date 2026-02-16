@@ -59,10 +59,14 @@
       const pct = (metricKey === "delta_value") ? r["delta_pct"] : null;
       const metricText = fmtDelta(metric, fmtCur);
       const pctText = (pct == null) ? "" : ` <span class="muted">(${fmtPct(pct)})</span>`;
+      const flowTag = (metricKey === "delta_value") ? String(r.flow_tag || "none") : "none";
+      let flowBadge = "";
+      if (flowTag === "liquidated") flowBadge = `<span class="row-badge row-badge-liquidated">Liquidado</span>`;
+      if (flowTag === "missing_cashflow") flowBadge = `<span class="row-badge row-badge-missing">Cerrado s/ flujo</span>`;
       return `
         <tr>
           <td>${r.symbol || "-"}</td>
-          <td class="muted">${(r.description || "").slice(0, 42)}</td>
+          <td><div class="desc-wrap"><span class="muted">${(r.description || "").slice(0, 42)}</span>${flowBadge}</div></td>
           <td class="num">${fmtCur.format(r.total_value || 0)}</td>
           <td class="num ${signClass(metric)}">${metricText}${pctText}</td>
         </tr>
