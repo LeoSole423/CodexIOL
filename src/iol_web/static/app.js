@@ -36,6 +36,40 @@
     return (v >= 0 ? "+" : "-") + f.format(Math.abs(v));
   }
 
+  /* ── Counter animation ── */
+  function animateValue(element, endVal, formatter, duration) {
+    if (!element || endVal == null) return;
+    const dur = duration || 800;
+    const startTime = performance.now();
+    const startVal = 0;
+
+    function tick(now) {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / dur, 1);
+      // Ease-out cubic
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const current = startVal + (endVal - startVal) * eased;
+      element.textContent = formatter ? formatter(current) : String(Math.round(current));
+      if (progress < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  /* ── Relative time ── */
+  function relativeTime(isoStr) {
+    if (!isoStr) return null;
+    const d = new Date(isoStr);
+    if (isNaN(d.getTime())) return null;
+    const diffMs = Date.now() - d.getTime();
+    const mins = Math.floor(diffMs / 60000);
+    if (mins < 1) return "ahora";
+    if (mins < 60) return `hace ${mins} min`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `hace ${hours}h`;
+    const days = Math.floor(hours / 24);
+    return `hace ${days}d`;
+  }
+
   async function fetchJSON(url, options) {
     const opts = Object.assign({ cache: "no-store" }, options || {});
     const r = await fetch(url, opts);
@@ -67,7 +101,7 @@
       <th class="num">${metricLabel || (metricKey === "daily_var_points" ? "D\u00eda" : "PnL")}</th>
     `;
 
-    const body = (rows || []).map((r) => {
+    const body = (rows || []).map((r, idx) => {
       const metric = r[metricKey];
       const pct = (metricKey === "delta_value") ? r["delta_pct"] : null;
       const metricText = fmtDelta(metric, fmtCur);
@@ -77,7 +111,7 @@
       if (flowTag === "liquidated") flowBadge = `<span class="row-badge row-badge-liquidated">Liquidado</span>`;
       if (flowTag === "missing_cashflow") flowBadge = `<span class="row-badge row-badge-missing">Cerrado s/ flujo</span>`;
       return `
-        <tr>
+        <tr style="animation: fade-in 0.3s ease ${idx * 40}ms both;">
           <td>${r.symbol || "-"}</td>
           <td><div class="desc-wrap"><span class="muted">${(r.description || "").slice(0, 42)}</span>${flowBadge}</div></td>
           <td class="num">${fmtCur.format(r.total_value || 0)}</td>
@@ -111,7 +145,7 @@
       <th class="num">Real</th>
     `;
 
-    const body = (rows || []).map((r) => {
+    const body = (rows || []).map((r, idx) => {
       const month = fmtMonthLabel(r.month);
       const snaps = (r.from && r.to) ? `${r.from} \u2192 ${r.to}` : "-";
       const p = (r.portfolio_pct == null) ? "-" : fmtPct(r.portfolio_pct);
@@ -119,7 +153,7 @@
       const real = (r.real_pct == null) ? "-" : fmtPct(r.real_pct);
       const cls = signClass(r.real_pct);
       return `
-        <tr>
+        <tr style="animation: fade-in 0.3s ease ${idx * 30}ms both;">
           <td>${month}</td>
           <td class="muted">${snaps}</td>
           <td class="num">${p}</td>
@@ -153,6 +187,12 @@
 
   function buildLineChart(canvas, labels, values) {
     const ctx = canvas.getContext("2d");
+    // Multi-stop gradient fill
+    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.parentElement.clientHeight || 260);
+    gradient.addColorStop(0, "rgba(103,232,249,0.25)");
+    gradient.addColorStop(0.5, "rgba(103,232,249,0.08)");
+    gradient.addColorStop(1, "rgba(103,232,249,0.0)");
+
     return new Chart(ctx, {
       type: "line",
       data: {
@@ -160,28 +200,40 @@
         datasets: [{
           label: "Total (ARS)",
           data: values,
-          borderColor: "rgba(103,232,249,0.9)",
-          backgroundColor: "rgba(103,232,249,0.12)",
-          tension: 0.22,
+          borderColor: "rgba(103,232,249,0.92)",
+          backgroundColor: gradient,
+          tension: 0.3,
           fill: true,
           pointRadius: 0,
-          borderWidth: 2,
+          pointHoverRadius: 5,
+          pointHoverBackgroundColor: "rgba(103,232,249,1)",
+          pointHoverBorderColor: "#fff",
+          pointHoverBorderWidth: 2,
+          borderWidth: 2.5,
         }],
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        interaction: { intersect: false, mode: "index" },
         plugins: {
           legend: { display: false },
           tooltip: {
+            backgroundColor: "rgba(10,16,32,0.90)",
+            borderColor: "rgba(103,232,249,0.30)",
+            borderWidth: 1,
+            titleFont: { family: "Inter", weight: "600" },
+            bodyFont: { family: "Inter" },
+            padding: 12,
+            cornerRadius: 12,
             callbacks: {
               label: (ctx) => fmtARS.format(ctx.parsed.y || 0),
             },
           },
         },
         scales: {
-          x: { ticks: { color: "rgba(255,255,255,0.65)" }, grid: { color: "rgba(255,255,255,0.07)" } },
-          y: { ticks: { color: "rgba(255,255,255,0.65)", callback: (v) => fmtARS.format(v) }, grid: { color: "rgba(255,255,255,0.07)" } },
+          x: { ticks: { color: "rgba(255,255,255,0.55)", font: { size: 11 } }, grid: { color: "rgba(255,255,255,0.05)" } },
+          y: { ticks: { color: "rgba(255,255,255,0.55)", font: { size: 11 }, callback: (v) => fmtARS.format(v) }, grid: { color: "rgba(255,255,255,0.05)" } },
         },
       },
     });
@@ -195,9 +247,17 @@
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        interaction: { intersect: false, mode: "index" },
         plugins: {
-          legend: { display: true, labels: { color: "rgba(255,255,255,0.72)" } },
+          legend: { display: true, labels: { color: "rgba(255,255,255,0.72)", font: { family: "Inter", size: 12 } } },
           tooltip: {
+            backgroundColor: "rgba(10,16,32,0.90)",
+            borderColor: "rgba(103,232,249,0.25)",
+            borderWidth: 1,
+            titleFont: { family: "Inter", weight: "600" },
+            bodyFont: { family: "Inter" },
+            padding: 12,
+            cornerRadius: 12,
             callbacks: {
               label: (c) => {
                 const v = c.parsed.y;
@@ -208,13 +268,14 @@
           },
         },
         scales: {
-          x: { ticks: { color: "rgba(255,255,255,0.65)" }, grid: { color: "rgba(255,255,255,0.07)" } },
+          x: { ticks: { color: "rgba(255,255,255,0.55)", font: { size: 11 } }, grid: { color: "rgba(255,255,255,0.05)" } },
           y: {
             ticks: {
-              color: "rgba(255,255,255,0.65)",
+              color: "rgba(255,255,255,0.55)",
+              font: { size: 11 },
               callback: (v) => (yTickFormatter ? yTickFormatter(v) : fmtNum.format(v)),
             },
-            grid: { color: "rgba(255,255,255,0.07)" },
+            grid: { color: "rgba(255,255,255,0.05)" },
           },
         },
       },
@@ -230,8 +291,15 @@
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { display: true, labels: { color: "rgba(255,255,255,0.72)" } },
+          legend: { display: true, labels: { color: "rgba(255,255,255,0.72)", font: { family: "Inter", size: 12 } } },
           tooltip: {
+            backgroundColor: "rgba(10,16,32,0.90)",
+            borderColor: "rgba(103,232,249,0.25)",
+            borderWidth: 1,
+            titleFont: { family: "Inter", weight: "600" },
+            bodyFont: { family: "Inter" },
+            padding: 12,
+            cornerRadius: 12,
             callbacks: {
               label: (c) => {
                 const v = c.parsed.y;
@@ -243,13 +311,14 @@
           },
         },
         scales: {
-          x: { ticks: { color: "rgba(255,255,255,0.65)" }, grid: { color: "rgba(255,255,255,0.07)" } },
+          x: { ticks: { color: "rgba(255,255,255,0.55)", font: { size: 11 } }, grid: { color: "rgba(255,255,255,0.05)" } },
           y: {
             ticks: {
-              color: "rgba(255,255,255,0.65)",
+              color: "rgba(255,255,255,0.55)",
+              font: { size: 11 },
               callback: (v) => (yTickFormatter ? yTickFormatter(v) : fmtNum.format(v) + "%"),
             },
-            grid: { color: "rgba(255,255,255,0.07)" },
+            grid: { color: "rgba(255,255,255,0.05)" },
           },
         },
       },
@@ -280,6 +349,7 @@
           backgroundColor: colors,
           borderColor: "rgba(10,16,32,0.8)",
           borderWidth: 2,
+          hoverOffset: 8,
         }],
       },
       options: {
@@ -287,12 +357,19 @@
         plugins: {
           legend: { display: false },
           tooltip: {
+            backgroundColor: "rgba(10,16,32,0.90)",
+            borderColor: "rgba(103,232,249,0.25)",
+            borderWidth: 1,
+            titleFont: { family: "Inter", weight: "600" },
+            bodyFont: { family: "Inter" },
+            padding: 12,
+            cornerRadius: 12,
             callbacks: {
               label: (ctx) => `${ctx.label}: ${fmtARS.format(ctx.parsed || 0)}`,
             },
           },
         },
-        cutout: "62%",
+        cutout: "65%",
       },
     });
   }
@@ -324,9 +401,25 @@
     }
     const s = el(subId);
     if (s) {
-      const gross = (block && block.pct != null) ? fmtPct(block.pct) : "-";
-      const flow = (block && block.flow_total_ars != null) ? fmtDeltaARS(block.flow_total_ars) : "-";
-      s.textContent = `Mercado ${gross} | Aportes ${flow}`;
+      const netArsStr = (block && block.real_delta != null) ? fmtDeltaARS(block.real_delta) : "-";
+      const grossArsStr = (block && block.delta != null) ? fmtDeltaARS(block.delta) : "-";
+      const flowArsStr = (block && block.flow_total_ars != null) ? fmtDeltaARS(block.flow_total_ars) : "-";
+
+      s.innerHTML = `
+        <div style="font-size: 14px; font-weight: 600; margin-top: 4px; margin-bottom: 12px;" class="${signClass(block?.real_delta)}">
+          ${netArsStr}
+        </div>
+        <div class="mini-grid">
+          <div class="mg-row">
+            <span class="mg-lbl">Bruto</span>
+            <span class="mg-val">${grossArsStr}</span>
+          </div>
+          <div class="mg-row">
+            <span class="mg-lbl">Aportes</span>
+            <span class="mg-val">${flowArsStr}</span>
+          </div>
+        </div>
+      `;
     }
   }
 
@@ -369,7 +462,7 @@
       : "-";
 
     v.textContent = real == null ? "-" : fmtPct(real);
-    v.className = "v " + signClass(real);
+    v.className = "kpi-value " + signClass(real);
     s.textContent = `Neto ${net} | IPC ${ipc}`;
 
     if (kpi.beats_inflation == null || real == null) {
@@ -382,54 +475,45 @@
     b.style.display = "inline-flex";
     if (kpi.beats_inflation) {
       b.className = "kpi-status-badge kpi-status-up";
-      b.textContent = "Le ganas al IPC";
+      b.textContent = "▲ Le ganas al IPC";
     } else {
       b.className = "kpi-status-badge kpi-status-down";
-      b.textContent = "Debajo del IPC";
+      b.textContent = "▼ Debajo del IPC";
     }
   }
 
-  function putTextAndSign(id, value, formatter) {
+  function putTextAndSign(id, value, formatter, baseClass = "v") {
     const node = el(id);
     if (!node) return;
     if (value == null) {
       node.textContent = "-";
-      node.className = "v";
+      node.className = baseClass;
       return;
     }
     node.textContent = formatter ? formatter(value) : String(value);
-    node.className = "v " + signClass(Number(value));
+    const spacing = baseClass ? " " : "";
+    node.className = baseClass + spacing + signClass(Number(value));
   }
 
   function renderHeroMonthInsights(kpi) {
     if (!kpi) {
-      putTextAndSign("kpiMonthNetPct", null);
-      putTextAndSign("kpiMonthRealPct", null);
-      putTextAndSign("kpiMonthFlowArs", null);
-      putTextAndSign("kpiMonthNetArs", null);
+      putTextAndSign("kpiMonthNetPct", null, null, "kpi-pct");
+      putTextAndSign("kpiMonthFlowArs", null, null, "");
+      putTextAndSign("kpiMonthNetArs", null, null, "kpi-value");
       return;
     }
 
     const status = String(kpi.status || "");
     if (status === "ok" || status === "inflation_unavailable") {
-      putTextAndSign("kpiMonthNetPct", kpi.net_pct, (v) => fmtPct(v));
-      putTextAndSign("kpiMonthRealPct", kpi.real_vs_inflation_pct, (v) => fmtPct(v));
-      putTextAndSign("kpiMonthFlowArs", kpi.contributions_ars, (v) => fmtDeltaARS(v));
-      putTextAndSign("kpiMonthNetArs", kpi.net_delta_ars, (v) => fmtDeltaARS(v));
-      if (status === "inflation_unavailable") {
-        const n = el("kpiMonthRealPct");
-        if (n) {
-          n.textContent = "IPC -";
-          n.className = "v";
-        }
-      }
+      putTextAndSign("kpiMonthNetPct", kpi.net_pct, (v) => fmtPct(v), "kpi-pct");
+      putTextAndSign("kpiMonthFlowArs", kpi.contributions_ars, (v) => fmtDeltaARS(v), "");
+      putTextAndSign("kpiMonthNetArs", kpi.net_delta_ars, (v) => fmtDeltaARS(v), "kpi-value");
       return;
     }
 
-    putTextAndSign("kpiMonthNetPct", null);
-    putTextAndSign("kpiMonthRealPct", null);
-    putTextAndSign("kpiMonthFlowArs", null);
-    putTextAndSign("kpiMonthNetArs", null);
+    putTextAndSign("kpiMonthNetPct", null, null, "kpi-pct");
+    putTextAndSign("kpiMonthFlowArs", null, null, "");
+    putTextAndSign("kpiMonthNetArs", null, null, "kpi-value");
   }
 
   function renderManualCashflows(rows) {
@@ -490,7 +574,13 @@
     }
 
     const snap = latest.snapshot;
-    if (el("kpiTotal")) el("kpiTotal").textContent = fmtARS.format(snap.total_value || 0);
+
+    // Animate total value
+    const kpiTotalEl = el("kpiTotal");
+    if (kpiTotalEl) {
+      animateValue(kpiTotalEl, snap.total_value || 0, (v) => fmtARS.format(v), 900);
+    }
+
     if (el("kpiDate")) {
       let meta = `Snapshot: ${snap.snapshot_date}`;
       if (snap.retrieved_at) {
@@ -500,20 +590,60 @@
       el("kpiDate").textContent = meta;
     }
 
+    // Updated badge with relative time
+    const updBadge = el("updatedBadge");
+    const updText = el("updatedText");
+    if (updBadge && updText && snap.retrieved_at) {
+      const rel = relativeTime(snap.retrieved_at);
+      if (rel) {
+        updText.textContent = `Actualizado ${rel}`;
+        updBadge.style.display = "inline-flex";
+      }
+    }
+
+    // Cash KPIs
+    const cashArsEl = el("kpiCashArs");
+    if (cashArsEl) {
+      const cashArs = snap.cash_disponible_ars;
+      if (cashArs != null) {
+        animateValue(cashArsEl, cashArs, (v) => fmtARS.format(v), 700);
+      } else {
+        cashArsEl.textContent = "-";
+      }
+    }
+    const cashUsdEl = el("kpiCashUsd");
+    if (cashUsdEl) {
+      const cashUsd = snap.cash_disponible_usd;
+      if (cashUsd != null) {
+        animateValue(cashUsdEl, cashUsd, (v) => fmtUSD.format(v), 700);
+      } else {
+        cashUsdEl.textContent = "-";
+      }
+    }
+
     const daily = ret.daily || {};
     if (el("kpiDailyDelta")) {
       const v = (daily.real_delta != null) ? daily.real_delta : daily.delta;
-      el("kpiDailyDelta").textContent = fmtDeltaARS(v);
-      el("kpiDailyDelta").className = "kpi-value " + signClass(v);
+      const deltaEl = el("kpiDailyDelta");
+      if (v != null) {
+        animateValue(deltaEl, v, (val) => fmtDeltaARS(val), 700);
+        deltaEl.className = "kpi-value " + signClass(v);
+      } else {
+        deltaEl.textContent = "-";
+      }
     }
     if (el("kpiDailyPct")) {
       const p = (daily.real_pct != null) ? daily.real_pct : daily.pct;
       el("kpiDailyPct").textContent = p == null ? "-" : fmtPct(p);
+      el("kpiDailyPct").className = "kpi-pct " + signClass(p);
     }
     if (el("kpiDailyGross")) {
-      const grossPct = (daily.pct != null) ? fmtPct(daily.pct) : "-";
-      const flow = (daily.flow_total_ars != null) ? fmtDeltaARS(daily.flow_total_ars) : "-";
-      el("kpiDailyGross").textContent = `Mercado ${grossPct} | Aportes ${flow}`;
+      const grossArsStr = (daily.delta != null) ? fmtDeltaARS(daily.delta) : "-";
+      const flowArsStr = (daily.flow_total_ars != null) ? fmtDeltaARS(daily.flow_total_ars) : "-";
+
+      el("kpiDailyGross").innerHTML = `
+        Bruto ${grossArsStr} <span style="color: rgba(255,255,255,0.2); margin: 0 6px;">|</span> Aportes ${flowArsStr}
+      `;
     }
 
     putReturnCard("retWeekly", "retWeeklySub", ret.weekly);
@@ -522,31 +652,6 @@
     putReturnCard("retYearly", "retYearlySub", ret.yearly);
     renderMonthVsInflationKpi(monthlyKpi);
     renderHeroMonthInsights(monthlyKpi);
-    const rh = el("returnsHint");
-    if (rh) {
-      const missing = ["weekly", "monthly", "yearly"].some((k) => (ret[k] && ret[k].pct != null) ? false : true);
-      if (missing) {
-        rh.style.display = "block";
-        rh.textContent = "Para ver retornos por per\u00edodo necesit\u00e1s m\u00e1s de 1 snapshot. Deja corriendo el scheduler (guarda al cierre) o ejecuta `iol snapshot run` en distintos d\u00edas.";
-      } else {
-        rh.style.display = "none";
-      }
-    }
-    const qh = el("returnsQualityHint");
-    if (qh) {
-      const uniq = new Set();
-      ["daily", "weekly", "monthly", "yearly", "ytd"].forEach((k) => {
-        const ww = ((ret || {})[k] || {}).quality_warnings || [];
-        ww.forEach((x) => uniq.add(String(x)));
-      });
-      const list = Array.from(uniq);
-      if (list.length) {
-        qh.style.display = "block";
-        qh.textContent = `Calidad retorno real: ${list.join(", ")}.`;
-      } else {
-        qh.style.display = "none";
-      }
-    }
 
     // Monthly inflation compare (calendar month)
     const cmpRoot = el("tblInflationCompare");
@@ -738,11 +843,11 @@
         <th class="num">D\u00eda</th>
         <th class="num">PnL</th>
       `;
-      const body = (list || []).map((r) => {
+      const body = (list || []).map((r, idx) => {
         const dv = r.daily_var_points;
         const ga = r.gain_amount;
         return `
-          <tr>
+          <tr style="animation: fade-in 0.3s ease ${idx * 25}ms both;">
             <td>${r.symbol || "-"}</td>
             <td class="muted">${(r.description || "").slice(0, 48)}</td>
             <td class="muted">${r.type || "-"}</td>
@@ -803,7 +908,9 @@
               tension: 0.22,
               fill: false,
               pointRadius: 0,
-              borderWidth: 2,
+              pointHoverRadius: 5,
+              pointHoverBackgroundColor: "rgba(103,232,249,1)",
+              borderWidth: 2.5,
             },
             {
               label: "Inflaci\u00f3n (base 100)",
@@ -813,7 +920,9 @@
               tension: 0.0,
               fill: false,
               pointRadius: 0,
-              borderWidth: 2,
+              pointHoverRadius: 5,
+              pointHoverBackgroundColor: "rgba(252,211,77,1)",
+              borderWidth: 2.5,
             },
           ];
           chartInflationSeries = buildMultiLineChart(c2, labels2, ds, (v) => fmtNum.format(v));
@@ -848,8 +957,8 @@
         if (chartInflationAnnual) chartInflationAnnual.destroy();
         if (labels3.length) {
           const ds = [
-            { label: "Portfolio %", data: p, backgroundColor: "rgba(103,232,249,0.55)", borderColor: "rgba(103,232,249,0.9)", borderWidth: 1 },
-            { label: "IPC %", data: inf, backgroundColor: "rgba(252,211,77,0.45)", borderColor: "rgba(252,211,77,0.85)", borderWidth: 1 },
+            { label: "Portfolio %", data: p, backgroundColor: "rgba(103,232,249,0.55)", borderColor: "rgba(103,232,249,0.9)", borderWidth: 1, borderRadius: 4 },
+            { label: "IPC %", data: inf, backgroundColor: "rgba(252,211,77,0.45)", borderColor: "rgba(252,211,77,0.85)", borderWidth: 1, borderRadius: 4 },
           ];
           chartInflationAnnual = buildBarChart(
             c3,
@@ -1002,12 +1111,12 @@
     try {
       const v = (localStorage.getItem("moversPeriod") || "daily").trim().toLowerCase();
       if (["daily", "weekly", "monthly", "yearly", "ytd"].includes(v)) return v;
-    } catch (_) {}
+    } catch (_) { }
     return "daily";
   }
 
   function setMoversPeriod(v) {
-    try { localStorage.setItem("moversPeriod", String(v || "daily")); } catch (_) {}
+    try { localStorage.setItem("moversPeriod", String(v || "daily")); } catch (_) { }
   }
 
   function initMoversPickerControls() {
@@ -1083,12 +1192,12 @@
     try {
       const n = parseInt(localStorage.getItem("moversMonth") || "", 10);
       if (n >= 1 && n <= 12) return n;
-    } catch (_) {}
+    } catch (_) { }
     return (defaultMonth >= 1 && defaultMonth <= 12) ? defaultMonth : 1;
   }
 
   function setMoversMonth(v) {
-    try { localStorage.setItem("moversMonth", String(parseInt(v, 10) || 1)); } catch (_) {}
+    try { localStorage.setItem("moversMonth", String(parseInt(v, 10) || 1)); } catch (_) { }
   }
 
   function getMoversYear(defaultYear, years) {
@@ -1096,7 +1205,7 @@
     try {
       const n = parseInt(localStorage.getItem("moversYear") || "", 10);
       if (!isNaN(n)) y = n;
-    } catch (_) {}
+    } catch (_) { }
     if (Array.isArray(years) && years.length) {
       if (years.includes(y)) return y;
       return years[years.length - 1];
@@ -1105,7 +1214,7 @@
   }
 
   function setMoversYear(v) {
-    try { localStorage.setItem("moversYear", String(parseInt(v, 10) || new Date().getFullYear())); } catch (_) {}
+    try { localStorage.setItem("moversYear", String(parseInt(v, 10) || new Date().getFullYear())); } catch (_) { }
   }
 
   function getActiveRange() {

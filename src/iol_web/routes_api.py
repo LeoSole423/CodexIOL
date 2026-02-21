@@ -30,11 +30,6 @@ def _parse_date(v: Optional[str]) -> Optional[str]:
 def _snapshot_cash_ars(snap: Optional[dbmod.Snapshot]) -> Optional[float]:
     if not snap:
         return None
-    if snap.cash_total_ars is not None:
-        try:
-            return float(snap.cash_total_ars)
-        except Exception:
-            return None
     if snap.cash_disponible_ars is not None:
         try:
             return float(snap.cash_disponible_ars)
@@ -90,13 +85,14 @@ def _return_with_flows(
     if order_stats.get("unclassified", 0) > 0 or order_stats.get("amount_missing", 0) > 0:
         warnings.append("ORDERS_INCOMPLETE")
 
+    flow_manual = dbmod.manual_cashflow_sum(conn, base.snapshot_date, latest.snapshot_date)
+    
     flow_inferred = (
         float(cash_delta)
         + float(order_amounts.get("buy_amount") or 0.0)
         - float(order_amounts.get("sell_amount") or 0.0)
         - float(order_amounts.get("income_amount") or 0.0)
     )
-    flow_manual = dbmod.manual_cashflow_sum(conn, base.snapshot_date, latest.snapshot_date)
     return enrich_return_block(
         gross=gross_block,
         base=base,
