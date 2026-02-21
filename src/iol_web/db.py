@@ -2,7 +2,7 @@ import os
 import sqlite3
 import unicodedata
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -39,8 +39,21 @@ def _connect_ro(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _connect_rw(db_path: str) -> sqlite3.Connection:
+    p = Path(db_path)
+    if not p.exists():
+        raise FileNotFoundError(db_path)
+    conn = sqlite3.connect(str(p))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def get_conn() -> sqlite3.Connection:
     return _connect_ro(resolve_db_path())
+
+
+def get_conn_rw() -> sqlite3.Connection:
+    return _connect_rw(resolve_db_path())
 
 
 def _row_to_snapshot(row: sqlite3.Row) -> Snapshot:
@@ -293,6 +306,56 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set:
         return set()
 
 
+def _norm_order_side(v: Any) -> Optional[str]:
+    s = str(v or "").strip().lower()
+    if not s:
+        return None
+    s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+    s = " ".join(s.split())
+    if s in ("buy", "compra", "suscripcion fci"):
+        return "buy"
+    if s in ("sell", "venta", "rescate fci", "pago de amortizacion"):
+        return "sell"
+    if s in ("pago de dividendos", "pago de renta"):
+        return "income"
+    if s in ("ignore",):
+        return "ignore"
+    return None
+
+
+def _order_amount(row: sqlite3.Row) -> Optional[float]:
+    op_amount = row["operated_amount"]
+    qty = row["quantity"]
+    price = row["price"]
+    if op_amount is not None:
+        try:
+            return float(op_amount)
+        except Exception:
+            return None
+    if qty is not None and price is not None:
+        try:
+            return float(qty) * float(price)
+        except Exception:
+            return None
+    return None
+
+
+def _ensure_manual_cashflow_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS manual_cashflow_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            flow_date TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            amount_ars REAL NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_manual_cashflow_flow_date ON manual_cashflow_adjustments(flow_date)")
+
+
 def orders_cashflows_by_symbol(
     conn: sqlite3.Connection,
     dt_from: str,
@@ -359,50 +422,20 @@ def orders_cashflows_by_symbol(
     """
     rows = conn.execute(sql, tuple(params)).fetchall()
 
-    def _norm_side(v: Any) -> Optional[str]:
-        s = str(v or "").strip().lower()
-        if not s:
-            return None
-        s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
-        s = " ".join(s.split())
-        if s in ("buy", "compra", "suscripcion fci"):
-            return "buy"
-        if s in ("sell", "venta", "rescate fci", "pago de amortizacion"):
-            return "sell"
-        if s in ("pago de dividendos", "pago de renta", "ignore"):
-            return "ignore"
-        return None
-
     out: Dict[str, Dict[str, float]] = {}
     total = classified = unclassified = amount_missing = ignored = 0
     for r in rows:
         total += 1
         sym = str(r["symbol"])
-        side = _norm_side(r["side"])
+        side = _norm_order_side(r["side"])
         if side is None:
             unclassified += 1
             continue
-        if side == "ignore":
+        if side in ("ignore", "income"):
             ignored += 1
             continue
 
-        amt_f: Optional[float]
-        op_amount = r["operated_amount"]
-        qty = r["quantity"]
-        price = r["price"]
-        if op_amount is not None:
-            try:
-                amt_f = float(op_amount)
-            except Exception:
-                amt_f = None
-        elif qty is not None and price is not None:
-            try:
-                amt_f = float(qty) * float(price)
-            except Exception:
-                amt_f = None
-        else:
-            amt_f = None
-
+        amt_f = _order_amount(r)
         if amt_f is None:
             amount_missing += 1
             continue
@@ -422,3 +455,209 @@ def orders_cashflows_by_symbol(
         "ignored": ignored,
     }
     return out, stats
+
+
+def orders_flow_summary(
+    conn: sqlite3.Connection,
+    dt_from: str,
+    dt_to: str,
+    currency: str = "peso_Argentino",
+) -> Tuple[Dict[str, float], Dict[str, int]]:
+    """
+    Aggregate executed order flows for the period (dt_from, dt_to].
+
+    Returns (amounts, stats):
+      amounts = {"buy_amount": x, "sell_amount": y, "income_amount": z}
+      stats = {"total": n, "classified": n, "income_classified": n, "unclassified": n, "amount_missing": n, "ignored": n}
+    """
+    cols = _table_columns(conn, "orders")
+    empty_amounts = {"buy_amount": 0.0, "sell_amount": 0.0, "income_amount": 0.0}
+    empty_stats = {"total": 0, "classified": 0, "income_classified": 0, "unclassified": 0, "amount_missing": 0, "ignored": 0}
+    if not cols:
+        return empty_amounts, empty_stats
+
+    ts_col = "operated_at" if "operated_at" in cols else ("updated_at" if "updated_at" in cols else "created_at")
+    side_expr = None
+    if "side_norm" in cols and "side" in cols:
+        side_expr = "COALESCE(NULLIF(TRIM(side_norm), ''), side)"
+    elif "side_norm" in cols:
+        side_expr = "side_norm"
+    elif "side" in cols:
+        side_expr = "side"
+    has_currency = "currency" in cols
+    if side_expr is None:
+        return empty_amounts, empty_stats
+
+    where = [
+        "status = 'terminada'",
+        "symbol IS NOT NULL",
+        "TRIM(symbol) <> ''",
+        f"COALESCE({ts_col}, created_at) > ?",
+        f"COALESCE({ts_col}, created_at) <= ?",
+    ]
+    params: List[Any] = [dt_from, dt_to]
+    if has_currency and currency and currency not in ("all",):
+        if currency == "unknown":
+            where.append("(currency IS NULL OR TRIM(currency) = '')")
+        elif currency == "peso_Argentino":
+            where.append("(currency = ? OR currency IS NULL OR TRIM(currency) = '')")
+            params.append(currency)
+        else:
+            where.append("currency = ?")
+            params.append(currency)
+
+    operated_amount_expr = "operated_amount" if "operated_amount" in cols else "NULL"
+    quantity_expr = "quantity" if "quantity" in cols else "NULL"
+    price_expr = "price" if "price" in cols else "NULL"
+    sql = f"""
+        SELECT
+            {side_expr} AS side,
+            {operated_amount_expr} AS operated_amount,
+            {quantity_expr} AS quantity,
+            {price_expr} AS price
+        FROM orders
+        WHERE {" AND ".join(where)}
+    """
+    rows = conn.execute(sql, tuple(params)).fetchall()
+
+    amounts = {"buy_amount": 0.0, "sell_amount": 0.0, "income_amount": 0.0}
+    total = classified = income_classified = unclassified = amount_missing = ignored = 0
+    for r in rows:
+        total += 1
+        side = _norm_order_side(r["side"])
+        if side is None:
+            unclassified += 1
+            continue
+        if side == "ignore":
+            ignored += 1
+            continue
+
+        amt = _order_amount(r)
+        if amt is None:
+            amount_missing += 1
+            continue
+
+        if side == "buy":
+            amounts["buy_amount"] += amt
+            classified += 1
+        elif side == "sell":
+            amounts["sell_amount"] += amt
+            classified += 1
+        else:
+            amounts["income_amount"] += amt
+            income_classified += 1
+
+    stats = {
+        "total": total,
+        "classified": classified,
+        "income_classified": income_classified,
+        "unclassified": unclassified,
+        "amount_missing": amount_missing,
+        "ignored": ignored,
+    }
+    return amounts, stats
+
+
+def manual_cashflow_sum(conn: sqlite3.Connection, date_from_exclusive: str, date_to_inclusive: str) -> float:
+    cols = _table_columns(conn, "manual_cashflow_adjustments")
+    if not cols:
+        return 0.0
+    try:
+        row = conn.execute(
+            """
+            SELECT SUM(amount_ars) AS total
+            FROM manual_cashflow_adjustments
+            WHERE flow_date > ? AND flow_date <= ?
+            """,
+            (date_from_exclusive, date_to_inclusive),
+        ).fetchone()
+        return float((row["total"] if row and row["total"] is not None else 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def list_manual_cashflow_adjustments(
+    conn: sqlite3.Connection, date_from: Optional[str], date_to: Optional[str]
+) -> List[Dict[str, Any]]:
+    _ensure_manual_cashflow_table(conn)
+    rows = conn.execute(
+        """
+        SELECT id, flow_date, kind, amount_ars, note, created_at
+        FROM manual_cashflow_adjustments
+        WHERE (? IS NULL OR flow_date >= ?)
+          AND (? IS NULL OR flow_date <= ?)
+        ORDER BY flow_date DESC, id DESC
+        """,
+        (date_from, date_from, date_to, date_to),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows or []:
+        out.append(
+            {
+                "id": int(r["id"]),
+                "flow_date": str(r["flow_date"]),
+                "kind": str(r["kind"]),
+                "amount_ars": float(r["amount_ars"] or 0.0),
+                "note": str(r["note"]) if r["note"] is not None else None,
+                "created_at": str(r["created_at"]),
+            }
+        )
+    return out
+
+
+def add_manual_cashflow_adjustment(
+    conn: sqlite3.Connection, flow_date: str, kind: str, amount_ars: float, note: Optional[str]
+) -> Dict[str, Any]:
+    _ensure_manual_cashflow_table(conn)
+    kind_norm = str(kind or "").strip().lower()
+    if kind_norm not in ("deposit", "withdraw", "correction"):
+        raise ValueError("kind must be deposit|withdraw|correction")
+
+    amount_f = float(amount_ars)
+    if kind_norm in ("deposit", "withdraw") and amount_f < 0:
+        raise ValueError("amount must be >= 0 for deposit|withdraw")
+
+    if kind_norm == "deposit":
+        stored_amount = abs(amount_f)
+    elif kind_norm == "withdraw":
+        stored_amount = -abs(amount_f)
+    else:
+        stored_amount = amount_f
+
+    note_v = str(note).strip() if note is not None else None
+    if note_v == "":
+        note_v = None
+
+    created_at = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        """
+        INSERT INTO manual_cashflow_adjustments(flow_date, kind, amount_ars, note, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (flow_date, kind_norm, float(stored_amount), note_v, created_at),
+    )
+    conn.commit()
+    row_id = int(cur.lastrowid)
+    row = conn.execute(
+        """
+        SELECT id, flow_date, kind, amount_ars, note, created_at
+        FROM manual_cashflow_adjustments
+        WHERE id = ?
+        """,
+        (row_id,),
+    ).fetchone()
+    return {
+        "id": int(row["id"]),
+        "flow_date": str(row["flow_date"]),
+        "kind": str(row["kind"]),
+        "amount_ars": float(row["amount_ars"] or 0.0),
+        "note": str(row["note"]) if row["note"] is not None else None,
+        "created_at": str(row["created_at"]),
+    }
+
+
+def delete_manual_cashflow_adjustment(conn: sqlite3.Connection, row_id: int) -> bool:
+    _ensure_manual_cashflow_table(conn)
+    cur = conn.execute("DELETE FROM manual_cashflow_adjustments WHERE id = ?", (int(row_id),))
+    conn.commit()
+    return int(cur.rowcount or 0) > 0

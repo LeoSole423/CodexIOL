@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -278,6 +279,8 @@ class TestAdvisorOpportunities(unittest.TestCase):
                     "100000",
                     "--top",
                     "5",
+                    "--web-min-trusted-refs",
+                    "0",
                 ],
                 env=self.env,
             )
@@ -348,6 +351,280 @@ class TestAdvisorOpportunities(unittest.TestCase):
         with open(out_md, "r", encoding="utf-8") as f:
             text = f.read()
         self.assertIn("Top candidatos operables", text)
+        self.assertIn("trusted_refs", text)
+        self.assertIn("decision_gate", text)
+
+    def test_conflict_marks_manual_review(self):
+        self._seed_portfolio(snapshot_date="2026-02-10")
+        conn = self._conn()
+        try:
+            for i in range(20):
+                day = f"2026-01-{12 + i:02d}"
+                price = 120.0 - i
+                conn.execute(
+                    """
+                    INSERT INTO market_symbol_snapshots(
+                      snapshot_date,symbol,market,last_price,bid,ask,spread_pct,daily_var_pct,operations_count,volume_amount,source
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (day, "SPY", "bcba", price, price - 0.5, price + 0.5, 1.0, -0.2, 10.0, 50000.0, "quote"),
+                )
+            now = "2026-02-10T12:00:00Z"
+            notes_bull = json.dumps(
+                {
+                    "expert_name": "Reuters Editorial",
+                    "org": "Reuters",
+                    "source_tier": "reuters",
+                    "stance": "bullish",
+                    "topic": "market_outlook",
+                    "run_stage": "rerank",
+                },
+                ensure_ascii=True,
+            )
+            notes_bear = json.dumps(
+                {
+                    "expert_name": "Reuters Editorial",
+                    "org": "Reuters",
+                    "source_tier": "reuters",
+                    "stance": "bearish",
+                    "topic": "market_outlook",
+                    "run_stage": "rerank",
+                },
+                ensure_ascii=True,
+            )
+            conn.execute(
+                """
+                INSERT INTO advisor_evidence(
+                  created_at,symbol,query,source_name,source_url,published_date,retrieved_at_utc,claim,confidence,date_confidence,notes,conflict_key
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    now,
+                    "SPY",
+                    "SPY Reuters outlook",
+                    "Reuters",
+                    "https://www.reuters.com/a",
+                    "2026-02-10",
+                    now,
+                    "Analyst sees upside",
+                    "high",
+                    "high",
+                    notes_bull,
+                    "SPY:reuters",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO advisor_evidence(
+                  created_at,symbol,query,source_name,source_url,published_date,retrieved_at_utc,claim,confidence,date_confidence,notes,conflict_key
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    now,
+                    "SPY",
+                    "SPY Reuters outlook",
+                    "Reuters",
+                    "https://www.reuters.com/b",
+                    "2026-02-10",
+                    now,
+                    "Analyst warns downside",
+                    "high",
+                    "high",
+                    notes_bear,
+                    "SPY:reuters",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with patch("iol_cli.cli.collect_symbol_evidence", return_value=([], [])):
+            out = self.runner.invoke(
+                app,
+                [
+                    "advisor",
+                    "opportunities",
+                    "run",
+                    "--mode",
+                    "rebuy",
+                    "--as-of",
+                    "2026-02-10",
+                    "--budget-ars",
+                    "100000",
+                    "--top",
+                    "5",
+                    "--web-min-trusted-refs",
+                    "0",
+                ],
+                env=self.env,
+            )
+        self.assertEqual(out.exit_code, 0, msg=out.output)
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT decision_gate, consensus_state, trusted_refs_count
+                FROM advisor_opportunity_candidates
+                WHERE symbol='SPY'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(str(row["decision_gate"]), "manual_review")
+            self.assertEqual(str(row["consensus_state"]), "conflict")
+            self.assertGreaterEqual(int(row["trusted_refs_count"] or 0), 2)
+        finally:
+            conn.close()
+
+    def test_run_new_excludes_crypto_candidates_by_default(self):
+        self._seed_portfolio(snapshot_date="2026-02-10")
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO market_symbol_snapshots(
+                  snapshot_date,symbol,market,last_price,bid,ask,spread_pct,daily_var_pct,operations_count,volume_amount,source
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                ("2026-02-10", "ETHA", "bcba", 50.0, 49.8, 50.2, 0.8, 0.0, 20.0, 150000.0, "quote"),
+            )
+            conn.execute(
+                """
+                INSERT INTO market_symbol_snapshots(
+                  snapshot_date,symbol,market,last_price,bid,ask,spread_pct,daily_var_pct,operations_count,volume_amount,source
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                ("2026-02-10", "AAPL", "bcba", 100.0, 99.5, 100.5, 1.0, 0.0, 25.0, 250000.0, "quote"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with patch("iol_cli.cli.collect_symbol_evidence", return_value=([], [])):
+            out = self.runner.invoke(
+                app,
+                [
+                    "advisor",
+                    "opportunities",
+                    "run",
+                    "--mode",
+                    "new",
+                    "--as-of",
+                    "2026-02-10",
+                    "--budget-ars",
+                    "100000",
+                    "--top",
+                    "5",
+                    "--web-min-trusted-refs",
+                    "0",
+                ],
+                env=self.env,
+            )
+        self.assertEqual(out.exit_code, 0, msg=out.output)
+        payload = json.loads(out.output)
+        syms = [str(r.get("symbol") or "") for r in (payload.get("top_operable") or [])]
+        self.assertIn("AAPL", syms)
+        self.assertNotIn("ETHA", syms)
+
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT filters_passed, risk_flags_json
+                FROM advisor_opportunity_candidates
+                WHERE symbol='ETHA'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(int(row["filters_passed"]), 0)
+            self.assertIn("CRYPTO_EXCLUDED", str(row["risk_flags_json"] or ""))
+        finally:
+            conn.close()
+
+    def test_sector_diversification_in_top_operable(self):
+        self._seed_portfolio(snapshot_date="2026-02-10")
+        conn = self._conn()
+        try:
+            for sym, ops, vol, price in (
+                ("AAPL", 25.0, 250000.0, 100.0),
+                ("ADBE", 22.0, 220000.0, 100.0),
+                ("AVGO", 20.0, 210000.0, 100.0),
+                ("ABBV", 5.0, 60000.0, 100.0),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO market_symbol_snapshots(
+                      snapshot_date,symbol,market,last_price,bid,ask,spread_pct,daily_var_pct,operations_count,volume_amount,source
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    ("2026-02-10", sym, "bcba", price, price - 0.5, price + 0.5, 1.0, 0.0, ops, vol, "quote"),
+                )
+            now = "2026-02-10T12:00:00Z"
+            claims = {
+                "AAPL": "Technology software demand outlook",
+                "ADBE": "Cloud software momentum remains strong",
+                "AVGO": "Semiconductor demand remains resilient",
+                "ABBV": "Pharmaceutical drug pipeline update",
+            }
+            for sym, claim in claims.items():
+                conn.execute(
+                    """
+                    INSERT INTO advisor_evidence(
+                      created_at,symbol,query,source_name,source_url,published_date,retrieved_at_utc,claim,confidence,date_confidence,notes,conflict_key
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        now,
+                        sym,
+                        f"{sym} outlook",
+                        "Reuters",
+                        f"https://www.reuters.com/{sym.lower()}",
+                        "2026-02-10",
+                        now,
+                        claim,
+                        "high",
+                        "high",
+                        None,
+                        f"{sym}:reuters",
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with patch("iol_cli.cli.collect_symbol_evidence", return_value=([], [])):
+            out = self.runner.invoke(
+                app,
+                [
+                    "advisor",
+                    "opportunities",
+                    "run",
+                    "--mode",
+                    "new",
+                    "--as-of",
+                    "2026-02-10",
+                    "--budget-ars",
+                    "100000",
+                    "--top",
+                    "3",
+                    "--web-min-trusted-refs",
+                    "0",
+                    "--max-per-sector",
+                    "2",
+                ],
+                env=self.env,
+            )
+        self.assertEqual(out.exit_code, 0, msg=out.output)
+        payload = json.loads(out.output)
+        top = payload.get("top_operable") or []
+        self.assertEqual(len(top), 3)
+        top_syms = [str(r.get("symbol") or "") for r in top]
+        self.assertIn("ABBV", top_syms)
+        tech_count = sum(1 for r in top if str(r.get("sector_bucket") or "") == "technology")
+        self.assertLessEqual(tech_count, 2)
 
 
 if __name__ == "__main__":

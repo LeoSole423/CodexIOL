@@ -37,3 +37,13 @@ Usar este archivo como system prompt inicial y evitar duplicar reglas extensas d
   1. Decision final: `comprar`, `recomprar` o `no operar`.
   2. Recomendaciones concretas (o declaracion explicita de "sin operaciones recomendadas").
   3. Motivo de cada recomendacion (o del no-operar).
+
+## 6) Regla para opiniones de referentes
+- Si la consulta pide "opiniones de referentes", "analistas confiables" o similares:
+  1. Ejecutar flujo de consenso en `prompts/35_expert_consensus.md`.
+  2. Integrar ese resultado con el ranking de `prompts/45_opportunity_scoring.md`.
+  3. Si hay conflicto fuerte entre referentes, marcar `manual_review` y dejar decision final al usuario.
+  4. En oportunidades `new`, aplicar por defecto filtros de:
+     - exclusion de cripto,
+     - liquidez minima,
+     - diversificacion por sector inferido.

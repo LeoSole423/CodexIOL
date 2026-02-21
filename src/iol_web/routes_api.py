@@ -4,13 +4,13 @@ import calendar
 from datetime import date
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 
 from . import db as dbmod
 from .inflation_ar import get_inflation_series
 from .inflation_compare import compounded_inflation_pct, inflation_factor_for_date, month_key
-from .metrics import compute_daily_return_from_assets, compute_return, target_date
+from .metrics import compute_daily_return_from_assets, compute_return, enrich_return_block, target_date
 from .movers import build_union_movers, build_union_movers_pnl
 
 
@@ -25,6 +25,86 @@ def _parse_date(v: Optional[str]) -> Optional[str]:
         return None
     date.fromisoformat(v)
     return v
+
+
+def _snapshot_cash_ars(snap: Optional[dbmod.Snapshot]) -> Optional[float]:
+    if not snap:
+        return None
+    if snap.cash_total_ars is not None:
+        try:
+            return float(snap.cash_total_ars)
+        except Exception:
+            return None
+    if snap.cash_disponible_ars is not None:
+        try:
+            return float(snap.cash_disponible_ars)
+        except Exception:
+            return None
+    return None
+
+
+def _return_with_flows(
+    conn,
+    latest: Optional[dbmod.Snapshot],
+    base: Optional[dbmod.Snapshot],
+    gross_block,
+):
+    if not latest:
+        return enrich_return_block(
+            gross=gross_block,
+            base=base,
+            flow_inferred_ars=None,
+            flow_manual_adjustment_ars=None,
+            quality_warnings=["INFERENCE_PARTIAL"],
+            orders_stats=None,
+        ).to_dict()
+
+    # One-snapshot fallback (no base): keep useful daily estimate, mark as partial.
+    if not base:
+        return enrich_return_block(
+            gross=gross_block,
+            base=base,
+            flow_inferred_ars=0.0,
+            flow_manual_adjustment_ars=0.0,
+            quality_warnings=["INFERENCE_PARTIAL"],
+            orders_stats=None,
+            fallback_real_pct=gross_block.pct,
+        ).to_dict()
+
+    warnings = []
+    cash_base = _snapshot_cash_ars(base)
+    cash_latest = _snapshot_cash_ars(latest)
+    cash_missing = cash_base is None or cash_latest is None
+    cash_delta = 0.0
+    if cash_missing:
+        warnings.extend(["CASH_MISSING", "INFERENCE_PARTIAL"])
+    else:
+        cash_delta = float(cash_latest or 0.0) - float(cash_base or 0.0)
+
+    dt_from = f"{base.snapshot_date}T23:59:59"
+    dt_to = f"{latest.snapshot_date}T23:59:59"
+    order_amounts, order_stats = dbmod.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
+
+    if order_stats.get("total", 0) == 0:
+        warnings.append("ORDERS_NONE")
+    if order_stats.get("unclassified", 0) > 0 or order_stats.get("amount_missing", 0) > 0:
+        warnings.append("ORDERS_INCOMPLETE")
+
+    flow_inferred = (
+        float(cash_delta)
+        + float(order_amounts.get("buy_amount") or 0.0)
+        - float(order_amounts.get("sell_amount") or 0.0)
+        - float(order_amounts.get("income_amount") or 0.0)
+    )
+    flow_manual = dbmod.manual_cashflow_sum(conn, base.snapshot_date, latest.snapshot_date)
+    return enrich_return_block(
+        gross=gross_block,
+        base=base,
+        flow_inferred_ars=flow_inferred,
+        flow_manual_adjustment_ars=flow_manual,
+        quality_warnings=warnings,
+        orders_stats=order_stats,
+    ).to_dict()
 
 
 @router.get("/health")
@@ -59,6 +139,42 @@ def _add_months(year: int, month: int, delta_months: int) -> tuple[int, int]:
 def _month_range_end_date(year: int, month: int) -> str:
     last_day = calendar.monthrange(int(year), int(month))[1]
     return f"{int(year):04d}-{int(month):02d}-{int(last_day):02d}"
+
+
+def _monthly_vs_inflation_payload(
+    month: Optional[str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    status: str,
+    market_pct: Optional[float] = None,
+    market_delta_ars: Optional[float] = None,
+    contributions_ars: Optional[float] = None,
+    net_pct: Optional[float] = None,
+    net_delta_ars: Optional[float] = None,
+    inflation_pct: Optional[float] = None,
+    inflation_projected: bool = False,
+    real_vs_inflation_pct: Optional[float] = None,
+    beats_inflation: Optional[bool] = None,
+    quality_warnings: Optional[list[str]] = None,
+    inflation_available_to: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "month": month,
+        "from": from_date,
+        "to": to_date,
+        "market_pct": market_pct,
+        "market_delta_ars": market_delta_ars,
+        "contributions_ars": contributions_ars,
+        "net_pct": net_pct,
+        "net_delta_ars": net_delta_ars,
+        "inflation_pct": inflation_pct,
+        "inflation_projected": bool(inflation_projected),
+        "real_vs_inflation_pct": real_vs_inflation_pct,
+        "beats_inflation": beats_inflation,
+        "quality_warnings": list(quality_warnings or []),
+        "inflation_available_to": inflation_available_to,
+        "status": status,
+    }
 
 
 @router.get("/latest")
@@ -98,13 +214,13 @@ def returns():
     try:
         conn = dbmod.get_conn()
     except FileNotFoundError:
-        empty = compute_return(None, None).to_dict()
+        empty = _return_with_flows(None, None, None, compute_return(None, None))
         return {"daily": empty, "weekly": empty, "monthly": empty, "yearly": empty, "ytd": empty}
 
     try:
         latest = dbmod.latest_snapshot(conn)
         if not latest:
-            empty = compute_return(None, None).to_dict()
+            empty = _return_with_flows(conn, None, None, compute_return(None, None))
             return {"daily": empty, "weekly": empty, "monthly": empty, "yearly": empty, "ytd": empty}
 
         base_daily = dbmod.snapshot_before(conn, latest.snapshot_date)
@@ -115,22 +231,84 @@ def returns():
         y = date.fromisoformat(latest.snapshot_date).year
         base_ytd = dbmod.first_snapshot_of_year(conn, y, latest.snapshot_date) or dbmod.earliest_snapshot(conn)
 
-        daily_block = None
+        daily_gross = None
         if base_daily:
-            daily_block = compute_return(latest, base_daily)
+            daily_gross = compute_return(latest, base_daily)
         else:
             # If there is only one snapshot in the DB, returns between snapshots can't be computed.
             # Still show a useful daily delta using IOL-provided per-asset daily variation.
             assets = dbmod.assets_for_snapshot(conn, latest.snapshot_date)
-            daily_block = compute_daily_return_from_assets(latest, assets)
+            daily_gross = compute_daily_return_from_assets(latest, assets)
 
         return {
-            "daily": daily_block.to_dict(),
-            "weekly": compute_return(latest, base_weekly).to_dict(),
-            "monthly": compute_return(latest, base_monthly).to_dict(),
-            "yearly": compute_return(latest, base_yearly).to_dict(),
-            "ytd": compute_return(latest, base_ytd).to_dict(),
+            "daily": _return_with_flows(conn, latest, base_daily, daily_gross),
+            "weekly": _return_with_flows(conn, latest, base_weekly, compute_return(latest, base_weekly)),
+            "monthly": _return_with_flows(conn, latest, base_monthly, compute_return(latest, base_monthly)),
+            "yearly": _return_with_flows(conn, latest, base_yearly, compute_return(latest, base_yearly)),
+            "ytd": _return_with_flows(conn, latest, base_ytd, compute_return(latest, base_ytd)),
         }
+    finally:
+        conn.close()
+
+
+@router.get("/cashflows/manual")
+def cashflows_manual(date_from: Optional[str] = Query(None, alias="from"), date_to: Optional[str] = Query(None, alias="to")):
+    try:
+        f = _parse_date(date_from)
+        t = _parse_date(date_to)
+        conn = dbmod.get_conn_rw()
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid date format (YYYY-MM-DD)"})
+
+    try:
+        return dbmod.list_manual_cashflow_adjustments(conn, f, t)
+    finally:
+        conn.close()
+
+
+@router.post("/cashflows/manual")
+def cashflows_manual_add(payload: Dict[str, Any] = Body(...)):
+    try:
+        flow_date = _parse_date(str(payload.get("flow_date") or ""))
+        if flow_date is None:
+            return JSONResponse(status_code=400, content={"error": "flow_date is required (YYYY-MM-DD)"})
+        kind = str(payload.get("kind") or "").strip().lower()
+        amount_raw = payload.get("amount_ars")
+        if amount_raw is None:
+            return JSONResponse(status_code=400, content={"error": "amount_ars is required"})
+        amount = float(amount_raw)
+        note = payload.get("note")
+        conn = dbmod.get_conn_rw()
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": "DB not found"})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid payload"})
+
+    try:
+        row = dbmod.add_manual_cashflow_adjustment(conn, flow_date, kind, amount, note)
+        return row
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    finally:
+        conn.close()
+
+
+@router.delete("/cashflows/manual/{row_id}")
+def cashflows_manual_delete(row_id: int):
+    try:
+        conn = dbmod.get_conn_rw()
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": "DB not found"})
+
+    try:
+        ok = dbmod.delete_manual_cashflow_adjustment(conn, int(row_id))
+        if not ok:
+            return JSONResponse(status_code=404, content={"error": "not found"})
+        return {"ok": True, "id": int(row_id)}
     finally:
         conn.close()
 
@@ -170,6 +348,132 @@ def inflation(date_from: Optional[str] = Query(None, alias="from"), date_to: Opt
         "available_to": available_to,
         "months": months,
     }
+
+
+@router.get("/kpi/monthly-vs-inflation")
+def kpi_monthly_vs_inflation():
+    try:
+        conn = dbmod.get_conn()
+    except FileNotFoundError:
+        return _monthly_vs_inflation_payload(
+            month=None,
+            from_date=None,
+            to_date=None,
+            status="insufficient_snapshots",
+        )
+
+    try:
+        latest = dbmod.latest_snapshot(conn)
+        if not latest:
+            return _monthly_vs_inflation_payload(
+                month=None,
+                from_date=None,
+                to_date=None,
+                status="insufficient_snapshots",
+            )
+
+        latest_d = date.fromisoformat(latest.snapshot_date)
+        month = f"{latest_d.year:04d}-{latest_d.month:02d}"
+        month_start = f"{latest_d.year:04d}-{latest_d.month:02d}-01"
+        from_snap_in_month = dbmod.first_snapshot_in_range(conn, month_start, latest.snapshot_date)
+        from_snap = from_snap_in_month
+        if not from_snap_in_month or from_snap_in_month.snapshot_date == latest.snapshot_date:
+            # Month-in-progress fallback: use the latest snapshot on/before month start
+            # so we can still show an MTD signal with a single snapshot in the current month.
+            from_snap = dbmod.snapshot_on_or_before(conn, month_start)
+        if not from_snap or from_snap.snapshot_date == latest.snapshot_date:
+            return _monthly_vs_inflation_payload(
+                month=month,
+                from_date=from_snap.snapshot_date if from_snap else None,
+                to_date=latest.snapshot_date,
+                status="insufficient_snapshots",
+            )
+
+        gross = compute_return(latest, from_snap)
+        with_flows = _return_with_flows(conn, latest, from_snap, gross)
+
+        market_pct = with_flows.get("pct")
+        market_delta_ars = with_flows.get("delta")
+        contributions_ars = with_flows.get("flow_total_ars")
+        net_pct = with_flows.get("real_pct")
+        net_delta_ars = with_flows.get("real_delta")
+        quality_warnings = with_flows.get("quality_warnings") or []
+
+        inflation_available_to = None
+        inflation_pct = None
+        inflation_projected = False
+        try:
+            # Same projection rule as compare_inflation:
+            # if current month IPC is not published yet, use the last published month as estimate.
+            infl_start = f"{max(2017, latest_d.year - 1):04d}-01-01"
+            infl_end = f"{latest_d.year:04d}-{latest_d.month:02d}-01"
+            infl = get_inflation_series(start_date=infl_start, end_date=infl_end)
+            infl_pct = infl.inflation_pct_by_month()
+            infl_dates = [d for d, _ in (infl.data or [])]
+            inflation_available_to = max(infl_dates)[:7] if infl_dates else None
+
+            inflation_pct = infl_pct.get(month)
+            last_known_inflation_pct = None
+            if infl_pct:
+                try:
+                    last_month = sorted(infl_pct.keys())[-1]
+                    last_known_inflation_pct = float(infl_pct.get(last_month))
+                except Exception:
+                    last_known_inflation_pct = None
+
+            if (
+                inflation_pct is None
+                and last_known_inflation_pct is not None
+                and inflation_available_to is not None
+                and month > inflation_available_to
+            ):
+                inflation_pct = last_known_inflation_pct
+                inflation_projected = True
+        except Exception:
+            inflation_pct = None
+
+        if inflation_pct is None:
+            return _monthly_vs_inflation_payload(
+                month=month,
+                from_date=from_snap.snapshot_date,
+                to_date=latest.snapshot_date,
+                status="inflation_unavailable",
+                market_pct=market_pct,
+                market_delta_ars=market_delta_ars,
+                contributions_ars=contributions_ars,
+                net_pct=net_pct,
+                net_delta_ars=net_delta_ars,
+                quality_warnings=quality_warnings,
+                inflation_available_to=inflation_available_to,
+            )
+
+        real_vs_inflation_pct = None
+        if net_pct is not None:
+            try:
+                real_vs_inflation_pct = ((1.0 + float(net_pct) / 100.0) / (1.0 + float(inflation_pct) / 100.0) - 1.0) * 100.0
+            except Exception:
+                real_vs_inflation_pct = None
+
+        beats_inflation = None if real_vs_inflation_pct is None else bool(real_vs_inflation_pct > 0.0)
+        return _monthly_vs_inflation_payload(
+            month=month,
+            from_date=from_snap.snapshot_date,
+            to_date=latest.snapshot_date,
+            status="ok",
+            market_pct=market_pct,
+            market_delta_ars=market_delta_ars,
+            contributions_ars=contributions_ars,
+            net_pct=net_pct,
+            net_delta_ars=net_delta_ars,
+            inflation_pct=inflation_pct,
+            inflation_projected=inflation_projected,
+            real_vs_inflation_pct=real_vs_inflation_pct,
+            beats_inflation=beats_inflation,
+            quality_warnings=quality_warnings,
+            inflation_available_to=inflation_available_to,
+        )
+    finally:
+        conn.close()
 
 
 @router.get("/compare/inflation")

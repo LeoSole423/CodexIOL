@@ -12,6 +12,7 @@ Objetivo: enrutar cada consulta al prompt especializado correcto, manteniendo se
 ## Routing por intencion
 - Analisis de portafolio, riesgos, recomendaciones: `prompts/20_portfolio_analysis.md`.
 - Macro, noticias, tasas, inflacion, fuentes externas: `prompts/30_macro_sources.md`.
+- Consenso de referentes confiables para oportunidades: `prompts/35_expert_consensus.md`.
 - Busqueda/validacion de simbolos o instrumentos: `prompts/40_symbol_web_research.md`.
 - Ranking de oportunidades (compras/recompras): `prompts/45_opportunity_scoring.md`.
 - Gestion de alertas o eventos manuales: `prompts/50_alerts_events.md`.

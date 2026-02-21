@@ -75,6 +75,20 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _normalize_cashflow_amount(kind: str, amount: float) -> float:
+    kind_v = (kind or "").strip().lower()
+    if kind_v not in ("deposit", "withdraw", "correction"):
+        raise typer.BadParameter("--kind must be deposit|withdraw|correction")
+    amount_f = float(amount)
+    if kind_v in ("deposit", "withdraw") and amount_f < 0:
+        raise typer.BadParameter("--amount must be >= 0 for deposit|withdraw")
+    if kind_v == "deposit":
+        return abs(amount_f)
+    if kind_v == "withdraw":
+        return -abs(amount_f)
+    return amount_f
+
+
 def _confirm_or_exit(confirm: Optional[str] = None) -> None:
     # Default: interactive confirmation. For automation, user must explicitly pass --confirm CONFIRMAR.
     if confirm is not None:
@@ -675,6 +689,96 @@ def snapshot_backfill(
         raise typer.Exit(code=1)
 
 
+cashflow_app = typer.Typer(help="Manual cashflow adjustments (for real return reconciliation)")
+app.add_typer(cashflow_app, name="cashflow")
+
+
+@cashflow_app.command("add")
+def cashflow_add(
+    ctx: typer.Context,
+    flow_date: str = typer.Option(..., "--date", help="YYYY-MM-DD"),
+    kind: str = typer.Option(..., "--kind", help="deposit|withdraw|correction"),
+    amount: float = typer.Option(..., "--amount", help="Amount in ARS"),
+    note: Optional[str] = typer.Option(None, "--note", help="Optional note"),
+):
+    try:
+        d = _parse_date(flow_date).isoformat()
+        kind_v = (kind or "").strip().lower()
+        amount_norm = _normalize_cashflow_amount(kind_v, amount)
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        row = conn.execute(
+            """
+            INSERT INTO manual_cashflow_adjustments(flow_date, kind, amount_ars, note, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (d, kind_v, float(amount_norm), (note.strip() if note and note.strip() else None), _utc_now_iso()),
+        )
+        conn.commit()
+        out = conn.execute(
+            """
+            SELECT id, flow_date, kind, amount_ars, note, created_at
+            FROM manual_cashflow_adjustments
+            WHERE id = ?
+            """,
+            (int(row.lastrowid),),
+        ).fetchone()
+        _print_json(dict(out))
+    finally:
+        conn.close()
+
+
+@cashflow_app.command("list")
+def cashflow_list(
+    ctx: typer.Context,
+    date_from: Optional[str] = typer.Option(None, "--from", help="YYYY-MM-DD"),
+    date_to: Optional[str] = typer.Option(None, "--to", help="YYYY-MM-DD"),
+):
+    f = _parse_iso_date_optional(date_from, "--from")
+    t = _parse_iso_date_optional(date_to, "--to")
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, flow_date, kind, amount_ars, note, created_at
+            FROM manual_cashflow_adjustments
+            WHERE (? IS NULL OR flow_date >= ?)
+              AND (? IS NULL OR flow_date <= ?)
+            ORDER BY flow_date DESC, id DESC
+            """,
+            (f, f, t, t),
+        ).fetchall()
+        _print_json([dict(r) for r in rows])
+    finally:
+        conn.close()
+
+
+@cashflow_app.command("delete")
+def cashflow_delete(
+    ctx: typer.Context,
+    row_id: int = typer.Option(..., "--id", min=1, help="Adjustment ID"),
+):
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        cur = conn.execute("DELETE FROM manual_cashflow_adjustments WHERE id = ?", (int(row_id),))
+        conn.commit()
+        if int(cur.rowcount or 0) <= 0:
+            console.print("Adjustment ID not found.")
+            raise typer.Exit(code=1)
+        _print_json({"ok": True, "id": int(row_id)})
+    finally:
+        conn.close()
+
+
 data_app = typer.Typer(help="Local data access")
 app.add_typer(data_app, name="data")
 
@@ -789,6 +893,8 @@ _EVENT_TYPES = {"note", "macro", "portfolio", "order", "other"}
 _CONFIDENCE_LEVELS = {"low", "medium", "high"}
 _OPP_MODES = {"new", "rebuy", "both"}
 _OPP_UNIVERSES = {"bcba_cedears"}
+_SOURCE_POLICIES = {"strict_official_reuters"}
+_CONFLICT_MODES = {"manual_review"}
 
 
 def _maybe_read_stdin(value: str) -> str:
@@ -880,6 +986,31 @@ def _pick_symbols_for_auto_evidence(
     return chosen
 
 
+def _pick_symbols_for_web_link(
+    holdings_map: Dict[str, float],
+    prelim_candidates: List[Dict[str, Any]],
+    top_k: int,
+) -> List[str]:
+    chosen: List[str] = []
+    for s in sorted(holdings_map.keys()):
+        if s and s not in chosen:
+            chosen.append(s)
+    operable = [r for r in prelim_candidates if int(r.get("filters_passed") or 0) == 1]
+    operable.sort(
+        key=lambda r: (
+            -float(r.get("score_total") or 0.0),
+            -float(r.get("liquidity_score") or 0.0),
+            -float(r.get("trusted_refs_count") or 0.0),
+            str(r.get("symbol") or ""),
+        )
+    )
+    for r in operable[: int(top_k)]:
+        sym = str(r.get("symbol") or "").strip().upper()
+        if sym and sym not in chosen:
+            chosen.append(sym)
+    return chosen
+
+
 def _store_evidence_rows(conn, rows: List[Dict[str, Any]]) -> int:
     inserted = 0
     for r in rows:
@@ -900,6 +1031,9 @@ def _store_evidence_rows(conn, rows: List[Dict[str, Any]]) -> int:
             or date_conf_v not in _CONFIDENCE_LEVELS
         ):
             continue
+        notes_v = r.get("notes")
+        if isinstance(notes_v, (dict, list)):
+            notes_v = json.dumps(notes_v, ensure_ascii=True, sort_keys=True)
         conn.execute(
             """
             INSERT INTO advisor_evidence (
@@ -918,7 +1052,7 @@ def _store_evidence_rows(conn, rows: List[Dict[str, Any]]) -> int:
                 claim_v,
                 conf_v,
                 date_conf_v,
-                r.get("notes"),
+                notes_v,
                 r.get("conflict_key"),
             ),
         )
@@ -1422,13 +1556,22 @@ def advisor_evidence_fetch(
     ctx: typer.Context,
     symbols: Optional[str] = typer.Option(None, "--symbols", help="Comma-separated symbols"),
     from_context: bool = typer.Option(True, "--from-context/--no-from-context"),
+    from_top_run_id: Optional[int] = typer.Option(None, "--from-top-run-id", min=1, help="Use top candidates from a previous run"),
     as_of: Optional[str] = typer.Option(None, "--as-of", help="Optional YYYY-MM-DD"),
     per_source_limit: int = typer.Option(2, "--per-source-limit", min=1, max=10),
     max_symbols: int = typer.Option(15, "--max-symbols", min=1, max=200),
     include_news: bool = typer.Option(True, "--news/--no-news"),
     include_sec: bool = typer.Option(True, "--sec/--no-sec"),
+    source_policy: str = typer.Option("strict_official_reuters", "--source-policy", help="strict_official_reuters"),
+    include_reuters: bool = typer.Option(True, "--reuters/--no-reuters"),
+    include_official: bool = typer.Option(True, "--official/--no-official"),
+    run_stage: str = typer.Option("prelim", "--run-stage", help="prelim|rerank"),
     timeout_sec: int = typer.Option(10, "--timeout-sec", min=1, max=60),
 ):
+    source_policy_v = _normalize_enum(source_policy, "--source-policy", _SOURCE_POLICIES)
+    run_stage_v = (run_stage or "").strip().lower()
+    if run_stage_v not in {"prelim", "rerank"}:
+        raise typer.BadParameter("--run-stage must be prelim|rerank")
     db_path = resolve_db_path(ctx.obj.config.db_path)
     conn = connect(db_path)
     init_db(conn)
@@ -1451,6 +1594,26 @@ def advisor_evidence_fetch(
         for s in sorted(holdings_map.keys()):
             if s not in picked:
                 picked.append(s)
+    if from_top_run_id is not None:
+        conn = connect(db_path)
+        init_db(conn)
+        try:
+            rows = conn.execute(
+                """
+                SELECT symbol
+                FROM advisor_opportunity_candidates
+                WHERE run_id = ? AND filters_passed = 1
+                ORDER BY score_total DESC, symbol ASC
+                LIMIT ?
+                """,
+                (int(from_top_run_id), int(max_symbols)),
+            ).fetchall()
+            for r in rows:
+                sym = str(r["symbol"] or "").strip().upper()
+                if sym and sym not in picked:
+                    picked.append(sym)
+        finally:
+            conn.close()
 
     picked = picked[: int(max_symbols)]
     if not picked:
@@ -1466,6 +1629,10 @@ def advisor_evidence_fetch(
             include_news=bool(include_news),
             include_sec=bool(include_sec),
             timeout_sec=int(timeout_sec),
+            source_policy=source_policy_v,
+            include_reuters=bool(include_reuters),
+            include_official=bool(include_official),
+            run_stage=run_stage_v,
         )
         all_rows.extend(rows)
         for e in errs:
@@ -1485,6 +1652,7 @@ def advisor_evidence_fetch(
             "symbols": picked,
             "inserted": inserted,
             "fetched_rows": len(all_rows),
+            "source_policy": source_policy_v,
             "errors": errors,
         }
     )
@@ -1599,11 +1767,27 @@ def advisor_opportunities_run(
     evidence_news: bool = typer.Option(True, "--evidence-news/--no-evidence-news"),
     evidence_sec: bool = typer.Option(True, "--evidence-sec/--no-evidence-sec"),
     evidence_timeout_sec: int = typer.Option(10, "--evidence-timeout-sec", min=1, max=60),
+    web_link: bool = typer.Option(True, "--web-link/--no-web-link"),
+    web_top_k: int = typer.Option(15, "--web-top-k", min=1, max=200),
+    web_source_policy: str = typer.Option("strict_official_reuters", "--web-source-policy", help="strict_official_reuters"),
+    web_lookback_days: int = typer.Option(120, "--web-lookback-days", min=1, max=3650),
+    web_min_trusted_refs: int = typer.Option(2, "--web-min-trusted-refs", min=0, max=20),
+    web_conflict_mode: str = typer.Option("manual_review", "--web-conflict-mode", help="manual_review"),
+    web_reuters: bool = typer.Option(True, "--web-reuters/--no-web-reuters"),
+    web_official: bool = typer.Option(True, "--web-official/--no-web-official"),
+    exclude_crypto_new: bool = typer.Option(True, "--exclude-crypto-new/--include-crypto-new"),
+    min_volume_amount: float = typer.Option(50000.0, "--min-volume-amount", min=0.0),
+    min_operations: int = typer.Option(5, "--min-operations", min=0, max=1000000),
+    liquidity_priority: bool = typer.Option(True, "--liquidity-priority/--no-liquidity-priority"),
+    diversify_sectors: bool = typer.Option(True, "--diversify-sectors/--no-diversify-sectors"),
+    max_per_sector: int = typer.Option(2, "--max-per-sector", min=1, max=20),
 ):
     if float(budget_ars) <= 0:
         raise typer.BadParameter("--budget-ars must be > 0")
     mode_v = _normalize_enum(mode, "--mode", _OPP_MODES)
     universe_v = _normalize_enum(universe, "--universe", _OPP_UNIVERSES)
+    web_source_policy_v = _normalize_enum(web_source_policy, "--web-source-policy", _SOURCE_POLICIES)
+    web_conflict_mode_v = _normalize_enum(web_conflict_mode, "--web-conflict-mode", _CONFLICT_MODES)
 
     db_path = resolve_db_path(ctx.obj.config.db_path)
     conn = connect(db_path)
@@ -1622,6 +1806,22 @@ def advisor_opportunities_run(
             "new_asset_initial_cap_pct": 8.0,
             "drawdown_exclusion_pct": -25.0,
             "rebuy_dip_threshold_pct": -8.0,
+            "exclude_crypto_new": bool(exclude_crypto_new),
+            "min_volume_amount": float(min_volume_amount),
+            "min_operations": int(min_operations),
+            "liquidity_priority": bool(liquidity_priority),
+            "diversify_sectors": bool(diversify_sectors),
+            "max_per_sector": int(max_per_sector) if bool(diversify_sectors) else 0,
+        },
+        "web_link": {
+            "enabled": bool(web_link),
+            "top_k": int(web_top_k),
+            "source_policy": web_source_policy_v,
+            "lookback_days": int(web_lookback_days),
+            "min_trusted_refs": int(web_min_trusted_refs),
+            "conflict_mode": web_conflict_mode_v,
+            "reuters": bool(web_reuters),
+            "official": bool(web_official),
         },
     }
 
@@ -1633,10 +1833,21 @@ def advisor_opportunities_run(
         cur = conn.execute(
             """
             INSERT INTO advisor_opportunity_runs (
-                created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, config_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, config_json, pipeline_warnings_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (now, as_of_v, mode_v, universe_v, float(budget_ars), int(top), "running", None, json.dumps(cfg, ensure_ascii=True)),
+            (
+                now,
+                as_of_v,
+                mode_v,
+                universe_v,
+                float(budget_ars),
+                int(top),
+                "running",
+                None,
+                json.dumps(cfg, ensure_ascii=True),
+                None,
+            ),
         )
         run_id = int(cur.lastrowid)
         conn.commit()
@@ -1652,7 +1863,7 @@ def advisor_opportunities_run(
         init_db(conn)
         try:
             market_rows = _load_market_snapshot_rows(conn, as_of_v)
-            evidence_map = _load_evidence_rows_grouped(conn, as_of_v, lookback_days=60)
+            evidence_map = _load_evidence_rows_grouped(conn, as_of_v, lookback_days=int(web_lookback_days))
         finally:
             conn.close()
 
@@ -1660,15 +1871,44 @@ def advisor_opportunities_run(
         if not latest_metrics:
             raise RuntimeError("NO_MARKET_SNAPSHOTS: run 'iol advisor opportunities snapshot-universe' first")
 
+        series_by_symbol = price_series_by_symbol(market_rows, as_of_v)
+        prelim_candidates = build_candidates(
+            as_of=as_of_v,
+            mode=mode_v,
+            budget_ars=float(budget_ars),
+            top_n=int(top),
+            portfolio_total_ars=portfolio_total,
+            holdings_value_by_symbol=holdings_map,
+            latest_metrics=latest_metrics,
+            series_by_symbol=series_by_symbol,
+            evidence_by_symbol=evidence_map,
+            min_trusted_refs=0,
+            apply_expert_overlay=False,
+            conflict_mode=web_conflict_mode_v,
+            exclude_crypto_new=bool(exclude_crypto_new),
+            min_volume_amount=float(min_volume_amount),
+            min_operations=int(min_operations),
+            liquidity_priority=bool(liquidity_priority),
+            max_per_sector=0,
+        )
+
+        pipeline_warnings: List[str] = []
+        web_link_enabled = bool(web_link and fetch_evidence)
         evidence_fetch_summary: Dict[str, Any] = {
-            "enabled": bool(fetch_evidence),
+            "enabled": bool(web_link_enabled),
             "symbols": [],
             "fetched_rows": 0,
             "inserted": 0,
             "errors": [],
+            "source_policy": web_source_policy_v,
         }
-        if fetch_evidence:
-            auto_symbols = _pick_symbols_for_auto_evidence(holdings_map, latest_metrics, max_symbols=int(evidence_max_symbols))
+        if web_link_enabled:
+            auto_symbols = _pick_symbols_for_web_link(
+                holdings_map=holdings_map,
+                prelim_candidates=[c.to_dict() for c in prelim_candidates],
+                top_k=int(web_top_k),
+            )
+            auto_symbols = auto_symbols[: int(evidence_max_symbols)]
             evidence_fetch_summary["symbols"] = auto_symbols
             collected: List[Dict[str, Any]] = []
             fetch_errors: List[Dict[str, Any]] = []
@@ -1679,6 +1919,10 @@ def advisor_opportunities_run(
                     include_news=bool(evidence_news),
                     include_sec=bool(evidence_sec),
                     timeout_sec=int(evidence_timeout_sec),
+                    source_policy=web_source_policy_v,
+                    include_reuters=bool(web_reuters),
+                    include_official=bool(web_official),
+                    run_stage="rerank",
                 )
                 collected.extend(rows)
                 for e in errs:
@@ -1694,15 +1938,25 @@ def advisor_opportunities_run(
             evidence_fetch_summary["fetched_rows"] = len(collected)
             evidence_fetch_summary["inserted"] = int(inserted_rows)
             evidence_fetch_summary["errors"] = fetch_errors
+            if fetch_errors:
+                pipeline_warnings.append("WEB_FETCH_PARTIAL_ERRORS")
 
             conn = connect(db_path)
             init_db(conn)
             try:
-                evidence_map = _load_evidence_rows_grouped(conn, as_of_v, lookback_days=60)
+                evidence_map = _load_evidence_rows_grouped(conn, as_of_v, lookback_days=int(web_lookback_days))
             finally:
                 conn.close()
 
-        series_by_symbol = price_series_by_symbol(market_rows, as_of_v)
+        has_recent_evidence = any(bool(v) for v in evidence_map.values())
+        apply_web_overlay = bool(
+            web_link_enabled
+            and (int(evidence_fetch_summary.get("inserted") or 0) > 0 or has_recent_evidence)
+        )
+        min_refs_final = int(web_min_trusted_refs) if apply_web_overlay else 0
+        if web_link_enabled and not apply_web_overlay:
+            pipeline_warnings.append("WEB_FETCH_EMPTY_FALLBACK_TO_QUANT")
+
         candidates = build_candidates(
             as_of=as_of_v,
             mode=mode_v,
@@ -1713,6 +1967,14 @@ def advisor_opportunities_run(
             latest_metrics=latest_metrics,
             series_by_symbol=series_by_symbol,
             evidence_by_symbol=evidence_map,
+            min_trusted_refs=min_refs_final,
+            apply_expert_overlay=apply_web_overlay,
+            conflict_mode=web_conflict_mode_v,
+            exclude_crypto_new=bool(exclude_crypto_new),
+            min_volume_amount=float(min_volume_amount),
+            min_operations=int(min_operations),
+            liquidity_priority=bool(liquidity_priority),
+            max_per_sector=int(max_per_sector) if bool(diversify_sectors) else 0,
         )
 
         conn = connect(db_path)
@@ -1726,8 +1988,9 @@ def advisor_opportunities_run(
                     INSERT INTO advisor_opportunity_candidates (
                         run_id, symbol, candidate_type, score_total, score_risk, score_value, score_momentum,
                         score_catalyst, entry_low, entry_high, suggested_weight_pct, suggested_amount_ars,
-                        reason_summary, risk_flags_json, filters_passed
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        reason_summary, risk_flags_json, filters_passed, expert_signal_score,
+                        trusted_refs_count, consensus_state, decision_gate, evidence_summary_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         int(run_id),
@@ -1745,17 +2008,33 @@ def advisor_opportunities_run(
                         d["reason_summary"],
                         d["risk_flags_json"],
                         int(d["filters_passed"]),
+                        float(d.get("expert_signal_score") or 0.0),
+                        int(d.get("trusted_refs_count") or 0),
+                        str(d.get("consensus_state") or "mixed"),
+                        str(d.get("decision_gate") or "auto"),
+                        str(d.get("evidence_summary_json") or "{}"),
                     ),
                 )
+            warnings_json = json.dumps(pipeline_warnings, ensure_ascii=True) if pipeline_warnings else None
             conn.execute(
-                "UPDATE advisor_opportunity_runs SET status='ok', error_message=NULL WHERE id = ?",
-                (int(run_id),),
+                "UPDATE advisor_opportunity_runs SET status='ok', error_message=NULL, pipeline_warnings_json=? WHERE id = ?",
+                (warnings_json, int(run_id)),
             )
             conn.commit()
         finally:
             conn.close()
 
-        top_rows = [c.to_dict() for c in candidates if int(c.filters_passed) == 1][: int(top)]
+        weighted_rows = [
+            c.to_dict()
+            for c in candidates
+            if int(c.filters_passed) == 1 and c.suggested_weight_pct is not None
+        ]
+        top_rows = weighted_rows[: int(top)] if weighted_rows else [c.to_dict() for c in candidates if int(c.filters_passed) == 1][: int(top)]
+        manual_rows = [
+            c.to_dict()
+            for c in candidates
+            if str(c.decision_gate).strip().lower() == "manual_review"
+        ][: int(top)]
         _print_json(
             {
                 "run_id": int(run_id),
@@ -1765,8 +2044,10 @@ def advisor_opportunities_run(
                 "budget_ars": float(budget_ars),
                 "top_n": int(top),
                 "evidence_fetch": evidence_fetch_summary,
+                "pipeline_warnings": pipeline_warnings,
                 "candidates_total": len(candidates),
                 "top_operable": top_rows,
+                "manual_review": manual_rows,
             }
         )
     except Exception as exc:
@@ -1774,8 +2055,8 @@ def advisor_opportunities_run(
         init_db(conn)
         try:
             conn.execute(
-                "UPDATE advisor_opportunity_runs SET status='error', error_message=? WHERE id = ?",
-                (str(exc), int(run_id)),
+                "UPDATE advisor_opportunity_runs SET status='error', error_message=?, pipeline_warnings_json=? WHERE id = ?",
+                (str(exc), json.dumps(["RUN_ERROR"], ensure_ascii=True), int(run_id)),
             )
             conn.commit()
         finally:
@@ -1796,7 +2077,7 @@ def advisor_opportunities_report(
     try:
         run = conn.execute(
             """
-            SELECT id, created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message
+            SELECT id, created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, pipeline_warnings_json
             FROM advisor_opportunity_runs
             WHERE id = ?
             """,
@@ -1809,7 +2090,8 @@ def advisor_opportunities_report(
             """
             SELECT symbol, candidate_type, score_total, score_risk, score_value, score_momentum, score_catalyst,
                    entry_low, entry_high, suggested_weight_pct, suggested_amount_ars, reason_summary, risk_flags_json,
-                   filters_passed
+                   filters_passed, expert_signal_score, trusted_refs_count, consensus_state, decision_gate,
+                   evidence_summary_json
             FROM advisor_opportunity_candidates
             WHERE run_id = ?
             ORDER BY score_total DESC, symbol ASC
@@ -1845,7 +2127,7 @@ def advisor_opportunities_list_runs(
         if status_v is None:
             rows = conn.execute(
                 """
-                SELECT id, created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message
+                SELECT id, created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, pipeline_warnings_json
                 FROM advisor_opportunity_runs
                 ORDER BY id DESC
                 LIMIT ?
@@ -1855,7 +2137,7 @@ def advisor_opportunities_list_runs(
         else:
             rows = conn.execute(
                 """
-                SELECT id, created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message
+                SELECT id, created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, pipeline_warnings_json
                 FROM advisor_opportunity_runs
                 WHERE status = ?
                 ORDER BY id DESC
@@ -1973,6 +2255,7 @@ def data_export(
         "portfolio_assets",
         "account_balances",
         "orders",
+        "manual_cashflow_adjustments",
         "snapshot_runs",
         "advisor_logs",
         "advisor_alerts",

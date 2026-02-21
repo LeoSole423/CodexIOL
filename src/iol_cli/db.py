@@ -88,6 +88,18 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS manual_cashflow_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            flow_date TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            amount_ars REAL NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS orders (
             order_number INTEGER PRIMARY KEY,
             status TEXT,
@@ -229,7 +241,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             top_n INTEGER NOT NULL,
             status TEXT NOT NULL,
             error_message TEXT,
-            config_json TEXT NOT NULL
+            config_json TEXT NOT NULL,
+            pipeline_warnings_json TEXT
         )
         """
     )
@@ -252,6 +265,11 @@ def init_db(conn: sqlite3.Connection) -> None:
             reason_summary TEXT NOT NULL,
             risk_flags_json TEXT,
             filters_passed INTEGER NOT NULL,
+            expert_signal_score REAL,
+            trusted_refs_count INTEGER,
+            consensus_state TEXT,
+            decision_gate TEXT,
+            evidence_summary_json TEXT,
             FOREIGN KEY(run_id) REFERENCES advisor_opportunity_runs(id)
         )
         """
@@ -303,6 +321,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_runs_asof ON advisor_opportunity_runs(as_of)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_candidates_run_score ON advisor_opportunity_candidates(run_id, score_total DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_account_balances_date ON account_balances(snapshot_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_manual_cashflow_flow_date ON manual_cashflow_adjustments(flow_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_batch_ops_run ON batch_ops(run_id)")
     conn.commit()
 
@@ -329,6 +348,24 @@ def init_db(conn: sqlite3.Connection) -> None:
             "avg_price": "REAL",
             "operated_amount": "REAL",
             "currency": "TEXT",
+        },
+    )
+    ensure_columns(
+        conn,
+        "advisor_opportunity_runs",
+        {
+            "pipeline_warnings_json": "TEXT",
+        },
+    )
+    ensure_columns(
+        conn,
+        "advisor_opportunity_candidates",
+        {
+            "expert_signal_score": "REAL",
+            "trusted_refs_count": "INTEGER",
+            "consensus_state": "TEXT",
+            "decision_gate": "TEXT",
+            "evidence_summary_json": "TEXT",
         },
     )
 

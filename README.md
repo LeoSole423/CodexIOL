@@ -155,6 +155,12 @@ iol snapshot catchup
 
 iol snapshot backfill --from 2026-01-01 --to 2026-02-01
 
+iol cashflow add --date 2026-02-18 --kind deposit --amount 500000 --note "Aporte bancario"
+
+iol cashflow list --from 2026-02-01 --to 2026-02-28
+
+iol cashflow delete --id 1
+
 iol data query "SELECT snapshot_date, total_value FROM portfolio_snapshots ORDER BY snapshot_date"
 
 iol data export --table portfolio_assets --format csv
@@ -166,6 +172,8 @@ iol data export --table batch_ops --format json
 iol data export --table advisor_alerts --format json
 
 iol data export --table advisor_events --format json
+
+iol data export --table manual_cashflow_adjustments --format json
 ```
 
 ## Outputs / Reports
@@ -248,6 +256,7 @@ Notas:
   - `IOL_SEC_USER_AGENT="CodexIOL/1.0 (tu-email@dominio.com)"`
   - Si no, algunos endpoints como `www.sec.gov/files/company_tickers.json` pueden devolver `403`.
 - El snapshot diario guarda `cash_disponible_ars`/`cash_disponible_usd` y usa `totalEnPesos` de `/api/v2/estadocuenta` para el total.
+- La web muestra retorno real ajustado por flujo externo estimado (caja + operaciones) y permite correcciones manuales con `iol cashflow ...` o `POST /api/cashflows/manual`.
 - `iol snapshot run` evita pisar un snapshot existente si el nuevo estÃ¡ mÃ¡s lejos del horario de cierre (por ejemplo, si lo corrÃ©s durante horario de mercado). UsÃ¡ `iol snapshot run --force` para sobrescribir igualmente.
 - Las ordenes individuales requieren confirmacion (prompt interactivo o `--confirm CONFIRMAR`).
 - `iol batch run` solo ejecuta si pasas `--confirm CONFIRMAR` (sin eso se comporta como dry-run).

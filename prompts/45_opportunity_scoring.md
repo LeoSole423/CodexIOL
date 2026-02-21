@@ -12,13 +12,20 @@ Salida esperada: decision final de cartera + recomendaciones (o no-operar) con r
    - `iol advisor context`
 2. Refrescar universo/precios:
    - `iol advisor opportunities snapshot-universe --universe bcba_cedears`
-3. Ingestar evidencia web (opcional manual):
-   - `iol advisor evidence add ...`
-4. Fetch semiautomatico de evidencia (opcional standalone):
-   - `iol advisor evidence fetch --from-context --max-symbols 15 --per-source-limit 2`
-5. Ejecutar ranking (incluye auto-fetch por defecto):
-   - `iol advisor opportunities run --mode both --budget-ars <monto> --top 10`
-6. Generar reporte:
+3. Ejecutar pasada preliminar cuantitativa (`prelim`).
+4. Integrar evidencia web bidireccional (`TopN <-> Web`) en modo estricto:
+   - `source_policy=strict_official_reuters`
+   - simbolos = holdings + TopK preliminar
+5. Recalcular ranking final (`rerank`) con score hibrido y compuertas.
+6. Ejecutar ranking integrado:
+   - `iol advisor opportunities run --mode both --budget-ars <monto> --top 10 --web-link --web-source-policy strict_official_reuters`
+   - Defaults operativos para futuras busquedas:
+     - `--exclude-crypto-new`
+     - `--min-volume-amount 50000`
+     - `--min-operations 5`
+     - `--liquidity-priority`
+     - `--diversify-sectors --max-per-sector 2`
+7. Generar reporte:
    - `iol advisor opportunities report --run-id <id> --out reports/latest/Oportunidades.md`
 
 ## Salida obligatoria post-run
@@ -28,30 +35,40 @@ Aplicar `prompts/contracts/output_schema.md` tipo `oportunidades` y siempre incl
 3. Por que de cada recomendacion: score, factores de riesgo, catalyst/evidencia, y flags.
 4. Si no se recomienda operar, explicar concretamente por que (ej. evidencia insuficiente, score bajo, conflictos).
 
-## Reglas de decisión
+## Reglas de decision
 - Filtros duros:
   - liquidez
-  - concentración
+  - exclusion de cripto para candidatos `new` (por defecto)
+  - concentracion
   - drawdown extremo
+- Priorizacion de ranking:
+  - desempatar por liquidez (spread/operaciones/volumen)
+- Diversificacion:
+  - cap por sector inferido para evitar top concentrado en un solo tema
 - Rebuy (`buy the dip`):
   - drawdown <= -8%
   - tesis vigente (evidencia medium/high en ventana reciente)
-  - sin conflicto no resuelto de evidencia
 
-## Scoring híbrido
+## Acople web + score (hibrido con compuertas)
+- `catalyst_final = 0.6 * catalyst_actual + 0.4 * expert_signal_score`.
+- Si `trusted_refs < umbral`, activar `EVIDENCE_INSUFFICIENT`.
+- Si `consensus_state=conflict`, marcar `decision_gate=manual_review` (no bloquear automaticamente).
+- Si falla fetch web, continuar con ranking cuantitativo y advertir en `pipeline_warnings_json`.
+
+## Scoring hibrido
 - `risk` 35%
 - `value` 20%
 - `momentum` 35%
-- `catalyst` 10%
+- `catalyst` 10% (catalyst final tras overlay web)
 
 ## Sizing
-- Convicción por score:
+- Conviccion por score:
   - `>=80` -> 1.5x
   - `65-79` -> 1.0x
   - `50-64` -> 0.5x
-- Aplicar caps por activo y concentración post-trade.
+- Aplicar caps por activo y concentracion post-trade.
 
 ## Guardrail operativo
-- El ranking no ejecuta órdenes reales.
-- Cualquier ejecución debe pasar por `prompts/60_safe_execution.md`.
+- El ranking no ejecuta ordenes reales.
+- Cualquier ejecucion debe pasar por `prompts/60_safe_execution.md`.
 - Formato de salida: `prompts/contracts/output_schema.md` tipo `oportunidades`.

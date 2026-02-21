@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import os
@@ -53,7 +54,75 @@ def _sec_http_headers() -> Dict[str, str]:
     return headers
 
 
-def fetch_google_news_rss(symbol: str, per_source_limit: int, timeout_sec: int = 10) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+def _infer_stance_from_text(text: str) -> str:
+    t = (text or "").strip().lower()
+    if not t:
+        return "neutral"
+    bullish_markers = (
+        "upside",
+        "upgrade",
+        "buy",
+        "outperform",
+        "beat",
+        "rally",
+        "surge",
+        "record high",
+        "optimis",
+        "bullish",
+    )
+    bearish_markers = (
+        "downgrade",
+        "sell",
+        "underperform",
+        "miss",
+        "slump",
+        "drop",
+        "fall",
+        "warning",
+        "cut",
+        "bearish",
+    )
+    for marker in bullish_markers:
+        if marker in t:
+            return "bullish"
+    for marker in bearish_markers:
+        if marker in t:
+            return "bearish"
+    return "neutral"
+
+
+def _notes_payload(
+    *,
+    expert_name: str,
+    org: str,
+    source_tier: str,
+    stance: str,
+    topic: str,
+    run_stage: str,
+    sector_hint: Optional[str] = None,
+    sic_description: Optional[str] = None,
+) -> str:
+    payload = {
+        "expert_name": expert_name,
+        "org": org,
+        "source_tier": source_tier,
+        "stance": stance,
+        "topic": topic,
+        "run_stage": run_stage,
+    }
+    if sector_hint:
+        payload["sector_hint"] = str(sector_hint)
+    if sic_description:
+        payload["sic_description"] = str(sic_description)
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True)
+
+
+def fetch_google_news_rss(
+    symbol: str,
+    per_source_limit: int,
+    timeout_sec: int = 10,
+    run_stage: str = "prelim",
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     sym = _norm_symbol(symbol)
     if not sym:
         return [], None
@@ -89,7 +158,14 @@ def fetch_google_news_rss(symbol: str, per_source_limit: int, timeout_sec: int =
                 "claim": title,
                 "confidence": "medium",
                 "date_confidence": "high" if pub else "low",
-                "notes": "Auto-ingested news headline",
+                "notes": _notes_payload(
+                    expert_name="Editorial",
+                    org="Google News RSS",
+                    source_tier="news",
+                    stance=_infer_stance_from_text(title),
+                    topic="market_news",
+                    run_stage=run_stage,
+                ),
                 "conflict_key": f"{sym}:news",
             }
         )
@@ -124,7 +200,12 @@ def _load_sec_tickers(timeout_sec: int = 10) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-def fetch_sec_filings(symbol: str, per_source_limit: int, timeout_sec: int = 10) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+def fetch_sec_filings(
+    symbol: str,
+    per_source_limit: int,
+    timeout_sec: int = 10,
+    run_stage: str = "prelim",
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     sym = _norm_symbol(symbol)
     if not sym:
         return [], None
@@ -144,6 +225,7 @@ def fetch_sec_filings(symbol: str, per_source_limit: int, timeout_sec: int = 10)
         return [], f"sec_error: {exc}"
 
     recent = (data.get("filings") or {}).get("recent") or {}
+    sic_description = _safe_str(data.get("sicDescription") or "")
     forms = recent.get("form") or []
     filing_dates = recent.get("filingDate") or []
     accession = recent.get("accessionNumber") or []
@@ -167,10 +249,77 @@ def fetch_sec_filings(symbol: str, per_source_limit: int, timeout_sec: int = 10)
                 "claim": claim + (f" (accession {acc})" if acc else ""),
                 "confidence": "high",
                 "date_confidence": "high" if fdate else "low",
-                "notes": "Auto-ingested SEC filing metadata",
+                "notes": _notes_payload(
+                    expert_name="Regulatory Filing",
+                    org="SEC EDGAR",
+                    source_tier="official",
+                    stance="neutral",
+                    topic="filing_update",
+                    run_stage=run_stage,
+                    sic_description=sic_description or None,
+                ),
                 "conflict_key": f"{sym}:sec",
             }
         )
+    return out, None
+
+
+def fetch_reuters_rss(
+    symbol: str,
+    per_source_limit: int,
+    timeout_sec: int = 10,
+    run_stage: str = "prelim",
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    sym = _norm_symbol(symbol)
+    if not sym:
+        return [], None
+    q = f"{sym} site:reuters.com stock OR etf"
+    url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+    headers = _default_http_headers()
+    try:
+        resp = requests.get(url, timeout=timeout_sec, headers=headers)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+    except Exception as exc:
+        return [], f"reuters_error: {exc}"
+
+    out: List[Dict[str, Any]] = []
+    now = _now_iso()
+    channel = root.find("channel")
+    if channel is None:
+        return [], None
+    for item in channel.findall("item")[: max(0, int(per_source_limit) * 3)]:
+        title = _safe_str(item.findtext("title"))
+        link = _safe_str(item.findtext("link"))
+        pub = _safe_iso_date_from_pub(item.findtext("pubDate"))
+        if not title or not link:
+            continue
+        if "reuters.com" not in link.lower():
+            continue
+        out.append(
+            {
+                "symbol": sym,
+                "query": q,
+                "source_name": "Reuters",
+                "source_url": link,
+                "published_date": pub,
+                "retrieved_at_utc": now,
+                "claim": title,
+                "confidence": "high",
+                "date_confidence": "high" if pub else "low",
+                "notes": _notes_payload(
+                    expert_name="Reuters Editorial",
+                    org="Reuters",
+                    source_tier="reuters",
+                    stance=_infer_stance_from_text(title),
+                    topic="market_outlook",
+                    run_stage=run_stage,
+                ),
+                "conflict_key": f"{sym}:reuters",
+            }
+        )
+        if len(out) >= int(per_source_limit):
+            break
     return out, None
 
 
@@ -180,19 +329,57 @@ def collect_symbol_evidence(
     include_news: bool = True,
     include_sec: bool = True,
     timeout_sec: int = 10,
+    source_policy: str = "strict_official_reuters",
+    include_reuters: bool = True,
+    include_official: bool = True,
+    run_stage: str = "prelim",
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     out: List[Dict[str, Any]] = []
     errs: List[str] = []
-    if include_sec:
-        rows, err = fetch_sec_filings(symbol, per_source_limit=per_source_limit, timeout_sec=timeout_sec)
-        out.extend(rows)
-        if err:
-            errs.append(err)
-    if include_news:
-        rows, err = fetch_google_news_rss(symbol, per_source_limit=per_source_limit, timeout_sec=timeout_sec)
-        out.extend(rows)
-        if err:
-            errs.append(err)
+    policy = (source_policy or "").strip().lower() or "strict_official_reuters"
+
+    if policy == "strict_official_reuters":
+        if include_official and include_sec:
+            rows, err = fetch_sec_filings(
+                symbol,
+                per_source_limit=per_source_limit,
+                timeout_sec=timeout_sec,
+                run_stage=run_stage,
+            )
+            out.extend(rows)
+            if err:
+                errs.append(err)
+        if include_reuters and include_news:
+            rows, err = fetch_reuters_rss(
+                symbol,
+                per_source_limit=per_source_limit,
+                timeout_sec=timeout_sec,
+                run_stage=run_stage,
+            )
+            out.extend(rows)
+            if err:
+                errs.append(err)
+    else:
+        if include_sec:
+            rows, err = fetch_sec_filings(
+                symbol,
+                per_source_limit=per_source_limit,
+                timeout_sec=timeout_sec,
+                run_stage=run_stage,
+            )
+            out.extend(rows)
+            if err:
+                errs.append(err)
+        if include_news:
+            rows, err = fetch_google_news_rss(
+                symbol,
+                per_source_limit=per_source_limit,
+                timeout_sec=timeout_sec,
+                run_stage=run_stage,
+            )
+            out.extend(rows)
+            if err:
+                errs.append(err)
 
     dedup = {}
     for r in out:

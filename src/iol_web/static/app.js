@@ -36,9 +36,22 @@
     return (v >= 0 ? "+" : "-") + f.format(Math.abs(v));
   }
 
-  async function fetchJSON(url) {
-    const r = await fetch(url, { cache: "no-store" });
-    return await r.json();
+  async function fetchJSON(url, options) {
+    const opts = Object.assign({ cache: "no-store" }, options || {});
+    const r = await fetch(url, opts);
+    let data = null;
+    try {
+      data = await r.json();
+    } catch (_) {
+      data = null;
+    }
+    if (!r.ok) {
+      const err = new Error((data && data.error) ? data.error : `HTTP ${r.status}`);
+      err.status = r.status;
+      err.payload = data;
+      throw err;
+    }
+    return data;
   }
 
   function renderTable(targetId, rows, metricKey, metricLabel, currencyCode) {
@@ -302,10 +315,172 @@
     root.innerHTML = rows;
   }
 
+  function putReturnCard(mainId, subId, block) {
+    const n = el(mainId);
+    if (n) {
+      const mainPct = (block && block.real_pct != null) ? block.real_pct : null;
+      n.textContent = mainPct == null ? "-" : fmtPct(mainPct);
+      n.className = "v " + signClass(mainPct);
+    }
+    const s = el(subId);
+    if (s) {
+      const gross = (block && block.pct != null) ? fmtPct(block.pct) : "-";
+      const flow = (block && block.flow_total_ars != null) ? fmtDeltaARS(block.flow_total_ars) : "-";
+      s.textContent = `Mercado ${gross} | Aportes ${flow}`;
+    }
+  }
+
+  function renderMonthVsInflationKpi(kpi) {
+    const v = el("kpiMonthVsInflValue");
+    const s = el("kpiMonthVsInflSub");
+    const b = el("kpiMonthVsInflBadge");
+    if (!v || !s || !b) return;
+
+    const status = (kpi && kpi.status) ? String(kpi.status) : "";
+    v.className = "v";
+    b.style.display = "none";
+    b.className = "kpi-status-badge";
+    b.textContent = "";
+
+    if (!kpi || !status) {
+      v.textContent = "-";
+      s.textContent = "No se pudo cargar el KPI mensual.";
+      return;
+    }
+
+    if (status === "insufficient_snapshots") {
+      v.textContent = "-";
+      s.textContent = "Faltan snapshots para calcular acumulado mensual.";
+      return;
+    }
+
+    if (status === "inflation_unavailable") {
+      const net = (kpi.net_pct != null) ? fmtPct(kpi.net_pct) : "-";
+      v.textContent = net;
+      v.className = "v " + signClass(kpi.net_pct);
+      s.textContent = `Neto ${net} | IPC no disponible`;
+      return;
+    }
+
+    const real = (kpi.real_vs_inflation_pct != null) ? Number(kpi.real_vs_inflation_pct) : null;
+    const net = (kpi.net_pct != null) ? fmtPct(kpi.net_pct) : "-";
+    const ipc = (kpi.inflation_pct != null)
+      ? (fmtPct(kpi.inflation_pct) + (kpi.inflation_projected ? " (est.)" : ""))
+      : "-";
+
+    v.textContent = real == null ? "-" : fmtPct(real);
+    v.className = "v " + signClass(real);
+    s.textContent = `Neto ${net} | IPC ${ipc}`;
+
+    if (kpi.beats_inflation == null || real == null) {
+      b.style.display = "inline-flex";
+      b.className = "kpi-status-badge kpi-status-neutral";
+      b.textContent = "Sin senal";
+      return;
+    }
+
+    b.style.display = "inline-flex";
+    if (kpi.beats_inflation) {
+      b.className = "kpi-status-badge kpi-status-up";
+      b.textContent = "Le ganas al IPC";
+    } else {
+      b.className = "kpi-status-badge kpi-status-down";
+      b.textContent = "Debajo del IPC";
+    }
+  }
+
+  function putTextAndSign(id, value, formatter) {
+    const node = el(id);
+    if (!node) return;
+    if (value == null) {
+      node.textContent = "-";
+      node.className = "v";
+      return;
+    }
+    node.textContent = formatter ? formatter(value) : String(value);
+    node.className = "v " + signClass(Number(value));
+  }
+
+  function renderHeroMonthInsights(kpi) {
+    if (!kpi) {
+      putTextAndSign("kpiMonthNetPct", null);
+      putTextAndSign("kpiMonthRealPct", null);
+      putTextAndSign("kpiMonthFlowArs", null);
+      putTextAndSign("kpiMonthNetArs", null);
+      return;
+    }
+
+    const status = String(kpi.status || "");
+    if (status === "ok" || status === "inflation_unavailable") {
+      putTextAndSign("kpiMonthNetPct", kpi.net_pct, (v) => fmtPct(v));
+      putTextAndSign("kpiMonthRealPct", kpi.real_vs_inflation_pct, (v) => fmtPct(v));
+      putTextAndSign("kpiMonthFlowArs", kpi.contributions_ars, (v) => fmtDeltaARS(v));
+      putTextAndSign("kpiMonthNetArs", kpi.net_delta_ars, (v) => fmtDeltaARS(v));
+      if (status === "inflation_unavailable") {
+        const n = el("kpiMonthRealPct");
+        if (n) {
+          n.textContent = "IPC -";
+          n.className = "v";
+        }
+      }
+      return;
+    }
+
+    putTextAndSign("kpiMonthNetPct", null);
+    putTextAndSign("kpiMonthRealPct", null);
+    putTextAndSign("kpiMonthFlowArs", null);
+    putTextAndSign("kpiMonthNetArs", null);
+  }
+
+  function renderManualCashflows(rows) {
+    const root = el("tblCashflowsManual");
+    if (!root) return;
+    const list = rows || [];
+    if (!list.length) {
+      root.innerHTML = `<div class="hint">Sin ajustes manuales.</div>`;
+      return;
+    }
+    const head = `
+      <th>Fecha</th>
+      <th>Tipo</th>
+      <th class="num">Monto</th>
+      <th>Nota</th>
+      <th class="num">Acciones</th>
+    `;
+    const body = list.map((r) => {
+      return `
+        <tr>
+          <td>${r.flow_date || "-"}</td>
+          <td>${r.kind || "-"}</td>
+          <td class="num ${signClass(r.amount_ars)}">${fmtDeltaARS(r.amount_ars)}</td>
+          <td class="muted">${(r.note || "").slice(0, 120)}</td>
+          <td class="num">
+            <div class="cashflow-row-actions">
+              <button class="btn-link" data-cashflow-del="${r.id}">Eliminar</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join("");
+    root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  async function refreshManualCashflows() {
+    if (!el("tblCashflowsManual")) return;
+    try {
+      const rows = await fetchJSON("/api/cashflows/manual");
+      renderManualCashflows(rows);
+    } catch (e) {
+      const root = el("tblCashflowsManual");
+      if (root) root.innerHTML = `<div class="hint">No se pudieron cargar los ajustes manuales.</div>`;
+    }
+  }
+
   async function loadDashboard(rangeDays) {
-    const [latest, ret] = await Promise.all([
+    const [latest, ret, monthlyKpi] = await Promise.all([
       fetchJSON("/api/latest"),
       fetchJSON("/api/returns"),
+      fetchJSON("/api/kpi/monthly-vs-inflation").catch(() => null),
     ]);
 
     if (!latest || !latest.snapshot) {
@@ -327,22 +502,26 @@
 
     const daily = ret.daily || {};
     if (el("kpiDailyDelta")) {
-      el("kpiDailyDelta").textContent = fmtDeltaARS(daily.delta);
-      el("kpiDailyDelta").className = "kpi-value " + signClass(daily.delta);
+      const v = (daily.real_delta != null) ? daily.real_delta : daily.delta;
+      el("kpiDailyDelta").textContent = fmtDeltaARS(v);
+      el("kpiDailyDelta").className = "kpi-value " + signClass(v);
     }
-    if (el("kpiDailyPct")) el("kpiDailyPct").textContent = daily.pct == null ? "-" : fmtPct(daily.pct);
+    if (el("kpiDailyPct")) {
+      const p = (daily.real_pct != null) ? daily.real_pct : daily.pct;
+      el("kpiDailyPct").textContent = p == null ? "-" : fmtPct(p);
+    }
+    if (el("kpiDailyGross")) {
+      const grossPct = (daily.pct != null) ? fmtPct(daily.pct) : "-";
+      const flow = (daily.flow_total_ars != null) ? fmtDeltaARS(daily.flow_total_ars) : "-";
+      el("kpiDailyGross").textContent = `Mercado ${grossPct} | Aportes ${flow}`;
+    }
 
-    function putRet(id, block) {
-      const n = el(id);
-      if (!n) return;
-      const pct = (block && block.pct != null) ? block.pct : null;
-      n.textContent = pct == null ? "-" : fmtPct(pct);
-      n.className = "v " + signClass(pct);
-    }
-    putRet("retWeekly", ret.weekly);
-    putRet("retMonthly", ret.monthly);
-    putRet("retYtd", ret.ytd);
-    putRet("retYearly", ret.yearly);
+    putReturnCard("retWeekly", "retWeeklySub", ret.weekly);
+    putReturnCard("retMonthly", "retMonthlySub", ret.monthly);
+    putReturnCard("retYtd", "retYtdSub", ret.ytd);
+    putReturnCard("retYearly", "retYearlySub", ret.yearly);
+    renderMonthVsInflationKpi(monthlyKpi);
+    renderHeroMonthInsights(monthlyKpi);
     const rh = el("returnsHint");
     if (rh) {
       const missing = ["weekly", "monthly", "yearly"].some((k) => (ret[k] && ret[k].pct != null) ? false : true);
@@ -351,6 +530,21 @@
         rh.textContent = "Para ver retornos por per\u00edodo necesit\u00e1s m\u00e1s de 1 snapshot. Deja corriendo el scheduler (guarda al cierre) o ejecuta `iol snapshot run` en distintos d\u00edas.";
       } else {
         rh.style.display = "none";
+      }
+    }
+    const qh = el("returnsQualityHint");
+    if (qh) {
+      const uniq = new Set();
+      ["daily", "weekly", "monthly", "yearly", "ytd"].forEach((k) => {
+        const ww = ((ret || {})[k] || {}).quality_warnings || [];
+        ww.forEach((x) => uniq.add(String(x)));
+      });
+      const list = Array.from(uniq);
+      if (list.length) {
+        qh.style.display = "block";
+        qh.textContent = `Calidad retorno real: ${list.join(", ")}.`;
+      } else {
+        qh.style.display = "none";
       }
     }
 
@@ -368,22 +562,8 @@
         !!(cmp && cmp.projection_used),
         (cmp && cmp.projection_source_month) ? cmp.projection_source_month : null
       );
-
-      // KPI: pick latest month where both are available
-      let pick = null;
-      for (let i = rows.length - 1; i >= 0; i--) {
-        const r = rows[i];
-        if (r && r.portfolio_pct != null && r.inflation_pct != null && r.real_pct != null) { pick = r; break; }
-      }
-      if (el("inflMonthly")) el("inflMonthly").textContent = pick ? (fmtPct(pick.inflation_pct) + (pick.inflation_projected ? " (est.)" : "")) : "-";
-      if (el("realMonthly")) {
-        el("realMonthly").textContent = pick ? fmtPct(pick.real_pct) : "-";
-        el("realMonthly").className = "v " + signClass(pick ? pick.real_pct : null);
-      }
     } catch (_) {
       // Keep dashboard functional even if inflation endpoint fails.
-      if (el("inflMonthly")) el("inflMonthly").textContent = "-";
-      if (el("realMonthly")) el("realMonthly").textContent = "-";
       if (cmpRoot) {
         cmpRoot.innerHTML = `<div class="hint">No se pudo cargar la inflaci\u00f3n. Prob\u00e1 abrir <code>/api/compare/inflation?months=12</code> y revis\u00e1 los logs del contenedor <code>web</code>.</div>`;
       }
@@ -523,6 +703,8 @@
       chartAlloc = buildPieChart(allocCanvas, labelsA, valuesA);
       renderAllocLegend("allocLegend", labelsA, valuesA, colors);
     }
+
+    await refreshManualCashflows();
   }
 
   async function loadAssetsPage() {
@@ -725,6 +907,77 @@
     if (cashChk) cashChk.addEventListener("change", () => loadDashboard(getActiveRange()));
   }
 
+  function initCashflowControls() {
+    const form = el("cashflowForm");
+    if (!form) return;
+
+    const dateInput = el("cashflowDate");
+    const kindInput = el("cashflowKind");
+    const amountInput = el("cashflowAmount");
+    const noteInput = el("cashflowNote");
+    const hint = el("cashflowHint");
+
+    if (dateInput && !dateInput.value) {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, "0");
+      const d = String(now.getDate()).padStart(2, "0");
+      dateInput.value = `${y}-${m}-${d}`;
+    }
+
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const payload = {
+        flow_date: dateInput ? dateInput.value : "",
+        kind: kindInput ? kindInput.value : "",
+        amount_ars: amountInput ? Number(amountInput.value || 0) : 0,
+        note: noteInput ? (noteInput.value || "").trim() : "",
+      };
+      try {
+        await fetchJSON("/api/cashflows/manual", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (hint) {
+          hint.style.display = "block";
+          hint.textContent = "Ajuste guardado.";
+        }
+        if (amountInput) amountInput.value = "";
+        if (noteInput) noteInput.value = "";
+        await loadDashboard(getActiveRange());
+      } catch (e) {
+        if (hint) {
+          hint.style.display = "block";
+          hint.textContent = `No se pudo guardar: ${e && e.message ? e.message : "error"}`;
+        }
+      }
+    });
+
+    const table = el("tblCashflowsManual");
+    if (table) {
+      table.addEventListener("click", async (ev) => {
+        const btn = ev.target && ev.target.closest("[data-cashflow-del]");
+        if (!btn) return;
+        const id = btn.getAttribute("data-cashflow-del");
+        if (!id) return;
+        try {
+          await fetchJSON(`/api/cashflows/manual/${encodeURIComponent(id)}`, { method: "DELETE" });
+          if (hint) {
+            hint.style.display = "block";
+            hint.textContent = "Ajuste eliminado.";
+          }
+          await loadDashboard(getActiveRange());
+        } catch (e) {
+          if (hint) {
+            hint.style.display = "block";
+            hint.textContent = `No se pudo eliminar: ${e && e.message ? e.message : "error"}`;
+          }
+        }
+      });
+    }
+  }
+
   function initMoversControls() {
     const wrap = el("moversPeriodButtons");
     if (!wrap) return;
@@ -865,6 +1118,7 @@
   document.addEventListener("DOMContentLoaded", () => {
     initRangeButtons();
     initAllocControls();
+    initCashflowControls();
     initMoversControls();
     initMoversPickerControls();
     if (el("chartTotal")) loadDashboard(getActiveRange());

@@ -7,25 +7,71 @@
         <div class="kpi-label">Total</div>
         <div class="kpi-value" id="kpiTotal">-</div>
         <div class="kpi-meta" id="kpiDate">-</div>
+        <div class="kpi-insights">
+          <div class="kpi-insight">
+            <div class="k">Mes neto</div>
+            <div class="v" id="kpiMonthNetPct">-</div>
+          </div>
+          <div class="kpi-insight">
+            <div class="k">Mes en curso (acum.)</div>
+            <div class="v" id="kpiMonthRealPct">-</div>
+          </div>
+        </div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Delta diario</div>
+        <div class="kpi-label">Delta diario (real)</div>
         <div class="kpi-value" id="kpiDailyDelta">-</div>
         <div class="kpi-meta" id="kpiDailyPct">-</div>
+        <div class="kpi-meta" id="kpiDailyGross">Mercado - | Aportes -</div>
+        <div class="kpi-formula" id="kpiDailyFormula">Neto = Mercado - Aportes/Retiros</div>
+        <div class="kpi-insights">
+          <div class="kpi-insight">
+            <div class="k">Aportes mes</div>
+            <div class="v" id="kpiMonthFlowArs">-</div>
+          </div>
+          <div class="kpi-insight">
+            <div class="k">Neto mes (ARS)</div>
+            <div class="v" id="kpiMonthNetArs">-</div>
+          </div>
+        </div>
       </div>
       <div class="kpi kpi-wide">
         <div class="kpi-label">Retornos</div>
         <div class="kpi-grid">
-          <div class="kpi-mini"><div class="k">Sem</div><div class="v" id="retWeekly">-</div></div>
-          <div class="kpi-mini"><div class="k">Mes</div><div class="v" id="retMonthly">-</div></div>
-          <div class="kpi-mini"><div class="k">YTD</div><div class="v" id="retYtd">-</div></div>
-          <div class="kpi-mini"><div class="k">A&ntilde;o</div><div class="v" id="retYearly">-</div></div>
-          <div class="kpi-mini"><div class="k">IPC mes</div><div class="v" id="inflMonthly">-</div></div>
-          <div class="kpi-mini"><div class="k">Real mes</div><div class="v" id="realMonthly">-</div></div>
+          <div class="kpi-mini"><div class="k">Sem</div><div class="v" id="retWeekly">-</div><div class="mini-sub" id="retWeeklySub">-</div></div>
+          <div class="kpi-mini"><div class="k">Mes</div><div class="v" id="retMonthly">-</div><div class="mini-sub" id="retMonthlySub">-</div></div>
+          <div class="kpi-mini"><div class="k">YTD</div><div class="v" id="retYtd">-</div><div class="mini-sub" id="retYtdSub">-</div></div>
+          <div class="kpi-mini"><div class="k">A&ntilde;o</div><div class="v" id="retYearly">-</div><div class="mini-sub" id="retYearlySub">-</div></div>
+          <div class="kpi-mini kpi-mini-monthly">
+            <div class="k">Mes en curso (acum.)</div>
+            <div class="v" id="kpiMonthVsInflValue">-</div>
+            <div class="mini-sub" id="kpiMonthVsInflSub">Neto - | IPC -</div>
+            <div class="kpi-status-badge" id="kpiMonthVsInflBadge" style="display:none;"></div>
+          </div>
         </div>
         <div class="hint" id="returnsHint" style="display:none;"></div>
+        <div class="hint" id="returnsQualityHint" style="display:none;"></div>
       </div>
     </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Ajustes manuales de flujo</h2>
+    </div>
+    <form class="cashflow-form" id="cashflowForm">
+      <input class="input" id="cashflowDate" type="date" required />
+      <select id="cashflowKind" class="select">
+        <option value="deposit">Dep&oacute;sito</option>
+        <option value="withdraw">Retiro</option>
+        <option value="correction">Correcci&oacute;n</option>
+      </select>
+      <input class="input" id="cashflowAmount" type="number" step="0.01" placeholder="Monto ARS" required />
+      <input class="input" id="cashflowNote" type="text" placeholder="Nota (opcional)" />
+      <button class="seg on" id="cashflowSubmit" type="submit">Agregar</button>
+    </form>
+    <div class="hint" id="cashflowHint" style="display:none;"></div>
+    <div class="table" id="tblCashflowsManual"></div>
   </section>
 
   <section class="grid">

@@ -76,6 +76,24 @@ class TestEvidenceFetch(unittest.TestCase):
         self.assertIsNotNone(err)
         self.assertIn("SEC_FORBIDDEN", str(err))
 
+    def test_collect_symbol_evidence_strict_policy_uses_reuters_and_official(self):
+        sec_rows = [{"symbol": "AAPL", "query": "q", "source_name": "SEC EDGAR", "source_url": "u1", "published_date": "2026-02-10", "retrieved_at_utc": "2026-02-10T00:00:00Z", "claim": "c1", "confidence": "high", "date_confidence": "high", "notes": "{}", "conflict_key": "k1"}]
+        reuters_rows = [{"symbol": "AAPL", "query": "q", "source_name": "Reuters", "source_url": "u2", "published_date": "2026-02-10", "retrieved_at_utc": "2026-02-10T00:00:00Z", "claim": "c2", "confidence": "high", "date_confidence": "high", "notes": "{}", "conflict_key": "k2"}]
+        with patch("iol_cli.evidence_fetch.fetch_sec_filings", return_value=(sec_rows, None)) as mock_sec:
+            with patch("iol_cli.evidence_fetch.fetch_reuters_rss", return_value=(reuters_rows, None)) as mock_reuters:
+                rows, errs = ef.collect_symbol_evidence(
+                    "AAPL",
+                    source_policy="strict_official_reuters",
+                    include_official=True,
+                    include_reuters=True,
+                    include_sec=True,
+                    include_news=True,
+                )
+        self.assertEqual(errs, [])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(mock_sec.call_count, 1)
+        self.assertEqual(mock_reuters.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
