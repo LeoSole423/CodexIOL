@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import calendar
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
@@ -103,23 +103,253 @@ def _return_with_flows(
     ).to_dict()
 
 
+def _flow_quality_incomplete(row: Dict[str, Any]) -> bool:
+    warns = set(str(w) for w in (row.get("quality_warnings") or []))
+    return ("CASH_MISSING" in warns) or ("ORDERS_INCOMPLETE" in warns)
+
+
+def _flow_date_or_none(v: Any) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(v or ""))
+    except Exception:
+        return None
+
+
+def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
+    """
+    Enrich rows in-place with display classification for inferred flows.
+    Expects per-row keys:
+      flow_date, kind, amount_ars, quality_warnings, buy_amount_ars, sell_amount_ars, income_amount_ars
+    Optional:
+      residual_ratio, _traded_gross
+    """
+    for row in rows:
+        if "_traded_gross" not in row:
+            b = abs(float(row.get("buy_amount_ars") or 0.0))
+            s = abs(float(row.get("sell_amount_ars") or 0.0))
+            i = abs(float(row.get("income_amount_ars") or 0.0))
+            row["_traded_gross"] = b + s + i
+        if row.get("residual_ratio") is None:
+            tg = float(row.get("_traded_gross") or 0.0)
+            amt = abs(float(row.get("amount_ars") or 0.0))
+            row["residual_ratio"] = (amt / tg) if tg > 0 else None
+
+    pair_by_idx: Dict[int, int] = {}
+    candidates: List[Tuple[float, int, int, int]] = []
+    for i in range(len(rows)):
+        ri = rows[i]
+        if _flow_quality_incomplete(ri):
+            continue
+        ai = float(ri.get("amount_ars") or 0.0)
+        if abs(ai) <= 1e-9:
+            continue
+        di = _flow_date_or_none(ri.get("flow_date"))
+        if di is None:
+            continue
+        ti = float(ri.get("_traded_gross") or 0.0)
+
+        for j in range(i + 1, len(rows)):
+            rj = rows[j]
+            if _flow_quality_incomplete(rj):
+                continue
+            aj = float(rj.get("amount_ars") or 0.0)
+            if abs(aj) <= 1e-9 or (ai * aj) >= 0:
+                continue
+            dj = _flow_date_or_none(rj.get("flow_date"))
+            if dj is None:
+                continue
+            delta_days = abs((dj - di).days)
+            if delta_days > 2:
+                continue
+
+            tj = float(rj.get("_traded_gross") or 0.0)
+            mag_similarity = abs(abs(ai) - abs(aj)) / max(abs(ai), abs(aj))
+            pair_net_ratio = abs(ai + aj) / (abs(ai) + abs(aj))
+            denom = abs(ai) + abs(aj)
+            pair_trade_coverage = ((ti + tj) / denom) if denom > 0 else 0.0
+            if mag_similarity <= 0.25 and pair_net_ratio <= 0.20 and pair_trade_coverage >= 0.75:
+                score = pair_net_ratio + mag_similarity
+                candidates.append((score, delta_days, i, j))
+
+    candidates.sort(key=lambda it: (it[0], it[1], it[2], it[3]))
+    used_idx = set()
+    for _, _, i, j in candidates:
+        if i in used_idx or j in used_idx:
+            continue
+        pair_by_idx[i] = j
+        pair_by_idx[j] = i
+        used_idx.add(i)
+        used_idx.add(j)
+
+    for i, row in enumerate(rows):
+        kind = str(row.get("kind") or "").lower()
+        amount = float(row.get("amount_ars") or 0.0)
+        residual_ratio = row.get("residual_ratio")
+
+        display_kind = "external_flow_probable"
+        display_label = "Flujo externo probable (+)" if amount >= 0 else "Flujo externo probable (-)"
+        confidence = "medium"
+        reason_code = "EXTERNAL_FLOW_SIGN"
+        reason_detail = "Clasificado por signo del flujo neto inferido."
+        paired_flow_date = None
+        paired_amount_ars = None
+
+        if _flow_quality_incomplete(row):
+            display_kind = "correction"
+            display_label = "Correcci\u00f3n"
+            confidence = "high"
+            reason_code = "QUALITY_INCOMPLETE"
+            reason_detail = "Datos incompletos de caja/\u00f3rdenes; revisar manualmente."
+        elif i in pair_by_idx:
+            j = pair_by_idx[i]
+            paired = rows[j]
+            paired_flow_date = paired.get("flow_date")
+            paired_amount_ars = float(paired.get("amount_ars") or 0.0)
+            display_kind = "rotation_probable"
+            display_label = "Rotaci\u00f3n probable (venta/recompra)"
+            confidence = "medium"
+            reason_code = "ROTATION_PAIR"
+            reason_detail = (
+                f"Par opuesto cercano con {paired_flow_date}; neto combinado bajo."
+                if paired_flow_date
+                else "Par opuesto cercano; neto combinado bajo."
+            )
+        elif kind == "withdraw" and isinstance(residual_ratio, (int, float)) and float(residual_ratio) <= 0.03:
+            display_kind = "operational_cost_probable"
+            display_label = "Costo operativo probable"
+            confidence = "medium"
+            reason_code = "OPERATIONAL_COST_RESIDUAL"
+            reason_detail = "Residual chico vs volumen operado (\u22643%)."
+
+        row["display_kind"] = display_kind
+        row["display_label"] = display_label
+        row["confidence"] = confidence
+        row["reason_code"] = reason_code
+        row["reason_detail"] = reason_detail
+        row["paired_flow_date"] = paired_flow_date
+        row["paired_amount_ars"] = paired_amount_ars
+        row.pop("_traded_gross", None)
+
+
 @router.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True}
 
 
 @router.get("/snapshots")
-def snapshots(date_from: Optional[str] = Query(None, alias="from"), date_to: Optional[str] = Query(None, alias="to")):
+def snapshots(
+    date_from: Optional[str] = Query(None, alias="from"),
+    date_to: Optional[str] = Query(None, alias="to"),
+    mode: str = Query("raw"),
+):
     try:
         f = _parse_date(date_from)
         t = _parse_date(date_to)
+        m = (mode or "raw").strip().lower()
+        if m not in ("raw", "market"):
+            return JSONResponse(status_code=400, content={"error": "mode must be raw|market"})
         conn = dbmod.get_conn()
     except FileNotFoundError:
         return []
 
     try:
         rows = dbmod.snapshots_series(conn, f, t)
-        return [{"date": d, "total_value": v} for d, v in rows]
+        if m == "raw":
+            return [{"date": d, "total_value": v} for d, v in rows]
+
+        # "market" mode: de-bias series by subtracting inferred external flows
+        # on each interval (same inference base logic used in returns, plus
+        # classification to avoid netting internal rotation as external flow).
+        if not rows:
+            return []
+
+        intervals: List[Dict[str, Any]] = []
+        for idx in range(1, len(rows)):
+            base_d, base_v = rows[idx - 1]
+            end_d, end_v = rows[idx]
+            base_snap = dbmod.snapshot_on_or_before(conn, base_d)
+            end_snap = dbmod.snapshot_on_or_before(conn, end_d)
+            gross_delta = float(end_v or 0.0) - float(base_v or 0.0)
+            if not base_snap or not end_snap:
+                intervals.append(
+                    {
+                        "flow_date": end_d,
+                        "gross_delta": gross_delta,
+                        "amount_ars": 0.0,
+                        "kind": "correction",
+                        "buy_amount_ars": 0.0,
+                        "sell_amount_ars": 0.0,
+                        "income_amount_ars": 0.0,
+                        "quality_warnings": ["INFERENCE_PARTIAL"],
+                        "residual_ratio": None,
+                    }
+                )
+                continue
+
+            gross = compute_return(end_snap, base_snap)
+            wf = _return_with_flows(conn, end_snap, base_snap, gross)
+            dt_from = f"{base_snap.snapshot_date}T23:59:59"
+            dt_to = f"{end_snap.snapshot_date}T23:59:59"
+            amounts, _ = dbmod.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
+            buy_amount = float(amounts.get("buy_amount") or 0.0)
+            sell_amount = float(amounts.get("sell_amount") or 0.0)
+            income_amount = float(amounts.get("income_amount") or 0.0)
+            flow_total = float(wf.get("flow_total_ars") or 0.0)
+            traded_gross = abs(buy_amount) + abs(sell_amount) + abs(income_amount)
+            residual_ratio = (abs(flow_total) / traded_gross) if traded_gross > 0 else None
+            warns = list(wf.get("quality_warnings") or [])
+            kind = "correction" if _flow_quality_incomplete({"quality_warnings": warns}) else ("deposit" if flow_total >= 0 else "withdraw")
+            intervals.append(
+                {
+                    "flow_date": end_d,
+                    "gross_delta": gross_delta,
+                    "amount_ars": flow_total,
+                    "kind": kind,
+                    "buy_amount_ars": buy_amount,
+                    "sell_amount_ars": sell_amount,
+                    "income_amount_ars": income_amount,
+                    "quality_warnings": warns,
+                    "residual_ratio": residual_ratio,
+                    "_traded_gross": traded_gross,
+                }
+            )
+
+        _annotate_flow_rows(intervals)
+
+        out: List[Dict[str, Any]] = []
+        first_d, first_v = rows[0]
+        adjusted_prev = float(first_v or 0.0)
+        out.append(
+            {
+                "date": first_d,
+                "total_value": adjusted_prev,
+                "raw_total_value": float(first_v or 0.0),
+                "flow_total_ars": 0.0,
+                "quality_warnings": [],
+            }
+        )
+
+        for idx in range(1, len(rows)):
+            end_d, end_v = rows[idx]
+            iv = intervals[idx - 1]
+            gross_delta = float(iv.get("gross_delta") or 0.0)
+            flow_total = float(iv.get("amount_ars") or 0.0)
+            display_kind = str(iv.get("display_kind") or "")
+            # Apply adjustment only for external-flow-like movements.
+            applied_flow = flow_total if display_kind == "external_flow_probable" else 0.0
+            adjusted_prev = adjusted_prev + (gross_delta - applied_flow)
+            out.append(
+                {
+                    "date": end_d,
+                    "total_value": adjusted_prev,
+                    "raw_total_value": float(end_v or 0.0),
+                    "flow_total_ars": flow_total,
+                    "applied_flow_ars": applied_flow,
+                    "display_kind": display_kind,
+                    "quality_warnings": list(iv.get("quality_warnings") or []),
+                }
+            )
+        return out
     finally:
         conn.close()
 
@@ -243,6 +473,93 @@ def returns():
             "yearly": _return_with_flows(conn, latest, base_yearly, compute_return(latest, base_yearly)),
             "ytd": _return_with_flows(conn, latest, base_ytd, compute_return(latest, base_ytd)),
         }
+    finally:
+        conn.close()
+
+
+@router.get("/cashflows/auto")
+def cashflows_auto(days: int = 30):
+    try:
+        days_n = int(days)
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "days must be an integer (1..365)"})
+    if days_n < 1 or days_n > 365:
+        return JSONResponse(status_code=400, content={"error": "days must be 1..365"})
+
+    try:
+        conn = dbmod.get_conn()
+    except FileNotFoundError:
+        return {"from": None, "to": None, "days": days_n, "rows": []}
+
+    try:
+        latest = dbmod.latest_snapshot(conn)
+        if not latest:
+            return {"from": None, "to": None, "days": days_n, "rows": []}
+
+        to_date = latest.snapshot_date
+        from_date = target_date(to_date, days_n)
+        snap_dates = [d for (d, _) in dbmod.snapshots_series(conn, from_date, to_date)]
+        if len(snap_dates) < 2:
+            return {"from": from_date, "to": to_date, "days": days_n, "rows": []}
+
+        rows: List[Dict[str, Any]] = []
+        for i in range(1, len(snap_dates)):
+            base_snap = dbmod.snapshot_on_or_before(conn, snap_dates[i - 1])
+            end_snap = dbmod.snapshot_on_or_before(conn, snap_dates[i])
+            if not base_snap or not end_snap:
+                continue
+
+            warnings = []
+            cash_base = _snapshot_cash_ars(base_snap)
+            cash_end = _snapshot_cash_ars(end_snap)
+            if cash_base is None or cash_end is None:
+                cash_delta = 0.0
+                warnings.append("CASH_MISSING")
+            else:
+                cash_delta = float(cash_end or 0.0) - float(cash_base or 0.0)
+
+            dt_from = f"{base_snap.snapshot_date}T23:59:59"
+            dt_to = f"{end_snap.snapshot_date}T23:59:59"
+            amounts, stats = dbmod.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
+            if stats.get("unclassified", 0) > 0 or stats.get("amount_missing", 0) > 0:
+                warnings.append("ORDERS_INCOMPLETE")
+
+            buy_amount = float(amounts.get("buy_amount") or 0.0)
+            sell_amount = float(amounts.get("sell_amount") or 0.0)
+            income_amount = float(amounts.get("income_amount") or 0.0)
+            flow_inferred = float(cash_delta) + buy_amount - sell_amount - income_amount
+            if abs(flow_inferred) <= 1e-9:
+                continue
+            traded_gross = abs(buy_amount) + abs(sell_amount) + abs(income_amount)
+            residual_ratio = (abs(flow_inferred) / traded_gross) if traded_gross > 0 else None
+
+            if "CASH_MISSING" in warnings or "ORDERS_INCOMPLETE" in warnings:
+                kind = "correction"
+            else:
+                kind = "deposit" if flow_inferred > 0 else "withdraw"
+
+            rows.append(
+                {
+                    "flow_date": end_snap.snapshot_date,
+                    "kind": kind,
+                    "amount_ars": flow_inferred,
+                    "base_snapshot": base_snap.snapshot_date,
+                    "end_snapshot": end_snap.snapshot_date,
+                    "cash_delta_ars": cash_delta,
+                    "buy_amount_ars": buy_amount,
+                    "sell_amount_ars": sell_amount,
+                    "income_amount_ars": income_amount,
+                    "quality_warnings": warnings,
+                    "orders_stats": stats,
+                    "residual_ratio": residual_ratio,
+                    "_traded_gross": traded_gross,
+                }
+            )
+
+        _annotate_flow_rows(rows)
+
+        rows.sort(key=lambda r: (str(r.get("flow_date") or ""), float(r.get("amount_ars") or 0.0)), reverse=True)
+        return {"from": from_date, "to": to_date, "days": days_n, "rows": rows}
     finally:
         conn.close()
 
@@ -944,7 +1261,9 @@ def movers(
             if metric_norm == "valuation":
                 enriched = build_union_movers(base_assets, end_assets_period)
             else:
-                dt_from = f"{base_snap.snapshot_date}T00:00:00"
+                # Baseline snapshot represents end-of-day state for base date.
+                # Exclude base-day operations to avoid counting cashflows that happened before that snapshot.
+                dt_from = f"{base_snap.snapshot_date}T23:59:59"
                 dt_to = f"{period_end_snap.snapshot_date}T23:59:59"
                 cashflows, stats = dbmod.orders_cashflows_by_symbol(conn, dt_from, dt_to, currency=currency_norm)
                 orders_stats = stats
@@ -988,6 +1307,162 @@ def movers(
         gainers = sorted(end_assets, key=metric, reverse=True)
         losers = sorted(end_assets, key=metric, reverse=False)
         return {"gainers": gainers[:limit], "losers": losers[:limit]}
+    finally:
+        conn.close()
+
+
+@router.get("/assets/performance")
+def assets_performance(
+    period: str = Query(...),
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+):
+    p = (period or "").strip().lower()
+    if p not in ("daily", "weekly", "monthly", "yearly", "accumulated"):
+        return JSONResponse(status_code=400, content={"error": "period must be daily|weekly|monthly|yearly|accumulated"})
+
+    try:
+        conn = dbmod.get_conn()
+    except FileNotFoundError:
+        return {"period": p, "from": None, "to": None, "warnings": [], "orders_stats": None, "rows": []}
+
+    try:
+        end_snap = dbmod.latest_snapshot(conn)
+        if not end_snap:
+            return {"period": p, "from": None, "to": None, "warnings": [], "orders_stats": None, "rows": []}
+
+        latest_d = date.fromisoformat(end_snap.snapshot_date)
+        latest_year = latest_d.year
+        latest_month = latest_d.month
+
+        base_snap = None
+        period_end_snap = end_snap
+
+        if p == "daily":
+            pass
+        elif p == "weekly":
+            base_snap = dbmod.snapshot_on_or_before(conn, target_date(end_snap.snapshot_date, 7))
+        elif p == "monthly":
+            y = int(year) if year is not None else latest_year
+            m = int(month) if month is not None else latest_month
+            if m < 1 or m > 12:
+                return JSONResponse(status_code=400, content={"error": "month must be 1..12"})
+            if y != latest_year:
+                return JSONResponse(status_code=400, content={"error": "monthly period only supports latest year"})
+            last_day = calendar.monthrange(y, m)[1]
+            start = f"{y:04d}-{m:02d}-01"
+            end = f"{y:04d}-{m:02d}-{last_day:02d}"
+            base_snap = dbmod.first_snapshot_in_range(conn, start, end)
+            period_end_snap = dbmod.last_snapshot_in_range(conn, start, end)
+        elif p == "yearly":
+            y = int(year) if year is not None else latest_year
+            start = f"{y:04d}-01-01"
+            end = f"{y:04d}-12-31"
+            base_snap = dbmod.first_snapshot_in_range(conn, start, end)
+            period_end_snap = dbmod.last_snapshot_in_range(conn, start, end)
+        else:  # accumulated
+            base_snap = dbmod.earliest_snapshot(conn)
+
+        if p != "daily" and (not base_snap or not period_end_snap):
+            if p in ("monthly", "yearly"):
+                return {"period": p, "from": None, "to": None, "warnings": [], "orders_stats": None, "rows": []}
+            return {
+                "period": p,
+                "from": None,
+                "to": end_snap.snapshot_date,
+                "warnings": [],
+                "orders_stats": None,
+                "rows": [],
+            }
+
+        rows = []
+        warnings = []
+        orders_stats = None
+
+        if p == "daily":
+            end_assets = dbmod.assets_for_snapshot(conn, end_snap.snapshot_date)
+            for a in end_assets:
+                cur_val = float(a.get("total_value") or 0.0)
+                pct = a.get("daily_var_pct")
+                try:
+                    pct_f = float(pct) if pct is not None else None
+                except Exception:
+                    pct_f = None
+                selected = None if pct_f is None else (cur_val * pct_f / 100.0)
+                rows.append(
+                    {
+                        "symbol": a.get("symbol"),
+                        "description": a.get("description"),
+                        "currency": a.get("currency") or "unknown",
+                        "market": a.get("market"),
+                        "type": a.get("type"),
+                        "total_value": cur_val,
+                        "base_total_value": None,
+                        "selected_value": selected,
+                        "selected_pct": pct_f,
+                        "flow_tag": "none",
+                    }
+                )
+            from_date = end_snap.snapshot_date
+            to_date = end_snap.snapshot_date
+        else:
+            base_assets = dbmod.assets_for_snapshot(conn, base_snap.snapshot_date)
+            end_assets_period = dbmod.assets_for_snapshot(conn, period_end_snap.snapshot_date)
+            # Baseline snapshot is end-of-day; do not include base-date operations in period cashflows.
+            dt_from = f"{base_snap.snapshot_date}T23:59:59"
+            dt_to = f"{period_end_snap.snapshot_date}T23:59:59"
+            cashflows, stats = dbmod.orders_cashflows_by_symbol(conn, dt_from, dt_to, currency="all")
+            orders_stats = stats
+            if stats.get("total", 0) == 0:
+                warnings.append("ORDERS_NONE")
+            elif stats.get("unclassified", 0) > 0 or stats.get("amount_missing", 0) > 0:
+                warnings.append("ORDERS_INCOMPLETE")
+            enriched = build_union_movers_pnl(base_assets, end_assets_period, cashflows)
+            for r in enriched:
+                rows.append(
+                    {
+                        "symbol": r.get("symbol"),
+                        "description": r.get("description"),
+                        "currency": r.get("currency") or "unknown",
+                        "market": r.get("market"),
+                        "type": r.get("type"),
+                        "total_value": float(r.get("total_value") or 0.0),
+                        "base_total_value": float(r.get("base_total_value") or 0.0),
+                        "selected_value": r.get("delta_value"),
+                        "selected_pct": r.get("delta_pct"),
+                        "flow_tag": r.get("flow_tag") or "none",
+                    }
+                )
+            from_date = base_snap.snapshot_date
+            to_date = period_end_snap.snapshot_date
+
+        total_visible = sum(float(r.get("total_value") or 0.0) for r in rows)
+        for r in rows:
+            val = float(r.get("total_value") or 0.0)
+            r["weight_pct"] = ((val / total_visible) * 100.0) if total_visible > 0 else 0.0
+
+        def _sort_key(row: Dict[str, Any]):
+            try:
+                selected = float(row.get("selected_value") or 0.0)
+            except Exception:
+                selected = 0.0
+            try:
+                total = float(row.get("total_value") or 0.0)
+            except Exception:
+                total = 0.0
+            sym = str(row.get("symbol") or "")
+            return (-selected, -total, sym)
+
+        rows.sort(key=_sort_key)
+
+        return {
+            "period": p,
+            "from": from_date,
+            "to": to_date,
+            "warnings": warnings,
+            "orders_stats": orders_stats,
+            "rows": rows,
+        }
     finally:
         conn.close()
 

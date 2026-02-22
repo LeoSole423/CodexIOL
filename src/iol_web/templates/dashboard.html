@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="hero">
-  <h1>📈 Portafolio en ARS</h1>
+  <h1>Portafolio en ARS</h1>
   <div class="hero-meta">
     <div class="updated-badge" id="updatedBadge" style="display:none;">
       <span class="dot-live"></span>
@@ -16,11 +16,11 @@
       <div class="kpi-divider"></div>
       <div class="cash-row">
         <div class="cash-kpi">
-          <div class="k">💵 Cash ARS</div>
+          <div class="k">Cash ARS</div>
           <div class="v" id="kpiCashArs">-</div>
         </div>
         <div class="cash-kpi">
-          <div class="k">💲 Cash USD</div>
+          <div class="k">Cash USD</div>
           <div class="v" id="kpiCashUsd">-</div>
         </div>
       </div>
@@ -79,39 +79,27 @@
   </div>
 </section>
 
-<section class="card">
-  <div class="card-head">
-    <h2>✏️ Ajustes manuales de flujo</h2>
-  </div>
-  <form class="cashflow-form" id="cashflowForm">
-    <input class="input" id="cashflowDate" type="date" required />
-    <select id="cashflowKind" class="select">
-      <option value="deposit">Dep&oacute;sito</option>
-      <option value="withdraw">Retiro</option>
-      <option value="correction">Correcci&oacute;n</option>
-    </select>
-    <input class="input" id="cashflowAmount" type="number" step="0.01" placeholder="Monto ARS" required />
-    <input class="input" id="cashflowNote" type="text" placeholder="Nota (opcional)" />
-    <button class="seg on" id="cashflowSubmit" type="submit">Agregar</button>
-  </form>
-  <div class="hint" id="cashflowHint" style="display:none;"></div>
-  <div class="table" id="tblCashflowsManual"></div>
-</section>
-
-<section class="grid">
+<section class="grid charts-row">
   <div class="card">
     <div class="card-head">
-      <h2>📊 Evoluci&oacute;n</h2>
-      <div class="segmented" id="rangeButtons">
-        <button data-range="30" class="seg on">1M</button>
-        <button data-range="90" class="seg">3M</button>
-        <button data-range="365" class="seg">1Y</button>
-        <button data-range="all" class="seg">All</button>
+      <h2>Evoluci&oacute;n</h2>
+      <div class="section-controls">
+        <div class="segmented" id="evolutionModeButtons">
+          <button data-mode="raw" class="seg on">Saldo</button>
+          <button data-mode="market" class="seg">Ajustado s/ flujos</button>
+        </div>
+        <div class="segmented" id="rangeButtons">
+          <button data-range="30" class="seg on">1M</button>
+          <button data-range="90" class="seg">3M</button>
+          <button data-range="365" class="seg">1Y</button>
+          <button data-range="all" class="seg">All</button>
+        </div>
       </div>
     </div>
     <div style="height:260px">
       <canvas id="chartTotal"></canvas>
     </div>
+    <div class="hint" id="evolutionHint" style="display:none;"></div>
     <div class="hint" id="noDataHint" style="display:none;">
       No hay snapshots todav&iacute;a. Corre <code>iol snapshot run</code> o levanta el scheduler.
     </div>
@@ -119,7 +107,7 @@
 
   <div class="card">
     <div class="card-head">
-      <h2>🥧 Allocation</h2>
+      <h2>Allocation</h2>
       <div class="controls">
         <select id="allocGroupBy" class="select">
           <option value="symbol">Por s&iacute;mbolo</option>
@@ -142,80 +130,78 @@
   </div>
 </section>
 
-<section class="card">
-  <div class="card-head">
-    <h2>📉 Inflaci&oacute;n vs retorno (mensual)</h2>
+<section class="card asset-performance">
+  <div class="section-head">
+    <div class="section-title">
+      <h2>Rendimiento de activos</h2>
+      <div class="badge" id="assetPeriodBadge">d&iacute;a</div>
+    </div>
+    <div class="section-controls">
+      <div class="segmented" id="assetPeriodButtons">
+        <button data-period="daily" class="seg on">D&iacute;a</button>
+        <button data-period="weekly" class="seg">Semana</button>
+        <button data-period="monthly" class="seg">Mes</button>
+        <button data-period="yearly" class="seg">A&ntilde;o</button>
+        <button data-period="accumulated" class="seg">Acumulado</button>
+      </div>
+      <div class="picker" id="assetPicker" style="display:none;">
+        <button class="pick-btn" id="assetPickPrev" type="button">&lsaquo;</button>
+        <div class="pick-label" id="assetPickLabel">-</div>
+        <button class="pick-btn" id="assetPickNext" type="button">&rsaquo;</button>
+      </div>
+    </div>
   </div>
-  <div class="table" id="tblInflationCompare">
-    <div class="hint">Cargando inflaci&oacute;n...</div>
-  </div>
-  <div class="hint" id="inflationHint" style="display:none;"></div>
+  <div class="hint" id="assetHint" style="display:none;"></div>
+  <div class="table" id="tblAssetPerformance"></div>
 </section>
 
-<section class="section-head">
-  <div class="section-title">
-    <h2>🔥 Top movers</h2>
-    <div class="badge" id="moversPeriodBadge">d&iacute;a</div>
-  </div>
-  <div class="section-controls">
-    <div class="segmented" id="moversPeriodButtons">
-      <button data-period="daily" class="seg on">D&iacute;a</button>
-      <button data-period="weekly" class="seg">Semana</button>
-      <button data-period="monthly" class="seg">Mes</button>
-      <button data-period="yearly" class="seg">A&ntilde;o</button>
-      <button data-period="ytd" class="seg">YTD</button>
+<section class="grid utilities-row">
+  <div class="card">
+    <div class="card-head">
+      <h2>Ajustes manuales de flujo</h2>
     </div>
-    <div class="picker" id="moversPicker" style="display:none;">
-      <button class="pick-btn" id="moversPickPrev" type="button">&lsaquo;</button>
-      <div class="pick-label" id="moversPickLabel">-</div>
-      <button class="pick-btn" id="moversPickNext" type="button">&rsaquo;</button>
+    <div class="cashflow-explain" id="cashflowExplain">
+      Us&aacute; este bloque para corregir aportes/retiros externos que el sistema no pudo inferir con calidad suficiente.
+      Los ajustes manuales impactan el retorno real y quedan auditados por fecha.
     </div>
-  </div>
-</section>
-<div class="hint" id="moversHint" style="display:none;"></div>
+    <form class="cashflow-form" id="cashflowForm">
+      <input class="input" id="cashflowDate" type="date" required />
+      <select id="cashflowKind" class="select">
+        <option value="deposit">Dep&oacute;sito</option>
+        <option value="withdraw">Retiro</option>
+        <option value="correction">Correcci&oacute;n</option>
+      </select>
+      <input class="input" id="cashflowAmount" type="number" step="0.01" placeholder="Monto ARS" required />
+      <input class="input" id="cashflowNote" type="text" placeholder="Nota (opcional)" />
+      <button class="seg on" id="cashflowSubmit" type="submit">Agregar</button>
+    </form>
+    <div class="hint" id="cashflowHint" style="display:none;"></div>
+    <div class="table" id="tblCashflowsManual"></div>
 
-<section class="grid">
-  <div class="card">
-    <div class="card-head">
-      <h2>🟢 Top ganadores</h2>
+    <div class="cashflow-auto-section">
+      <div class="card-head">
+        <h2>Detecci&oacute;n autom&aacute;tica (solo lectura)</h2>
+      </div>
+      <div class="hint">
+        Flujo inferido por snapshot (caja + compras - ventas - ingresos), &uacute;ltimos 30 d&iacute;as.
+      </div>
+      <div class="hint">
+        Estas etiquetas son inferidas; no equivalen a transferencia bancaria confirmada.
+      </div>
+      <div class="table" id="tblCashflowsAuto">
+        <div class="hint">Cargando flujos autom&aacute;ticos...</div>
+      </div>
     </div>
-    <div class="table" id="tblGainersDaily"></div>
   </div>
-  <div class="card">
-    <div class="card-head">
-      <h2>🔴 Top p&eacute;rdidas</h2>
-    </div>
-    <div class="table" id="tblLosersDaily"></div>
-  </div>
-</section>
 
-<section class="grid" id="moversUsdGrid" style="display:none;">
-  <div class="card">
+  <div class="card inflation-compact">
     <div class="card-head">
-      <h2>🟢 Top ganadores (USD)</h2>
+      <h2>&Uacute;ltimo mes vs inflaci&oacute;n</h2>
     </div>
-    <div class="table" id="tblGainersDailyUSD"></div>
-  </div>
-  <div class="card">
-    <div class="card-head">
-      <h2>🔴 Top p&eacute;rdidas (USD)</h2>
+    <div class="table" id="tblInflationCompare">
+      <div class="hint">Cargando inflaci&oacute;n...</div>
     </div>
-    <div class="table" id="tblLosersDailyUSD"></div>
-  </div>
-</section>
-
-<section class="grid">
-  <div class="card">
-    <div class="card-head">
-      <h2>📈 Top ganadores (acumulado)</h2>
-    </div>
-    <div class="table" id="tblGainersTotal"></div>
-  </div>
-  <div class="card">
-    <div class="card-head">
-      <h2>📉 Top p&eacute;rdidas (acumulado)</h2>
-    </div>
-    <div class="table" id="tblLosersTotal"></div>
+    <div class="hint" id="inflationHint" style="display:none;"></div>
   </div>
 </section>
 {% endblock %}

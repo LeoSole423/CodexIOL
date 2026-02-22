@@ -1,0 +1,323 @@
+﻿import os
+import sqlite3
+import tempfile
+import unittest
+
+from fastapi.responses import JSONResponse
+
+from iol_web.routes_api import cashflows_auto
+
+
+def _mk_db():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE portfolio_snapshots (
+          snapshot_date TEXT PRIMARY KEY,
+          total_value REAL,
+          cash_disponible_ars REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE orders (
+          order_number INTEGER PRIMARY KEY,
+          status TEXT,
+          symbol TEXT,
+          side TEXT,
+          side_norm TEXT,
+          quantity REAL,
+          price REAL,
+          operated_amount REAL,
+          currency TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          operated_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    return conn, path
+
+
+def _cleanup(conn, path):
+    conn.close()
+    if os.path.exists(path):
+        os.unlink(path)
+
+
+def _insert_order(conn, order_number, side, side_norm, operated_amount, ts):
+    conn.execute(
+        """
+        INSERT INTO orders(order_number,status,symbol,side,side_norm,quantity,price,operated_amount,currency,created_at,updated_at,operated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            int(order_number),
+            "terminada",
+            "AAA",
+            side,
+            side_norm,
+            None,
+            None,
+            float(operated_amount),
+            "peso_Argentino",
+            ts,
+            None,
+            None,
+        ),
+    )
+
+
+class TestWebCashflowsAuto(unittest.TestCase):
+    def setUp(self):
+        self.conn, self.path = _mk_db()
+        self.prev_env = os.environ.get("IOL_DB_PATH")
+        os.environ["IOL_DB_PATH"] = self.path
+
+    def tearDown(self):
+        if self.prev_env is None:
+            os.environ.pop("IOL_DB_PATH", None)
+        else:
+            os.environ["IOL_DB_PATH"] = self.prev_env
+        _cleanup(self.conn, self.path)
+
+    def test_deposit_complete(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [("2026-02-10", 1000.0, 100.0), ("2026-02-11", 1030.0, 130.0)],
+        )
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("kind"), "deposit")
+        self.assertAlmostEqual(float(r.get("amount_ars") or 0.0), 30.0)
+        self.assertAlmostEqual(float(r.get("cash_delta_ars") or 0.0), 30.0)
+        self.assertEqual(r.get("quality_warnings"), [])
+        self.assertEqual(r.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r.get("reason_code"), "EXTERNAL_FLOW_SIGN")
+
+    def test_withdraw_complete(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [("2026-02-10", 1000.0, 100.0), ("2026-02-11", 970.0, 70.0)],
+        )
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("kind"), "withdraw")
+        self.assertAlmostEqual(float(r.get("amount_ars") or 0.0), -30.0)
+        self.assertEqual(r.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r.get("reason_code"), "EXTERNAL_FLOW_SIGN")
+
+    def test_correction_by_orders_incomplete(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [("2026-02-10", 1000.0, 100.0), ("2026-02-11", 1020.0, 120.0)],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO orders(order_number,status,symbol,side,side_norm,quantity,price,operated_amount,currency,created_at,updated_at,operated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (1, "terminada", "AAA", "Operacion rara", None, None, None, 100.0, "peso_Argentino", "2026-02-11T10:00:00", None, None),
+        )
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("kind"), "correction")
+        self.assertIn("ORDERS_INCOMPLETE", r.get("quality_warnings") or [])
+        self.assertEqual(r.get("display_kind"), "correction")
+        self.assertEqual(r.get("reason_code"), "QUALITY_INCOMPLETE")
+
+    def test_correction_by_cash_missing(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [("2026-02-10", 1000.0, None), ("2026-02-11", 1040.0, None)],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO orders(order_number,status,symbol,side,side_norm,quantity,price,operated_amount,currency,created_at,updated_at,operated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (1, "terminada", "AAA", "Compra", "buy", None, None, 40.0, "peso_Argentino", "2026-02-11T10:00:00", None, None),
+        )
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("kind"), "correction")
+        self.assertIn("CASH_MISSING", r.get("quality_warnings") or [])
+        self.assertAlmostEqual(float(r.get("amount_ars") or 0.0), 40.0)
+        self.assertEqual(r.get("display_kind"), "correction")
+        self.assertEqual(r.get("reason_code"), "QUALITY_INCOMPLETE")
+
+    def test_rotation_pair_two_days(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [
+                ("2026-02-08", 2000000.0, 1500000.0),
+                ("2026-02-09", 2000000.0, 300000.0),
+                ("2026-02-10", 2000000.0, 1467691.0),
+            ],
+        )
+        # 2026-02-09: neto -1,691,959
+        _insert_order(self.conn, 1, "Compra", "buy", 1192114.0, "2026-02-09T10:00:00")
+        _insert_order(self.conn, 2, "Venta", "sell", 1684073.0, "2026-02-09T12:00:00")
+        # 2026-02-10: neto +1,674,072
+        _insert_order(self.conn, 3, "Compra", "buy", 506381.0, "2026-02-10T11:00:00")
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 2)
+
+        by_date = {r.get("flow_date"): r for r in rows}
+        r9 = by_date.get("2026-02-09")
+        r10 = by_date.get("2026-02-10")
+        self.assertIsNotNone(r9)
+        self.assertIsNotNone(r10)
+
+        self.assertEqual(r9.get("display_kind"), "rotation_probable")
+        self.assertEqual(r10.get("display_kind"), "rotation_probable")
+        self.assertEqual(r9.get("reason_code"), "ROTATION_PAIR")
+        self.assertEqual(r10.get("reason_code"), "ROTATION_PAIR")
+        self.assertEqual(r9.get("paired_flow_date"), "2026-02-10")
+        self.assertEqual(r10.get("paired_flow_date"), "2026-02-09")
+        # Backward compatibility: keep legacy kind.
+        self.assertEqual(r9.get("kind"), "withdraw")
+        self.assertEqual(r10.get("kind"), "deposit")
+
+    def test_rotation_pair_outside_window_not_detected(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [
+                ("2026-02-01", 1000.0, 10000.0),
+                ("2026-02-02", 1000.0, 9500.0),
+                ("2026-02-05", 1000.0, 10000.0),
+            ],
+        )
+        _insert_order(self.conn, 10, "Compra", "buy", 2000.0, "2026-02-02T10:00:00")
+        _insert_order(self.conn, 11, "Venta", "sell", 2000.0, "2026-02-05T10:00:00")
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 2)
+        by_date = {r.get("flow_date"): r for r in rows}
+        r2 = by_date["2026-02-02"]
+        r5 = by_date["2026-02-05"]
+        self.assertEqual(r2.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r5.get("display_kind"), "external_flow_probable")
+        self.assertIsNone(r2.get("paired_flow_date"))
+        self.assertIsNone(r5.get("paired_flow_date"))
+
+    def test_operational_cost_probable(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [("2026-02-10", 2000000.0, 100000.0), ("2026-02-11", 2000000.0, 80000.0)],
+        )
+        _insert_order(self.conn, 20, "Compra", "buy", 1000000.0, "2026-02-11T10:00:00")
+        _insert_order(self.conn, 21, "Venta", "sell", 980500.0, "2026-02-11T11:00:00")
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("kind"), "withdraw")
+        self.assertEqual(r.get("display_kind"), "operational_cost_probable")
+        self.assertEqual(r.get("reason_code"), "OPERATIONAL_COST_RESIDUAL")
+        self.assertIsNotNone(r.get("residual_ratio"))
+        self.assertLessEqual(float(r.get("residual_ratio") or 1.0), 0.03)
+
+    def test_external_flow_probable_sign(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [("2026-02-10", 1000.0, 5000.0), ("2026-02-11", 1000.0, 12000.0)],
+        )
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("kind"), "deposit")
+        self.assertEqual(r.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r.get("reason_code"), "EXTERNAL_FLOW_SIGN")
+        self.assertEqual(r.get("display_label"), "Flujo externo probable (+)")
+
+    def test_zero_net_not_listed(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [("2026-02-10", 1000.0, 100.0), ("2026-02-11", 1000.0, 70.0)],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO orders(order_number,status,symbol,side,side_norm,quantity,price,operated_amount,currency,created_at,updated_at,operated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (1, "terminada", "AAA", "Compra", "buy", None, None, 30.0, "peso_Argentino", "2026-02-11T10:00:00", None, None),
+        )
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        self.assertEqual(out.get("rows"), [])
+
+    def test_invalid_days_returns_400(self):
+        out1 = cashflows_auto(days=0)
+        out2 = cashflows_auto(days=366)
+        self.assertIsInstance(out1, JSONResponse)
+        self.assertEqual(out1.status_code, 400)
+        self.assertIsInstance(out2, JSONResponse)
+        self.assertEqual(out2.status_code, 400)
+
+    def test_no_snapshots_or_single_snapshot(self):
+        out0 = cashflows_auto(days=30)
+        self.assertEqual(out0.get("rows"), [])
+
+        self.conn.execute(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            ("2026-02-11", 1000.0, 100.0),
+        )
+        self.conn.commit()
+
+        out1 = cashflows_auto(days=30)
+        self.assertEqual(out1.get("rows"), [])
+
+    def test_default_window_30_days(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [
+                ("2026-01-10", 1000.0, 100.0),
+                ("2026-01-25", 1000.0, 100.0),
+                ("2026-02-20", 1020.0, 120.0),
+            ],
+        )
+        self.conn.commit()
+
+        out = cashflows_auto()
+        self.assertEqual(out.get("from"), "2026-01-21")
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].get("base_snapshot"), "2026-01-25")
+        self.assertEqual(rows[0].get("end_snapshot"), "2026-02-20")
+
+
+if __name__ == "__main__":
+    unittest.main()

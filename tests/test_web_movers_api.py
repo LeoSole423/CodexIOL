@@ -151,7 +151,31 @@ class TestMoversApiWarnings(unittest.TestCase):
                 os.environ["IOL_DB_PATH"] = prev_env
             _cleanup(conn, path)
 
+    def test_weekly_excludes_orders_on_base_snapshot_day(self):
+        conn, path = _mk_db()
+        prev_env = os.environ.get("IOL_DB_PATH")
+        try:
+            _seed_snapshots_and_assets(conn)
+            conn.execute(
+                """
+                INSERT INTO orders(order_number,status,symbol,side,side_norm,quantity,price,operated_amount,currency,created_at,updated_at,operated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (99, "terminada", "ZZZ", "Venta", "sell", None, None, 5000.0, "peso_Argentino", "2026-02-06T10:00:00", None, None),
+            )
+            conn.commit()
+            os.environ["IOL_DB_PATH"] = path
+
+            out = movers(kind="period", period="weekly", metric="pnl", currency="all", limit=100)
+            symbols = {r.get("symbol") for r in (out.get("gainers") or []) + (out.get("losers") or [])}
+            self.assertNotIn("ZZZ", symbols)
+        finally:
+            if prev_env is None:
+                os.environ.pop("IOL_DB_PATH", None)
+            else:
+                os.environ["IOL_DB_PATH"] = prev_env
+            _cleanup(conn, path)
+
 
 if __name__ == "__main__":
     unittest.main()
-

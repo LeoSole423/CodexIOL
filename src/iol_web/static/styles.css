@@ -541,6 +541,40 @@ body {
   margin-top: 14px;
 }
 
+.charts-row {
+  margin-top: 14px;
+}
+
+.asset-performance {
+  margin-top: 16px;
+}
+
+.asset-performance .section-head {
+  margin-top: 0;
+  padding: 0 0 10px;
+}
+
+.asset-performance .table th,
+.asset-performance .table td {
+  white-space: nowrap;
+}
+
+.asset-performance .table td:nth-child(2) {
+  white-space: normal;
+  min-width: 260px;
+}
+
+.utilities-row {
+  margin-top: 14px;
+  align-items: start;
+}
+
+.inflation-compact .table th,
+.inflation-compact .table td {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
 /* ── Cards ── */
 .card {
   background: var(--card);
@@ -632,6 +666,27 @@ body {
 .cashflow-form .seg {
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 12px;
+}
+
+.cashflow-explain {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.cashflow-auto-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.10);
+}
+
+.cashflow-auto-section .card-head {
+  margin-bottom: 6px;
+}
+
+.cashflow-auto-section h2 {
+  font-size: 14px;
 }
 
 .cashflow-row-actions {
@@ -883,6 +938,37 @@ body {
   border-color: rgba(251, 113, 133, 0.40);
 }
 
+.row-badge-correction {
+  color: #fde68a;
+  background: rgba(250, 204, 21, 0.16);
+  border-color: rgba(250, 204, 21, 0.40);
+}
+
+.row-badge-operational {
+  color: #bae6fd;
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.38);
+}
+
+.row-badge-rotation {
+  color: #c7d2fe;
+  background: rgba(99, 102, 241, 0.16);
+  border-color: rgba(99, 102, 241, 0.38);
+}
+
+.row-badge-external {
+  color: #bbf7d0;
+  background: rgba(34, 197, 94, 0.15);
+  border-color: rgba(34, 197, 94, 0.36);
+}
+
+.row-subhint {
+  margin-top: 4px;
+  color: var(--muted2);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 /* ── Footer ── */
 .footer {
   padding: 20px 22px;
@@ -1077,6 +1163,13 @@ body {
 
   .cash-row {
     grid-template-columns: 1fr;
+  }
+
+  .row-subhint {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 180px;
   }
 }
 
