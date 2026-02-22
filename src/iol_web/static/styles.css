@@ -365,14 +365,14 @@ body {
 .mg-lbl {
   color: var(--muted2);
   letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 .mg-val {
   color: var(--text);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-  display: flex;
-  align-items: center;
+  white-space: nowrap;
 }
 
 .mg-pct {

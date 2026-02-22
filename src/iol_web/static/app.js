@@ -411,11 +411,11 @@
         </div>
         <div class="mini-grid">
           <div class="mg-row">
-            <span class="mg-lbl">Bruto</span>
+            <span class="mg-lbl">Var. Saldo</span>
             <span class="mg-val">${grossArsStr}</span>
           </div>
           <div class="mg-row">
-            <span class="mg-lbl">Aportes</span>
+            <span class="mg-lbl">Dep./Retiros</span>
             <span class="mg-val">${flowArsStr}</span>
           </div>
         </div>
@@ -498,7 +498,7 @@
   function renderHeroMonthInsights(kpi) {
     if (!kpi) {
       putTextAndSign("kpiMonthNetPct", null, null, "kpi-pct");
-      putTextAndSign("kpiMonthFlowArs", null, null, "");
+      if (el("kpiMonthGrossFlow")) el("kpiMonthGrossFlow").innerHTML = "";
       putTextAndSign("kpiMonthNetArs", null, null, "kpi-value");
       return;
     }
@@ -506,13 +506,33 @@
     const status = String(kpi.status || "");
     if (status === "ok" || status === "inflation_unavailable") {
       putTextAndSign("kpiMonthNetPct", kpi.net_pct, (v) => fmtPct(v), "kpi-pct");
-      putTextAndSign("kpiMonthFlowArs", kpi.contributions_ars, (v) => fmtDeltaARS(v), "");
+
+      const totalChangeArs = (kpi.market_delta_ars != null) ? kpi.market_delta_ars : null;
+      const totalChangeStr = (totalChangeArs != null) ? fmtDeltaARS(totalChangeArs) : "-";
+      const flowArsStr = (kpi.contributions_ars != null) ? fmtDeltaARS(kpi.contributions_ars) : "-";
+
+      const mg = el("kpiMonthGrossFlow");
+      if (mg) {
+        mg.innerHTML = `
+          <div class="mini-grid" style="margin-bottom: 12px;">
+            <div class="mg-row">
+              <span class="mg-lbl">Var. Saldo</span>
+              <span class="mg-val">${totalChangeStr}</span>
+            </div>
+            <div class="mg-row">
+              <span class="mg-lbl">Depósitos/Retiros</span>
+              <span class="mg-val">${flowArsStr}</span>
+            </div>
+          </div>
+        `;
+      }
+
       putTextAndSign("kpiMonthNetArs", kpi.net_delta_ars, (v) => fmtDeltaARS(v), "kpi-value");
       return;
     }
 
     putTextAndSign("kpiMonthNetPct", null, null, "kpi-pct");
-    putTextAndSign("kpiMonthFlowArs", null, null, "");
+    if (el("kpiMonthGrossFlow")) el("kpiMonthGrossFlow").innerHTML = "";
     putTextAndSign("kpiMonthNetArs", null, null, "kpi-value");
   }
 
@@ -642,7 +662,16 @@
       const flowArsStr = (daily.flow_total_ars != null) ? fmtDeltaARS(daily.flow_total_ars) : "-";
 
       el("kpiDailyGross").innerHTML = `
-        Bruto ${grossArsStr} <span style="color: rgba(255,255,255,0.2); margin: 0 6px;">|</span> Aportes ${flowArsStr}
+        <div class="mini-grid" style="margin-bottom: 12px;">
+          <div class="mg-row">
+            <span class="mg-lbl">Var. Saldo</span>
+            <span class="mg-val">${grossArsStr}</span>
+          </div>
+          <div class="mg-row">
+            <span class="mg-lbl">Depósitos/Retiros</span>
+            <span class="mg-val">${flowArsStr}</span>
+          </div>
+        </div>
       `;
     }
 
