@@ -123,6 +123,147 @@
     root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
   }
 
+  function formatByCurrency(currencyCode, value) {
+    if (currencyCode === "dolar_Estadounidense" || currencyCode === "USD") {
+      return fmtUSD.format(value || 0);
+    }
+    return fmtARS.format(value || 0);
+  }
+
+  function labelCurrency(currencyCode) {
+    if (currencyCode === "dolar_Estadounidense" || currencyCode === "USD") return "USD";
+    if (currencyCode === "peso_Argentino" || currencyCode === "ARS") return "ARS";
+    return "unknown";
+  }
+
+  function renderAssetPerformanceTable(targetId, rows) {
+    const root = el(targetId);
+    if (!root) return;
+
+    const head = `
+      <th>S\u00edmbolo</th>
+      <th>Descripci\u00f3n</th>
+      <th>Moneda</th>
+      <th class="num">Valor</th>
+      <th class="num">Peso (%)</th>
+      <th class="num">PnL seleccionado</th>
+    `;
+
+    const body = (rows || []).map((r, idx) => {
+      const c = String(r.currency || "unknown");
+      const metric = r.selected_value;
+      const pct = r.selected_pct;
+      const metricText = fmtDelta(metric, c === "dolar_Estadounidense" ? fmtUSD : fmtARS);
+      const pctText = (pct == null) ? "" : ` <span class="muted">(${fmtPct(pct)})</span>`;
+      const weightText = (r.weight_pct == null) ? "-" : fmtPct(r.weight_pct);
+      const flowTag = String(r.flow_tag || "none");
+      let flowBadge = "";
+      if (flowTag === "liquidated") flowBadge = `<span class="row-badge row-badge-liquidated">Liquidado</span>`;
+      if (flowTag === "missing_cashflow") flowBadge = `<span class="row-badge row-badge-missing">Cerrado s/ flujo</span>`;
+      return `
+        <tr style="animation: fade-in 0.3s ease ${idx * 18}ms both;">
+          <td>${r.symbol || "-"}</td>
+          <td><div class="desc-wrap"><span class="muted">${(r.description || "").slice(0, 56)}</span>${flowBadge}</div></td>
+          <td class="muted">${labelCurrency(c)}</td>
+          <td class="num">${formatByCurrency(c, Number(r.total_value || 0))}</td>
+          <td class="num">${weightText}</td>
+          <td class="num ${signClass(metric)}">${metricText}${pctText}</td>
+        </tr>
+      `;
+    }).join("");
+
+    root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  function normalizeLegacyRows(rows, metricKey, pctKey) {
+    const bySymbol = {};
+    for (const r of (rows || [])) {
+      const sym = String((r && r.symbol) || "").trim();
+      if (!sym) continue;
+      const prev = bySymbol[sym];
+      const curMetric = Number((r && r[metricKey]) || 0);
+      const prevMetric = prev ? Number((prev && prev[metricKey]) || 0) : null;
+      if (!prev || Math.abs(curMetric) >= Math.abs(prevMetric)) bySymbol[sym] = r;
+    }
+    const out = Object.values(bySymbol).map((r) => ({
+      symbol: r.symbol,
+      description: r.description,
+      currency: r.currency || "unknown",
+      market: r.market,
+      type: r.type,
+      total_value: Number(r.total_value || 0),
+      base_total_value: r.base_total_value == null ? null : Number(r.base_total_value || 0),
+      selected_value: Number(r[metricKey] || 0),
+      selected_pct: (pctKey && r[pctKey] != null) ? Number(r[pctKey]) : null,
+      flow_tag: String(r.flow_tag || "none"),
+    }));
+
+    const totalVisible = out.reduce((s, it) => s + Number(it.total_value || 0), 0);
+    for (const it of out) {
+      const tv = Number(it.total_value || 0);
+      it.weight_pct = totalVisible > 0 ? (tv / totalVisible * 100.0) : 0.0;
+    }
+    out.sort((a, b) => {
+      const am = Number(a.selected_value || 0);
+      const bm = Number(b.selected_value || 0);
+      if (bm !== am) return bm - am;
+      const at = Number(a.total_value || 0);
+      const bt = Number(b.total_value || 0);
+      if (bt !== at) return bt - at;
+      return String(a.symbol || "").localeCompare(String(b.symbol || ""));
+    });
+    return out;
+  }
+
+  async function fetchLegacyAssetPerformance(period, latestYear, latestMonth, years) {
+    try {
+      if (period === "accumulated") {
+        const total = await fetchJSON("/api/movers?kind=total&limit=100");
+        const merged = (total.gainers || []).concat(total.losers || []);
+        return {
+          period,
+          from: null,
+          to: null,
+          warnings: [],
+          orders_stats: null,
+          rows: normalizeLegacyRows(merged, "gain_amount", null),
+          fallback: true,
+        };
+      }
+
+      let url = `/api/movers?kind=period&period=${encodeURIComponent(period)}&limit=100&metric=pnl&currency=all`;
+      if (period === "monthly") {
+        const m = getAssetMonth(latestMonth || 1);
+        url = `/api/movers?kind=period&period=monthly&month=${encodeURIComponent(m)}&year=${encodeURIComponent(latestYear)}&limit=100&metric=pnl&currency=all`;
+      } else if (period === "yearly") {
+        const y = getAssetYear(latestYear || new Date().getFullYear(), years);
+        url = `/api/movers?kind=period&period=yearly&year=${encodeURIComponent(y)}&limit=100&metric=pnl&currency=all`;
+      }
+
+      const mv = await fetchJSON(url);
+      const merged = (mv.gainers || []).concat(mv.losers || []);
+      return {
+        period,
+        from: mv.from || null,
+        to: mv.to || null,
+        warnings: mv.warnings || [],
+        orders_stats: mv.orders_stats || null,
+        rows: normalizeLegacyRows(merged, "delta_value", "delta_pct"),
+        fallback: true,
+      };
+    } catch (_) {
+      return {
+        period,
+        from: null,
+        to: null,
+        warnings: [],
+        orders_stats: null,
+        rows: [],
+        fallback: true,
+      };
+    }
+  }
+
   function fmtMonthLabel(yyyyMM) {
     const s = String(yyyyMM || "");
     if (s.length !== 7) return s || "-";
@@ -183,7 +324,7 @@
   let chartHistory = null;
   let chartInflationSeries = null;
   let chartInflationAnnual = null;
-  let moversCtx = { latestYear: null, latestMonth: null, years: [] };
+  let assetCtx = { latestYear: null, latestMonth: null, years: [] };
 
   function buildLineChart(canvas, labels, values) {
     const ctx = canvas.getContext("2d");
@@ -569,6 +710,118 @@
     root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
   }
 
+  function renderAutoCashflows(rows) {
+    const root = el("tblCashflowsAuto");
+    if (!root) return;
+    const list = rows || [];
+    if (!list.length) {
+      root.innerHTML = `<div class="hint">Sin flujos autom&aacute;ticos detectados.</div>`;
+      return;
+    }
+
+    function toNumber(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    function calcResidualRatio(row) {
+      const fromApi = Number(row && row.residual_ratio);
+      if (Number.isFinite(fromApi) && fromApi >= 0) return fromApi;
+      const buy = Math.abs(toNumber(row && row.buy_amount_ars));
+      const sell = Math.abs(toNumber(row && row.sell_amount_ars));
+      const income = Math.abs(toNumber(row && row.income_amount_ars));
+      const traded = buy + sell + income;
+      if (traded <= 0) return null;
+      return Math.abs(toNumber(row && row.amount_ars)) / traded;
+    }
+
+    function fallbackKindMeta(row) {
+      const k = String((row && row.kind) || "").toLowerCase();
+      const warnings = Array.isArray(row.quality_warnings) ? row.quality_warnings : [];
+      if (warnings.includes("CASH_MISSING") || warnings.includes("ORDERS_INCOMPLETE") || k === "correction") {
+        return {
+          label: "Correcci&oacute;n",
+          className: "row-badge row-badge-correction",
+          detail: "Datos incompletos de caja/&oacute;rdenes; revisar manualmente.",
+        };
+      }
+      const residual = calcResidualRatio(row);
+      if (k === "withdraw" && residual != null && residual <= 0.03) {
+        return {
+          label: "Costo operativo probable",
+          className: "row-badge row-badge-operational",
+          detail: "Residual chico vs volumen operado (\u22643%).",
+        };
+      }
+      const amount = toNumber(row && row.amount_ars);
+      return {
+        label: amount >= 0 ? "Flujo externo probable (+)" : "Flujo externo probable (-)",
+        className: "row-badge row-badge-external",
+        detail: "Clasificado por signo del flujo neto inferido.",
+      };
+    }
+
+    function apiKindMeta(row) {
+      const dk = String((row && row.display_kind) || "").toLowerCase();
+      const label = String((row && row.display_label) || "").trim();
+      if (!dk && !label) return null;
+      const cls = {
+        correction: "row-badge row-badge-correction",
+        operational_cost_probable: "row-badge row-badge-operational",
+        rotation_probable: "row-badge row-badge-rotation",
+        external_flow_probable: "row-badge row-badge-external",
+      };
+      return {
+        label: label || "-",
+        className: cls[dk] || "",
+        detail: String((row && row.reason_detail) || "").trim(),
+      };
+    }
+
+    function kindMeta(row) {
+      const fromApi = apiKindMeta(row);
+      if (fromApi) return fromApi;
+      return fallbackKindMeta(row);
+    }
+
+    const head = `
+      <th>Fecha</th>
+      <th>Tipo</th>
+      <th class="num">Monto neto</th>
+      <th class="num">Caja</th>
+      <th class="num">Compras</th>
+      <th class="num">Ventas</th>
+      <th class="num">Ingresos</th>
+      <th>Warning</th>
+    `;
+    const body = list.map((r) => {
+      const warns = Array.isArray(r.quality_warnings) ? r.quality_warnings : [];
+      const hasWarn = warns.length > 0;
+      const warnTxt = hasWarn ? warns.join(", ") : "-";
+      const kind = kindMeta(r);
+      const warnBadge = hasWarn
+        ? `<span class="row-badge row-badge-correction">${warnTxt}</span>`
+        : `<span class="muted">-</span>`;
+      const kindCell = kind.className
+        ? `<span class="${kind.className}">${kind.label}</span>`
+        : (kind.label || "-");
+      const kindDetail = kind.detail ? `<div class="row-subhint">${kind.detail}</div>` : "";
+      return `
+        <tr>
+          <td>${r.flow_date || "-"}</td>
+          <td>${kindCell}${kindDetail}</td>
+          <td class="num ${signClass(r.amount_ars)}">${fmtDeltaARS(r.amount_ars)}</td>
+          <td class="num ${signClass(r.cash_delta_ars)}">${fmtDeltaARS(r.cash_delta_ars)}</td>
+          <td class="num">${fmtDeltaARS(r.buy_amount_ars || 0)}</td>
+          <td class="num">${fmtDeltaARS(r.sell_amount_ars || 0)}</td>
+          <td class="num">${fmtDeltaARS(r.income_amount_ars || 0)}</td>
+          <td>${warnBadge}</td>
+        </tr>
+      `;
+    }).join("");
+    root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
   async function refreshManualCashflows() {
     if (!el("tblCashflowsManual")) return;
     try {
@@ -577,6 +830,18 @@
     } catch (e) {
       const root = el("tblCashflowsManual");
       if (root) root.innerHTML = `<div class="hint">No se pudieron cargar los ajustes manuales.</div>`;
+    }
+  }
+
+  async function refreshAutoCashflows(days) {
+    if (!el("tblCashflowsAuto")) return;
+    const d = parseInt(days || 30, 10) || 30;
+    try {
+      const out = await fetchJSON(`/api/cashflows/auto?days=${encodeURIComponent(d)}`);
+      renderAutoCashflows((out && out.rows) ? out.rows : []);
+    } catch (_) {
+      const root = el("tblCashflowsAuto");
+      if (root) root.innerHTML = `<div class="hint">No se pudieron cargar los flujos autom&aacute;ticos.</div>`;
     }
   }
 
@@ -682,28 +947,11 @@
     renderMonthVsInflationKpi(monthlyKpi);
     renderHeroMonthInsights(monthlyKpi);
 
-    // Monthly inflation compare (calendar month)
-    const cmpRoot = el("tblInflationCompare");
-    if (cmpRoot) cmpRoot.innerHTML = `<div class="hint">Cargando inflaci\u00f3n...</div>`;
-    try {
-      const cmp = await fetchJSON("/api/compare/inflation?months=12");
-      const rows = (cmp && cmp.rows) ? cmp.rows : [];
-      renderInflationCompare(
-        "tblInflationCompare",
-        rows,
-        !!(cmp && cmp.stale),
-        (cmp && cmp.inflation_available_to) ? cmp.inflation_available_to : null,
-        !!(cmp && cmp.projection_used),
-        (cmp && cmp.projection_source_month) ? cmp.projection_source_month : null
-      );
-    } catch (_) {
-      // Keep dashboard functional even if inflation endpoint fails.
-      if (cmpRoot) {
-        cmpRoot.innerHTML = `<div class="hint">No se pudo cargar la inflaci\u00f3n. Prob\u00e1 abrir <code>/api/compare/inflation?months=12</code> y revis\u00e1 los logs del contenedor <code>web</code>.</div>`;
-      }
-    }
+    // Keep compact inflation card aligned with the same monthly KPI used in the hero cards.
+    renderInflationCompactFromKpi("tblInflationCompare", monthlyKpi);
 
-    const series = await fetchJSON("/api/snapshots");
+    const evolutionMode = getEvolutionMode();
+    const series = await fetchJSON(`/api/snapshots?mode=${encodeURIComponent(evolutionMode)}`);
     const labelsAll = series.map(x => x.date);
     const valuesAll = series.map(x => x.total_value);
     const years = Array.from(
@@ -713,7 +961,7 @@
     const latestDate = String(snap.snapshot_date || "");
     const latestYear = parseInt(latestDate.slice(0, 4), 10);
     const latestMonth = parseInt(latestDate.slice(5, 7), 10);
-    moversCtx = { latestYear: latestYear || null, latestMonth: latestMonth || null, years };
+    assetCtx = { latestYear: latestYear || null, latestMonth: latestMonth || null, years };
 
     let labels = labelsAll, values = valuesAll;
     if (rangeDays && rangeDays !== "all") {
@@ -728,79 +976,84 @@
       chartTotal = buildLineChart(canvas, labels, values);
     }
 
-    const period = getMoversPeriod();
-    function buildMoversUrl(curr) {
-      const c = curr || "peso_Argentino";
-      let url = `/api/movers?kind=period&period=${encodeURIComponent(period)}&limit=10&metric=pnl&currency=${encodeURIComponent(c)}`;
+    const evoHint = el("evolutionHint");
+    if (evoHint) {
+      if (evolutionMode === "market") {
+        const warns = new Set();
+        for (const r of (series || [])) {
+          const ww = Array.isArray(r && r.quality_warnings) ? r.quality_warnings : [];
+          ww.forEach((w) => warns.add(String(w)));
+        }
+        const hasQualityIssue = warns.has("CASH_MISSING") || warns.has("ORDERS_INCOMPLETE") || warns.has("INFERENCE_PARTIAL");
+        evoHint.style.display = "block";
+        evoHint.textContent = hasQualityIssue
+          ? "Modo ajustado por flujos externos activo. Hay tramos con calidad incompleta (caja/ordenes), por lo que algunos puntos pueden quedar sin ajuste fino."
+          : "Modo ajustado por flujos externos activo (descuenta aportes/retiros inferidos + ajustes manuales).";
+      } else {
+        evoHint.style.display = "none";
+      }
+    }
+
+    const period = getAssetPeriod();
+    function buildAssetPerformanceUrl() {
+      let url = `/api/assets/performance?period=${encodeURIComponent(period)}`;
       if (period === "monthly") {
-        const m = getMoversMonth(latestMonth || 1);
-        url = `/api/movers?kind=period&period=monthly&month=${encodeURIComponent(m)}&year=${encodeURIComponent(latestYear)}&limit=10&metric=pnl&currency=${encodeURIComponent(c)}`;
+        const m = getAssetMonth(latestMonth || 1);
+        url += `&month=${encodeURIComponent(m)}&year=${encodeURIComponent(latestYear)}`;
       } else if (period === "yearly") {
-        const y = getMoversYear(latestYear || new Date().getFullYear(), years);
-        url = `/api/movers?kind=period&period=yearly&year=${encodeURIComponent(y)}&limit=10&metric=pnl&currency=${encodeURIComponent(c)}`;
+        const y = getAssetYear(latestYear || new Date().getFullYear(), years);
+        url += `&year=${encodeURIComponent(y)}`;
       }
       return url;
     }
 
-    const [moversARS, moversUSD] = await Promise.all([
-      fetchJSON(buildMoversUrl("peso_Argentino")),
-      fetchJSON(buildMoversUrl("dolar_Estadounidense")),
-    ]);
-    updateMoversPicker(period, latestYear, latestMonth, years);
-    if (period !== "daily" && moversARS && moversARS.from == null) {
+    let assetsPerf = null;
+    try {
+      assetsPerf = await fetchJSON(buildAssetPerformanceUrl());
+    } catch (_) {
+      assetsPerf = await fetchLegacyAssetPerformance(period, latestYear, latestMonth, years);
+    }
+    if (!assetsPerf) {
+      assetsPerf = { period, from: null, to: null, warnings: [], orders_stats: null, rows: [] };
+    }
+    updateAssetPicker(period, latestYear, latestMonth, years);
+    if (period !== "daily" && assetsPerf && assetsPerf.from == null) {
       const msg = (period === "monthly")
         ? "No hay snapshots para ese a\u00f1o."
         : (period === "yearly")
           ? "No hay snapshots para ese a\u00f1o."
           : "No hay snapshots suficientes para ese per\u00edodo. Deja corriendo el scheduler o ejecuta `iol snapshot run` en distintos d\u00edas.";
-      const a = el("tblGainersDaily");
-      const b = el("tblLosersDaily");
-      if (a) a.innerHTML = `<div class="hint">${msg}</div>`;
-      if (b) b.innerHTML = `<div class="hint">${msg}</div>`;
-      const au = el("tblGainersDailyUSD");
-      const bu = el("tblLosersDailyUSD");
-      if (au) au.innerHTML = `<div class="hint">${msg}</div>`;
-      if (bu) bu.innerHTML = `<div class="hint">${msg}</div>`;
-      const usdGrid = el("moversUsdGrid");
-      if (usdGrid) usdGrid.style.display = "none";
+      const t = el("tblAssetPerformance");
+      if (t) t.innerHTML = `<div class="hint">${msg}</div>`;
     } else {
-      renderTable("tblGainersDaily", moversARS.gainers || [], "delta_value", "PnL", "ARS");
-      renderTable("tblLosersDaily", moversARS.losers || [], "delta_value", "PnL", "ARS");
-
-      const usdGrid = el("moversUsdGrid");
-      const hasUsd = (moversUSD && ((moversUSD.gainers || []).length || (moversUSD.losers || []).length));
-      if (usdGrid) usdGrid.style.display = hasUsd ? "" : "none";
-      if (hasUsd) {
-        renderTable("tblGainersDailyUSD", moversUSD.gainers || [], "delta_value", "PnL", "USD");
-        renderTable("tblLosersDailyUSD", moversUSD.losers || [], "delta_value", "PnL", "USD");
-      }
+      renderAssetPerformanceTable("tblAssetPerformance", assetsPerf.rows || []);
     }
 
-    const mh = el("moversHint");
-    if (mh) {
-      const warns = (moversARS && moversARS.warnings) ? moversARS.warnings : [];
+    const ah = el("assetHint");
+    if (ah) {
+      const warns = (assetsPerf && assetsPerf.warnings) ? assetsPerf.warnings : [];
       if (warns && warns.length) {
-        const from = moversARS.from;
-        const to = moversARS.to;
+        const from = assetsPerf.from;
+        const to = assetsPerf.to;
         const cmd = (from && to) ? `iol snapshot backfill --from ${from} --to ${to}` : "iol snapshot backfill --from YYYY-MM-DD --to YYYY-MM-DD";
         const msg = warns.includes("ORDERS_NONE")
           ? `No hay operaciones terminadas en la DB para este per\u00edodo. Si vendiste activos, corr\u00e9 un backfill: <code>${cmd}</code> y luego ejecut\u00e1 <code>iol snapshot run</code> (o dej\u00e1 el scheduler).`
           : `Hay operaciones incompletas (faltan lado/monto/fecha). Corr\u00e9 un backfill: <code>${cmd}</code> y luego ejecut\u00e1 <code>iol snapshot run</code> (o dej\u00e1 el scheduler).`;
-        mh.style.display = "block";
-        mh.innerHTML = msg;
+        ah.style.display = "block";
+        ah.innerHTML = msg;
       } else {
-        mh.style.display = "none";
+        ah.style.display = "none";
+      }
+      if ((!warns || !warns.length) && assetsPerf.fallback) {
+        ah.style.display = "block";
+        ah.textContent = "Usando fallback de compatibilidad (endpoint nuevo no disponible). Reinicia el servicio web para activar /api/assets/performance.";
       }
     }
 
-    const map = { daily: "d\u00eda", weekly: "semana", monthly: "mes", yearly: "a\u00f1o", ytd: "ytd" };
+    const map = { daily: "d\u00eda", weekly: "semana", monthly: "mes", yearly: "a\u00f1o", accumulated: "acumulado" };
     const t = map[period] || period;
-    const badge = el("moversPeriodBadge");
+    const badge = el("assetPeriodBadge");
     if (badge) badge.textContent = t;
-
-    const moversTotal = await fetchJSON("/api/movers?kind=total&limit=10");
-    renderTable("tblGainersTotal", moversTotal.gainers || [], "gain_amount", "PnL");
-    renderTable("tblLosersTotal", moversTotal.losers || [], "gain_amount", "PnL");
 
     const groupSel = el("allocGroupBy");
     const cashChk = el("allocCash");
@@ -838,7 +1091,10 @@
       renderAllocLegend("allocLegend", labelsA, valuesA, colors);
     }
 
-    await refreshManualCashflows();
+    await Promise.all([
+      refreshManualCashflows(),
+      refreshAutoCashflows(30),
+    ]);
   }
 
   async function loadAssetsPage() {
@@ -1116,11 +1372,11 @@
     }
   }
 
-  function initMoversControls() {
-    const wrap = el("moversPeriodButtons");
+  function initAssetPerformanceControls() {
+    const wrap = el("assetPeriodButtons");
     if (!wrap) return;
 
-    const active = getMoversPeriod();
+    const active = getAssetPeriod();
     Array.from(wrap.querySelectorAll("button")).forEach((b) => {
       b.classList.toggle("on", b.getAttribute("data-period") === active);
     });
@@ -1129,67 +1385,139 @@
       const btn = ev.target && ev.target.closest("button");
       if (!btn) return;
       const p = (btn.getAttribute("data-period") || "daily").toLowerCase();
-      setMoversPeriod(p);
+      setAssetPeriod(p);
       Array.from(wrap.querySelectorAll("button")).forEach((b) => b.classList.remove("on"));
       btn.classList.add("on");
       loadDashboard(getActiveRange());
     });
   }
 
-  function getMoversPeriod() {
+  function getAssetPeriod() {
     try {
-      const v = (localStorage.getItem("moversPeriod") || "daily").trim().toLowerCase();
-      if (["daily", "weekly", "monthly", "yearly", "ytd"].includes(v)) return v;
+      const v1 = (localStorage.getItem("assetPeriod") || "").trim().toLowerCase();
+      if (["daily", "weekly", "monthly", "yearly", "accumulated"].includes(v1)) return v1;
+      const legacy = (localStorage.getItem("moversPeriod") || "").trim().toLowerCase();
+      if (legacy) {
+        const mapped = (legacy === "ytd") ? "accumulated" : legacy;
+        if (["daily", "weekly", "monthly", "yearly", "accumulated"].includes(mapped)) {
+          localStorage.setItem("assetPeriod", mapped);
+          localStorage.removeItem("moversPeriod");
+          return mapped;
+        }
+      }
     } catch (_) { }
     return "daily";
   }
 
-  function setMoversPeriod(v) {
-    try { localStorage.setItem("moversPeriod", String(v || "daily")); } catch (_) { }
+  function setAssetPeriod(v) {
+    try { localStorage.setItem("assetPeriod", String(v || "daily")); } catch (_) { }
   }
 
-  function initMoversPickerControls() {
-    const prev = el("moversPickPrev");
-    const next = el("moversPickNext");
-    if (prev) prev.addEventListener("click", () => movePicker(-1));
-    if (next) next.addEventListener("click", () => movePicker(+1));
+  function initAssetPickerControls() {
+    const prev = el("assetPickPrev");
+    const next = el("assetPickNext");
+    if (prev) prev.addEventListener("click", () => moveAssetPicker(-1));
+    if (next) next.addEventListener("click", () => moveAssetPicker(+1));
   }
 
-  function movePicker(dir) {
-    const period = getMoversPeriod();
+  function moveAssetPicker(dir) {
+    const period = getAssetPeriod();
     if (period === "monthly") {
-      const baseMonth = moversCtx.latestMonth || 1;
-      let m = getMoversMonth(baseMonth);
+      const baseMonth = assetCtx.latestMonth || 1;
+      let m = getAssetMonth(baseMonth);
       m = m + dir;
       if (m < 1) m = 12;
       if (m > 12) m = 1;
-      setMoversMonth(m);
+      setAssetMonth(m);
       loadDashboard(getActiveRange());
       return;
     }
     if (period === "yearly") {
-      const years = moversCtx.years || [];
+      const years = assetCtx.years || [];
       if (!years.length) return;
-      let y = getMoversYear(moversCtx.latestYear || years[years.length - 1], years);
+      let y = getAssetYear(assetCtx.latestYear || years[years.length - 1], years);
       const idx = years.indexOf(y);
       const ni = idx + dir;
       if (ni < 0 || ni >= years.length) return;
-      setMoversYear(years[ni]);
+      setAssetYear(years[ni]);
       loadDashboard(getActiveRange());
     }
   }
 
-  function updateMoversPicker(period, latestYear, latestMonth, years) {
-    const picker = el("moversPicker");
-    const label = el("moversPickLabel");
-    const prev = el("moversPickPrev");
-    const next = el("moversPickNext");
+  function renderInflationCompactFromKpi(targetId, kpi) {
+    const root = el(targetId);
+    if (!root) return;
+
+    const head = `
+      <th>Mes</th>
+      <th>Snapshots</th>
+      <th class="num">Retorno</th>
+      <th class="num">IPC</th>
+      <th class="num">Real</th>
+    `;
+
+    if (!kpi || !kpi.status) {
+      root.innerHTML = `<div class="hint">No se pudo cargar la comparativa mensual.</div>`;
+      const hint = el("inflationHint");
+      if (hint) hint.style.display = "none";
+      return;
+    }
+
+    const status = String(kpi.status || "");
+    if (status === "insufficient_snapshots") {
+      root.innerHTML = `<div class="hint">Faltan snapshots para calcular el mes.</div>`;
+      const hint = el("inflationHint");
+      if (hint) hint.style.display = "none";
+      return;
+    }
+
+    const month = fmtMonthLabel(kpi.month || "");
+    const snaps = (kpi.from && kpi.to) ? `${kpi.from} \u2192 ${kpi.to}` : "-";
+    const ret = (kpi.net_pct == null) ? "-" : fmtPct(kpi.net_pct);
+    const ipc = (kpi.inflation_pct == null)
+      ? "-"
+      : (fmtPct(kpi.inflation_pct) + (kpi.inflation_projected ? " (est.)" : ""));
+    const real = (kpi.real_vs_inflation_pct == null) ? "-" : fmtPct(kpi.real_vs_inflation_pct);
+    const cls = signClass(kpi.real_vs_inflation_pct);
+
+    root.innerHTML = `
+      <table><thead><tr>${head}</tr></thead><tbody>
+        <tr>
+          <td>${month}</td>
+          <td class="muted">${snaps}</td>
+          <td class="num">${ret}</td>
+          <td class="num">${ipc}</td>
+          <td class="num ${cls}">${real}</td>
+        </tr>
+      </tbody></table>
+    `;
+
+    const hint = el("inflationHint");
+    if (hint) {
+      const bits = [];
+      if (kpi.inflation_available_to) bits.push(`IPC disponible hasta ${fmtMonthLabel(kpi.inflation_available_to)}`);
+      if (kpi.inflation_projected && kpi.inflation_available_to) bits.push(`mes actual estimado con ${fmtMonthLabel(kpi.inflation_available_to)}`);
+      if (status === "inflation_unavailable") bits.push("IPC no disponible para este mes");
+      if (bits.length) {
+        hint.style.display = "block";
+        hint.textContent = "Inflaci\u00f3n: " + bits.join(" | ") + ".";
+      } else {
+        hint.style.display = "none";
+      }
+    }
+  }
+
+  function updateAssetPicker(period, latestYear, latestMonth, years) {
+    const picker = el("assetPicker");
+    const label = el("assetPickLabel");
+    const prev = el("assetPickPrev");
+    const next = el("assetPickNext");
     if (!picker || !label || !prev || !next) return;
 
     if (period === "monthly") {
       picker.style.display = "inline-flex";
-      const m = getMoversMonth(latestMonth || 1);
-      setMoversMonth(m);
+      const m = getAssetMonth(latestMonth || 1);
+      setAssetMonth(m);
       const names = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
       label.textContent = `${names[m - 1]} ${latestYear}`;
       prev.disabled = false;
@@ -1200,8 +1528,8 @@
     if (period === "yearly") {
       picker.style.display = "inline-flex";
       const ys = Array.isArray(years) ? years : [];
-      const y = getMoversYear(latestYear || new Date().getFullYear(), ys);
-      setMoversYear(y);
+      const y = getAssetYear(latestYear || new Date().getFullYear(), ys);
+      setAssetYear(y);
       label.textContent = String(y);
       if (!ys.length) {
         prev.disabled = true;
@@ -1217,23 +1545,37 @@
     picker.style.display = "none";
   }
 
-  function getMoversMonth(defaultMonth) {
+  function getAssetMonth(defaultMonth) {
     try {
-      const n = parseInt(localStorage.getItem("moversMonth") || "", 10);
-      if (n >= 1 && n <= 12) return n;
+      const current = parseInt(localStorage.getItem("assetMonth") || "", 10);
+      if (current >= 1 && current <= 12) return current;
+      const legacy = parseInt(localStorage.getItem("moversMonth") || "", 10);
+      if (legacy >= 1 && legacy <= 12) {
+        localStorage.setItem("assetMonth", String(legacy));
+        localStorage.removeItem("moversMonth");
+        return legacy;
+      }
     } catch (_) { }
     return (defaultMonth >= 1 && defaultMonth <= 12) ? defaultMonth : 1;
   }
 
-  function setMoversMonth(v) {
-    try { localStorage.setItem("moversMonth", String(parseInt(v, 10) || 1)); } catch (_) { }
+  function setAssetMonth(v) {
+    try { localStorage.setItem("assetMonth", String(parseInt(v, 10) || 1)); } catch (_) { }
   }
 
-  function getMoversYear(defaultYear, years) {
+  function getAssetYear(defaultYear, years) {
     let y = defaultYear;
     try {
-      const n = parseInt(localStorage.getItem("moversYear") || "", 10);
-      if (!isNaN(n)) y = n;
+      const current = parseInt(localStorage.getItem("assetYear") || "", 10);
+      if (!isNaN(current)) y = current;
+      else {
+        const legacy = parseInt(localStorage.getItem("moversYear") || "", 10);
+        if (!isNaN(legacy)) {
+          y = legacy;
+          localStorage.setItem("assetYear", String(legacy));
+          localStorage.removeItem("moversYear");
+        }
+      }
     } catch (_) { }
     if (Array.isArray(years) && years.length) {
       if (years.includes(y)) return y;
@@ -1242,8 +1584,8 @@
     return y;
   }
 
-  function setMoversYear(v) {
-    try { localStorage.setItem("moversYear", String(parseInt(v, 10) || new Date().getFullYear())); } catch (_) { }
+  function setAssetYear(v) {
+    try { localStorage.setItem("assetYear", String(parseInt(v, 10) || new Date().getFullYear())); } catch (_) { }
   }
 
   function getActiveRange() {
@@ -1253,12 +1595,44 @@
     return on ? on.getAttribute("data-range") : "30";
   }
 
+  function getEvolutionMode() {
+    try {
+      const v = String(localStorage.getItem("evolutionMode") || "").toLowerCase();
+      if (v === "raw" || v === "market") return v;
+    } catch (_) { }
+    return "raw";
+  }
+
+  function setEvolutionMode(mode) {
+    const m = (mode === "market") ? "market" : "raw";
+    try { localStorage.setItem("evolutionMode", m); } catch (_) { }
+  }
+
+  function initEvolutionModeControls() {
+    const wrap = el("evolutionModeButtons");
+    if (!wrap) return;
+    const current = getEvolutionMode();
+    Array.from(wrap.querySelectorAll("button")).forEach((b) => {
+      b.classList.toggle("on", b.getAttribute("data-mode") === current);
+    });
+    wrap.addEventListener("click", (ev) => {
+      const btn = ev.target && ev.target.closest("button");
+      if (!btn) return;
+      const mode = btn.getAttribute("data-mode") || "raw";
+      setEvolutionMode(mode);
+      Array.from(wrap.querySelectorAll("button")).forEach((b) => b.classList.remove("on"));
+      btn.classList.add("on");
+      loadDashboard(getActiveRange());
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     initRangeButtons();
+    initEvolutionModeControls();
     initAllocControls();
     initCashflowControls();
-    initMoversControls();
-    initMoversPickerControls();
+    initAssetPerformanceControls();
+    initAssetPickerControls();
     if (el("chartTotal")) loadDashboard(getActiveRange());
     if (el("assetsTable")) loadAssetsPage();
     if (el("chartHistory")) loadHistoryPage();
