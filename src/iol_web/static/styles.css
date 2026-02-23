@@ -10,6 +10,7 @@
   --accent: #67e8f9;
   --accent2: #22d3ee;
   --danger: #fb7185;
+  --err: #fb7185;
   --ok: #34d399;
   --warn: #fcd34d;
   --shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
@@ -139,7 +140,7 @@ body {
 
 .hero h1 {
   margin: 0 0 4px;
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 800;
   letter-spacing: -0.03em;
   background: linear-gradient(135deg, var(--text), rgba(255, 255, 255, 0.70));
@@ -161,12 +162,20 @@ body {
   align-items: stretch;
 }
 
+.hero-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+  align-items: stretch;
+}
+
 /* ── KPI Cards ── */
 .kpi {
   background: var(--card);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius);
-  padding: 18px;
+  padding: 16px;
   box-shadow: var(--shadow);
   animation: rise 380ms ease-out both;
   transition: var(--transition);
@@ -194,14 +203,14 @@ body {
 
 .kpi-label {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .kpi-value {
-  font-size: 32px;
+  font-size: clamp(30px, 2.2vw, 34px);
   font-weight: 800;
   margin-top: 8px;
   line-height: 1.1;
@@ -212,9 +221,9 @@ body {
 .kpi-value-group {
   display: flex;
   align-items: baseline;
-  gap: 12px;
-  margin-top: 8px;
-  margin-bottom: 4px;
+  gap: 10px;
+  margin-top: 6px;
+  margin-bottom: 2px;
 }
 
 .kpi-value-group .kpi-value {
@@ -222,9 +231,9 @@ body {
 }
 
 .kpi-pct {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
-  padding: 3px 8px;
+  padding: 2px 7px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.05);
   font-variant-numeric: tabular-nums;
@@ -243,12 +252,12 @@ body {
 .kpi-divider {
   height: 1px;
   background: rgba(255, 255, 255, 0.08);
-  margin: 16px 0;
+  margin: 14px 0;
 }
 
 .kpi-meta {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--muted2);
   font-variant-numeric: tabular-nums;
 }
@@ -268,15 +277,15 @@ body {
 .kpi-insights {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-top: 12px;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .kpi-insight {
   border: 1px solid rgba(255, 255, 255, 0.10);
   background: rgba(255, 255, 255, 0.03);
   border-radius: 12px;
-  padding: 10px 12px;
+  padding: 9px 11px;
   transition: var(--transition);
 }
 
@@ -295,7 +304,7 @@ body {
 
 .kpi-insight .v {
   margin-top: 4px;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1.15;
   font-variant-numeric: tabular-nums;
@@ -305,15 +314,15 @@ body {
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 10px;
-  margin-top: 12px;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .kpi-mini {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 14px;
-  padding: 12px;
+  padding: 10px;
   transition: var(--transition);
 }
 
@@ -324,7 +333,7 @@ body {
 
 .kpi-mini .k {
   color: var(--muted2);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -333,15 +342,15 @@ body {
 .kpi-mini .v {
   margin-top: 6px;
   font-weight: 700;
-  font-size: 22px;
+  font-size: clamp(20px, 1.9vw, 23px);
   line-height: 1.15;
   font-variant-numeric: tabular-nums;
 }
 
 .mini-sub {
-  margin-top: 6px;
+  margin-top: 5px;
   color: var(--muted2);
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.35;
   font-variant-numeric: tabular-nums;
 }
@@ -349,9 +358,9 @@ body {
 .mini-grid {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 10px;
-  padding-top: 10px;
+  gap: 3px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px dashed rgba(255, 255, 255, 0.08);
 }
 
@@ -359,7 +368,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .mg-lbl {
@@ -417,8 +426,8 @@ body {
   align-items: center;
   margin-top: 2px;
   border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 11px;
+  padding: 3px 9px;
+  font-size: 10px;
   font-weight: 600;
   border: 1px solid rgba(255, 255, 255, 0.25);
   letter-spacing: 0.03em;
@@ -467,14 +476,18 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 10px;
+  padding: 3px 9px;
   border-radius: 999px;
   border: 1px solid rgba(103, 232, 249, 0.22);
   background: rgba(103, 232, 249, 0.06);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   letter-spacing: 0.01em;
+}
+
+#updatedBadge {
+  display: none;
 }
 
 .updated-badge .dot-live {
@@ -501,15 +514,15 @@ body {
 .cash-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin-top: 12px;
+  gap: 10px;
+  margin-top: 10px;
 }
 
 .cash-kpi {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 14px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   transition: var(--transition);
 }
 
@@ -528,9 +541,131 @@ body {
 
 .cash-kpi .v {
   margin-top: 4px;
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+
+/* Hero 2x2 */
+.hero-card {
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+}
+
+.hero-card .kpi-divider {
+  margin: 12px 0;
+}
+
+.hero-submeta {
+  margin-top: 3px;
+}
+
+.hero-balance-insights {
+  margin-top: 10px;
+  grid-template-columns: 1fr;
+}
+
+.hero-balance-insights .kpi-insight {
+  padding: 9px 11px;
+}
+
+.hero-balance-insights .kpi-insight .v {
+  font-size: 18px;
+}
+
+.hero-current-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.hero-mini-label {
+  margin-bottom: 2px;
+}
+
+.hero-window {
+  margin-top: 2px;
+}
+
+.hero-real-group {
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+
+.hero-real-value {
+  font-size: clamp(21px, 1.7vw, 24px);
+}
+
+.hero-real-badge {
+  margin-left: auto;
+}
+
+#kpiMonthVsInflBadge {
+  display: none;
+}
+
+.hero-vs-sub {
+  margin-top: 1px;
+}
+
+.hero-card-horizons .kpi-grid {
+  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  margin-top: 10px;
+  align-content: start;
+  height: 100%;
+}
+
+.hero-card-health .hero-health-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.hero-health-item {
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 12px;
+  padding: 9px 11px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+
+.health-k {
+  color: var(--muted2);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.health-v {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.health-ok {
+  color: var(--ok);
+}
+
+.health-warn {
+  color: var(--warn);
+}
+
+.health-muted {
+  color: var(--muted);
+}
+
+.kpi-empty-state {
+  margin-top: 12px;
+  color: var(--muted2);
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 /* ── Grid ── */
@@ -1004,16 +1139,23 @@ body {
 }
 
 /* Stagger delays for cards */
+.hero-grid> :nth-child(1),
 .hero-row> :nth-child(1) {
   animation-delay: 0ms;
 }
 
+.hero-grid> :nth-child(2),
 .hero-row> :nth-child(2) {
   animation-delay: 60ms;
 }
 
+.hero-grid> :nth-child(3),
 .hero-row> :nth-child(3) {
   animation-delay: 120ms;
+}
+
+.hero-grid> :nth-child(4) {
+  animation-delay: 180ms;
 }
 
 .grid> :nth-child(1) {
@@ -1089,6 +1231,10 @@ body {
 
 /* ── Responsive ── */
 @media (max-width: 980px) {
+  .hero-grid {
+    grid-template-columns: 1fr;
+  }
+
   .hero-row {
     grid-template-columns: 1fr;
   }
@@ -1110,7 +1256,7 @@ body {
   }
 
   .kpi-value {
-    font-size: 28px;
+    font-size: clamp(27px, 8vw, 31px);
   }
 
   .kpi-formula {
@@ -1146,9 +1292,17 @@ body {
   .cash-row {
     grid-template-columns: 1fr 1fr;
   }
+
+  .hero-card {
+    min-height: auto;
+  }
 }
 
 @media (max-width: 640px) {
+  .hero-card-horizons .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+
   .kpi-grid {
     grid-template-columns: 1fr;
   }
@@ -1170,6 +1324,16 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 180px;
+  }
+
+  .hero-health-item {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .health-v {
+    white-space: normal;
   }
 }
 
