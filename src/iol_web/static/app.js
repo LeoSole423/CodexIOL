@@ -70,6 +70,39 @@
     return `hace ${days}d`;
   }
 
+  function pad2(v) {
+    const n = parseInt(v, 10);
+    if (isNaN(n)) return "--";
+    return String(n).padStart(2, "0");
+  }
+
+  function formatSnapshotWindow(snapshotDate, retrievedAt) {
+    const d = String(snapshotDate || "");
+    const dm = (d.length >= 10) ? `${pad2(d.slice(8, 10))}/${pad2(d.slice(5, 7))}` : "--/--";
+    let hm = "--:--";
+    if (retrievedAt) {
+      const ts = new Date(retrievedAt);
+      if (!isNaN(ts.getTime())) hm = `${pad2(ts.getHours())}:${pad2(ts.getMinutes())}`;
+    }
+    return `Snapshot ${dm} - ${hm}`;
+  }
+
+  function formatRangeLabel(fromDate, toDate) {
+    const f = String(fromDate || "").trim();
+    const t = String(toDate || "").trim();
+    if (!f || !t) return "Sin snapshots suficientes para ventana.";
+    if (f === t) return `Base ${f}. Falta snapshot previo.`;
+    return `${f} -> ${t}`;
+  }
+
+  function hasValidRange(block) {
+    if (!block) return false;
+    const f = String(block.from || "").trim();
+    const t = String(block.to || "").trim();
+    if (!f || !t || f === t) return false;
+    return true;
+  }
+
   async function fetchJSON(url, options) {
     const opts = Object.assign({ cache: "no-store" }, options || {});
     const r = await fetch(url, opts);
@@ -533,15 +566,25 @@
     root.innerHTML = rows;
   }
 
-  function putReturnCard(mainId, subId, block) {
+  function putReturnCard(mainId, subId, block, label) {
     const n = el(mainId);
+    const hasRange = hasValidRange(block);
     if (n) {
-      const mainPct = (block && block.real_pct != null) ? block.real_pct : null;
-      n.textContent = mainPct == null ? "-" : fmtPct(mainPct);
-      n.className = "v " + signClass(mainPct);
+      if (!hasRange) {
+        n.textContent = "Sin base";
+        n.className = "v muted";
+      } else {
+        const mainPct = (block && block.real_pct != null) ? block.real_pct : null;
+        n.textContent = mainPct == null ? "-" : fmtPct(mainPct);
+        n.className = "v " + signClass(mainPct);
+      }
     }
     const s = el(subId);
     if (s) {
+      if (!hasRange) {
+        s.innerHTML = `<div class="kpi-empty-state">Sin snapshots suficientes para ventana${label ? ` (${label})` : ""}.</div>`;
+        return;
+      }
       const netArsStr = (block && block.real_delta != null) ? fmtDeltaARS(block.real_delta) : "-";
       const grossArsStr = (block && block.delta != null) ? fmtDeltaARS(block.delta) : "-";
       const flowArsStr = (block && block.flow_total_ars != null) ? fmtDeltaARS(block.flow_total_ars) : "-";
@@ -564,6 +607,70 @@
     }
   }
 
+  function renderRangeState(mainId, subId, block, label) {
+    putReturnCard(mainId, subId, block, label);
+  }
+
+  function setHeroHealthStatus(rowId, label, value, kind) {
+    const row = el(rowId);
+    if (!row) return;
+    const cls = (kind === "ok") ? "health-ok" : ((kind === "warn") ? "health-warn" : "health-muted");
+    row.innerHTML = `
+      <div class="health-k">${label}</div>
+      <div class="health-v ${cls}">${value}</div>
+    `;
+  }
+
+  function renderHeroHealth(ret, monthlyKpi, latestSnap) {
+    const blocks = [
+      ret && ret.daily,
+      ret && ret.weekly,
+      ret && ret.monthly,
+      ret && ret.yearly,
+      ret && ret.ytd,
+    ];
+
+    const warnSet = new Set();
+    blocks.forEach((b) => {
+      const warns = Array.isArray(b && b.quality_warnings) ? b.quality_warnings : [];
+      warns.forEach((w) => warnSet.add(String(w)));
+    });
+    const monthlyWarns = Array.isArray(monthlyKpi && monthlyKpi.quality_warnings) ? monthlyKpi.quality_warnings : [];
+    monthlyWarns.forEach((w) => warnSet.add(String(w)));
+
+    const criticalWarns = ["CASH_MISSING", "ORDERS_INCOMPLETE", "INFERENCE_PARTIAL"];
+    const criticalCount = criticalWarns.filter((w) => warnSet.has(w)).length;
+    if (criticalCount > 0) {
+      setHeroHealthStatus("heroQualityStatus", "Calidad de inferencia", `Revisar (${criticalCount})`, "warn");
+    } else if (warnSet.size > 0) {
+      setHeroHealthStatus("heroQualityStatus", "Calidad de inferencia", "OK (sin operaciones)", "muted");
+    } else {
+      setHeroHealthStatus("heroQualityStatus", "Calidad de inferencia", "OK", "ok");
+    }
+
+    const status = String((monthlyKpi && monthlyKpi.status) || "");
+    if (status === "ok" && monthlyKpi && monthlyKpi.inflation_projected) {
+      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "Estimado", "warn");
+    } else if (status === "ok") {
+      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "OK", "ok");
+    } else if (status === "inflation_unavailable") {
+      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "No disponible", "warn");
+    } else if (status === "insufficient_snapshots") {
+      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "Sin base mensual", "muted");
+    } else {
+      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "Sin dato", "muted");
+    }
+
+    const coverageCount = blocks.filter((b) => hasValidRange(b)).length;
+    const coverageText = `${coverageCount}/5 con base valida`;
+    const coverageKind = coverageCount >= 4 ? "ok" : (coverageCount >= 2 ? "warn" : "muted");
+    setHeroHealthStatus("heroCoverageStatus", "Cobertura de ventanas", coverageText, coverageKind);
+
+    const rel = latestSnap && latestSnap.retrieved_at ? relativeTime(latestSnap.retrieved_at) : null;
+    const updatedText = rel ? `Actualizado ${rel}` : "Sin timestamp";
+    setHeroHealthStatus("heroUpdatedStatus", "Ultima actualizacion", updatedText, "muted");
+  }
+
   function renderMonthVsInflationKpi(kpi) {
     const v = el("kpiMonthVsInflValue");
     const s = el("kpiMonthVsInflSub");
@@ -571,7 +678,8 @@
     if (!v || !s || !b) return;
 
     const status = (kpi && kpi.status) ? String(kpi.status) : "";
-    v.className = "v";
+    const baseClass = "kpi-value hero-real-value";
+    v.className = baseClass;
     b.style.display = "none";
     b.className = "kpi-status-badge";
     b.textContent = "";
@@ -591,7 +699,7 @@
     if (status === "inflation_unavailable") {
       const net = (kpi.net_pct != null) ? fmtPct(kpi.net_pct) : "-";
       v.textContent = net;
-      v.className = "v " + signClass(kpi.net_pct);
+      v.className = baseClass + " " + signClass(kpi.net_pct);
       s.textContent = `Neto ${net} | IPC no disponible`;
       return;
     }
@@ -603,7 +711,7 @@
       : "-";
 
     v.textContent = real == null ? "-" : fmtPct(real);
-    v.className = "kpi-value " + signClass(real);
+    v.className = baseClass + " " + signClass(real);
     s.textContent = `Neto ${net} | IPC ${ipc}`;
 
     if (kpi.beats_inflation == null || real == null) {
@@ -616,10 +724,10 @@
     b.style.display = "inline-flex";
     if (kpi.beats_inflation) {
       b.className = "kpi-status-badge kpi-status-up";
-      b.textContent = "▲ Le ganas al IPC";
+      b.textContent = "Le ganas al IPC";
     } else {
       b.className = "kpi-status-badge kpi-status-down";
-      b.textContent = "▼ Debajo del IPC";
+      b.textContent = "Debajo del IPC";
     }
   }
 
@@ -675,6 +783,18 @@
     putTextAndSign("kpiMonthNetPct", null, null, "kpi-pct");
     if (el("kpiMonthGrossFlow")) el("kpiMonthGrossFlow").innerHTML = "";
     putTextAndSign("kpiMonthNetArs", null, null, "kpi-value");
+  }
+
+  function renderWindowStatus(targetId, block) {
+    const node = el(targetId);
+    if (!node) return;
+    if (hasValidRange(block)) {
+      node.textContent = `Ventana ${formatRangeLabel(block.from, block.to)}`;
+      node.className = "kpi-meta hero-window";
+      return;
+    }
+    node.textContent = "Sin snapshots suficientes para ventana.";
+    node.className = "kpi-meta hero-window muted";
   }
 
   function renderManualCashflows(rows) {
@@ -866,13 +986,9 @@
       animateValue(kpiTotalEl, snap.total_value || 0, (v) => fmtARS.format(v), 900);
     }
 
-    if (el("kpiDate")) {
-      let meta = `Snapshot: ${snap.snapshot_date}`;
-      if (snap.retrieved_at) {
-        const d = new Date(snap.retrieved_at);
-        if (!isNaN(d.getTime())) meta += ` - ${d.toLocaleString("es-AR")}`;
-      }
-      el("kpiDate").textContent = meta;
+    if (el("kpiDate")) el("kpiDate").textContent = `Snapshot ${snap.snapshot_date || "-"}`;
+    if (el("heroSnapshotWindow")) {
+      el("heroSnapshotWindow").textContent = formatSnapshotWindow(snap.snapshot_date, snap.retrieved_at);
     }
 
     // Updated badge with relative time
@@ -904,6 +1020,23 @@
       } else {
         cashUsdEl.textContent = "-";
       }
+    }
+
+    if (el("heroLiquidityRatio")) {
+      const total = Number(snap.total_value || 0);
+      let liquidArs = null;
+      let ratioNote = "Caja disponible sobre total visible.";
+      if (snap.cash_total_ars != null) {
+        liquidArs = Number(snap.cash_total_ars || 0);
+        ratioNote = "Cash ARS + USD convertido a ARS.";
+      } else if (snap.cash_disponible_ars != null) {
+        liquidArs = Number(snap.cash_disponible_ars || 0);
+        if (snap.cash_disponible_usd != null) ratioNote = "Sin FX USD: usa solo cash ARS disponible.";
+      }
+      const ratioPct = (total > 0 && liquidArs != null) ? (liquidArs / total * 100.0) : null;
+      el("heroLiquidityRatio").textContent = ratioPct == null ? "-" : `${fmtNum.format(ratioPct)}%`;
+      el("heroLiquidityRatio").className = "v";
+      if (el("heroLiquidityNote")) el("heroLiquidityNote").textContent = ratioNote;
     }
 
     const daily = ret.daily || {};
@@ -940,12 +1073,15 @@
       `;
     }
 
-    putReturnCard("retWeekly", "retWeeklySub", ret.weekly);
-    putReturnCard("retMonthly", "retMonthlySub", ret.monthly);
-    putReturnCard("retYtd", "retYtdSub", ret.ytd);
-    putReturnCard("retYearly", "retYearlySub", ret.yearly);
+    renderRangeState("retWeekly", "retWeeklySub", ret.weekly, "7 dias");
+    renderRangeState("retMonthly", "retMonthlySub", ret.monthly, "30 dias");
+    renderRangeState("retYtd", "retYtdSub", ret.ytd, "YTD");
+    renderRangeState("retYearly", "retYearlySub", ret.yearly, "Ano");
     renderMonthVsInflationKpi(monthlyKpi);
     renderHeroMonthInsights(monthlyKpi);
+    renderWindowStatus("heroDailyWindow", daily);
+    renderWindowStatus("heroMonthlyWindow", monthlyKpi);
+    renderHeroHealth(ret, monthlyKpi, snap);
 
     // Keep compact inflation card aligned with the same monthly KPI used in the hero cards.
     renderInflationCompactFromKpi("tblInflationCompare", monthlyKpi);

@@ -3,16 +3,17 @@
 <section class="hero">
   <h1>Portafolio en ARS</h1>
   <div class="hero-meta">
-    <div class="updated-badge" id="updatedBadge" style="display:none;">
+    <div class="updated-badge" id="updatedBadge">
       <span class="dot-live"></span>
       <span id="updatedText">-</span>
     </div>
   </div>
-  <div class="hero-row">
-    <div class="kpi">
-      <div class="kpi-label">Balance Total</div>
+  <div class="hero-grid">
+    <div class="kpi hero-card hero-card-balance">
+      <div class="kpi-label">Balance y Liquidez</div>
       <div class="kpi-value" id="kpiTotal">-</div>
       <div class="kpi-meta" id="kpiDate">-</div>
+      <div class="kpi-meta hero-submeta" id="heroSnapshotWindow">Snapshot -</div>
       <div class="kpi-divider"></div>
       <div class="cash-row">
         <div class="cash-kpi">
@@ -24,35 +25,47 @@
           <div class="v" id="kpiCashUsd">-</div>
         </div>
       </div>
+      <div class="kpi-insights hero-balance-insights">
+        <div class="kpi-insight">
+          <div class="k">Ratio de liquidez</div>
+          <div class="v" id="heroLiquidityRatio">-</div>
+          <div class="kpi-meta hero-submeta" id="heroLiquidityNote">Caja disponible sobre total visible.</div>
+        </div>
+      </div>
     </div>
 
-    <div class="kpi">
-      <div class="kpi-label">Rendimiento Diario</div>
-      <div class="kpi-value-group">
-        <div class="kpi-value" id="kpiDailyDelta">-</div>
-        <div class="kpi-pct" id="kpiDailyPct">-</div>
+    <div class="kpi hero-card hero-card-current">
+      <div class="kpi-label">Rendimiento actual</div>
+      <div class="hero-current-block">
+        <div class="kpi-label hero-mini-label">Diario</div>
+        <div class="kpi-value-group">
+          <div class="kpi-value" id="kpiDailyDelta">-</div>
+          <div class="kpi-pct" id="kpiDailyPct">-</div>
+        </div>
+        <div id="kpiDailyGross"></div>
+        <div class="kpi-meta hero-window" id="heroDailyWindow">Sin snapshots suficientes para ventana.</div>
       </div>
-      <div id="kpiDailyGross"></div>
-    </div>
-
-    <div class="kpi">
-      <div class="kpi-label">Rendimiento Mensual</div>
-      <div class="kpi-value-group">
-        <div class="kpi-value" id="kpiMonthNetArs">-</div>
-        <div class="kpi-pct" id="kpiMonthNetPct">-</div>
-      </div>
-      <div id="kpiMonthGrossFlow"></div>
       <div class="kpi-divider"></div>
-      <div class="kpi-label" style="font-size: 11px; margin-bottom: 2px;">Real vs Inflaci&oacute;n</div>
-      <div class="kpi-value-group" style="margin-top:0;">
-        <div class="kpi-value" id="kpiMonthVsInflValue" style="font-size: 22px;">-</div>
-        <div class="kpi-status-badge" id="kpiMonthVsInflBadge" style="display:none; margin-left: auto;"></div>
+      <div class="hero-current-block">
+        <div class="kpi-label hero-mini-label">Mensual</div>
+        <div class="kpi-value-group">
+          <div class="kpi-value" id="kpiMonthNetArs">-</div>
+          <div class="kpi-pct" id="kpiMonthNetPct">-</div>
+        </div>
+        <div id="kpiMonthGrossFlow"></div>
+        <div class="kpi-meta hero-window" id="heroMonthlyWindow">Sin snapshots suficientes para ventana.</div>
       </div>
-      <div class="kpi-meta" id="kpiMonthVsInflSub" style="margin-top: 0;">Neto - | IPC -</div>
+      <div class="kpi-divider"></div>
+      <div class="kpi-label hero-mini-label">Real vs Inflaci&oacute;n</div>
+      <div class="kpi-value-group hero-real-group">
+        <div class="kpi-value hero-real-value" id="kpiMonthVsInflValue">-</div>
+        <div class="kpi-status-badge hero-real-badge" id="kpiMonthVsInflBadge"></div>
+      </div>
+      <div class="kpi-meta hero-vs-sub" id="kpiMonthVsInflSub">Neto - | IPC -</div>
     </div>
 
-    <div class="kpi">
-      <div class="kpi-label">Hist&oacute;rico y Acumulado</div>
+    <div class="kpi hero-card hero-card-horizons">
+      <div class="kpi-label">Horizontes de retorno</div>
       <div class="kpi-grid">
         <div class="kpi-mini">
           <div class="k">7 D&iacute;as</div>
@@ -74,6 +87,31 @@
           <div class="v" id="retYearly">-</div>
           <div class="mini-sub" id="retYearlySub">-</div>
         </div>
+      </div>
+    </div>
+
+    <div class="kpi hero-card hero-card-health">
+      <div class="kpi-label">Estado y calidad de datos</div>
+      <div class="hero-health-list">
+        <div class="hero-health-item" id="heroQualityStatus">
+          <div class="health-k">Calidad de inferencia</div>
+          <div class="health-v health-muted">-</div>
+        </div>
+        <div class="hero-health-item" id="heroIpcStatus">
+          <div class="health-k">Estado IPC mensual</div>
+          <div class="health-v health-muted">-</div>
+        </div>
+        <div class="hero-health-item" id="heroCoverageStatus">
+          <div class="health-k">Cobertura de ventanas</div>
+          <div class="health-v health-muted">-</div>
+        </div>
+        <div class="hero-health-item" id="heroUpdatedStatus">
+          <div class="health-k">&Uacute;ltima actualizaci&oacute;n</div>
+          <div class="health-v health-muted">-</div>
+        </div>
+      </div>
+      <div class="kpi-empty-state">
+        Estado informativo: no altera los c&aacute;lculos de rendimiento.
       </div>
     </div>
   </div>
