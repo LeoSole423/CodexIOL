@@ -30,6 +30,11 @@ def _parse_date(v: Optional[str]) -> Optional[str]:
 def _snapshot_cash_ars(snap: Optional[dbmod.Snapshot]) -> Optional[float]:
     if not snap:
         return None
+    if snap.cash_total_ars is not None:
+        try:
+            return float(snap.cash_total_ars)
+        except Exception:
+            return None
     if snap.cash_disponible_ars is not None:
         try:
             return float(snap.cash_disponible_ars)
@@ -181,9 +186,73 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
         used_idx.add(i)
         used_idx.add(j)
 
+    # Settlement carryover smoothing:
+    # When adjacent opposite-sign rows look like a liquidation offset
+    # (one side traded, the other side no trades), collapse both rows
+    # to a stabilized net amount on the traded side and zero on the carryover side.
+    settlement_pair_by_idx: Dict[int, int] = {}
+    amount_override_by_idx: Dict[int, float] = {}
+    settlement_used_idx = set()
+    for i in range(len(rows) - 1):
+        j = i + 1
+        if i in used_idx or j in used_idx or i in settlement_used_idx or j in settlement_used_idx:
+            continue
+
+        ri = rows[i]
+        rj = rows[j]
+        if _flow_quality_incomplete(ri) or _flow_quality_incomplete(rj):
+            continue
+
+        ai = float(ri.get("amount_ars") or 0.0)
+        aj = float(rj.get("amount_ars") or 0.0)
+        if abs(ai) <= 1e-9 or abs(aj) <= 1e-9 or (ai * aj) >= 0:
+            continue
+
+        di = _flow_date_or_none(ri.get("flow_date"))
+        dj = _flow_date_or_none(rj.get("flow_date"))
+        if di is None or dj is None:
+            continue
+        delta_days = (dj - di).days
+        if delta_days < 1 or delta_days > 3:
+            continue
+
+        ti = float(ri.get("_traded_gross") or 0.0)
+        tj = float(rj.get("_traded_gross") or 0.0)
+        i_traded = ti > 1e-9
+        j_traded = tj > 1e-9
+        if i_traded == j_traded:
+            continue
+
+        max_abs = max(abs(ai), abs(aj))
+        if max_abs < 100.0:
+            continue
+
+        near_cancel = abs(ai + aj) <= 0.08 * (abs(ai) + abs(aj))
+        traded_side = ti if i_traded else tj
+        double_count_like = abs(abs(ai + aj) - traded_side) <= max(5000.0, 0.20 * traded_side)
+        if not (near_cancel or double_count_like):
+            continue
+
+        anchor = i if i_traded else j
+        carry = j if i_traded else i
+        amount_override_by_idx[anchor] = ai + aj
+        amount_override_by_idx[carry] = 0.0
+        settlement_pair_by_idx[anchor] = carry
+        settlement_pair_by_idx[carry] = anchor
+        settlement_used_idx.add(anchor)
+        settlement_used_idx.add(carry)
+
     for i, row in enumerate(rows):
         kind = str(row.get("kind") or "").lower()
         amount = float(row.get("amount_ars") or 0.0)
+        if i in amount_override_by_idx:
+            amount = float(amount_override_by_idx[i])
+            row["amount_ars"] = amount
+            if abs(amount) <= 1e-9:
+                row["kind"] = "correction"
+            else:
+                row["kind"] = "deposit" if amount > 0 else "withdraw"
+            kind = str(row.get("kind") or "").lower()
         residual_ratio = row.get("residual_ratio")
 
         display_kind = "external_flow_probable"
@@ -200,6 +269,31 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
             confidence = "high"
             reason_code = "QUALITY_INCOMPLETE"
             reason_detail = "Datos incompletos de caja/\u00f3rdenes; revisar manualmente."
+        elif i in settlement_pair_by_idx:
+            j = settlement_pair_by_idx[i]
+            paired = rows[j]
+            paired_flow_date = paired.get("flow_date")
+            paired_amount_ars = float(amount_override_by_idx.get(j, float(paired.get("amount_ars") or 0.0)))
+            if abs(amount) <= 1e-9:
+                display_kind = "correction"
+                display_label = "Correcci\u00f3n"
+                confidence = "medium"
+                reason_code = "SETTLEMENT_CARRYOVER"
+                reason_detail = (
+                    f"Compensado por liquidaci\u00f3n cercana con {paired_flow_date}; no se aplica como flujo externo."
+                    if paired_flow_date
+                    else "Compensado por liquidaci\u00f3n cercana; no se aplica como flujo externo."
+                )
+            else:
+                display_kind = "external_flow_probable"
+                display_label = "Flujo externo probable (+)" if amount >= 0 else "Flujo externo probable (-)"
+                confidence = "medium"
+                reason_code = "SETTLEMENT_SMOOTHED"
+                reason_detail = (
+                    f"Flujo suavizado por compensaci\u00f3n de liquidaci\u00f3n cercana con {paired_flow_date}."
+                    if paired_flow_date
+                    else "Flujo suavizado por compensaci\u00f3n de liquidaci\u00f3n cercana."
+                )
         elif i in pair_by_idx:
             j = pair_by_idx[i]
             paired = rows[j]
@@ -346,6 +440,9 @@ def snapshots(
                     "flow_total_ars": flow_total,
                     "applied_flow_ars": applied_flow,
                     "display_kind": display_kind,
+                    "display_label": iv.get("display_label"),
+                    "reason_code": iv.get("reason_code"),
+                    "reason_detail": iv.get("reason_detail"),
                     "quality_warnings": list(iv.get("quality_warnings") or []),
                 }
             )

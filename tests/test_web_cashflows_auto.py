@@ -18,6 +18,7 @@ def _mk_db():
         CREATE TABLE portfolio_snapshots (
           snapshot_date TEXT PRIMARY KEY,
           total_value REAL,
+          cash_total_ars REAL,
           cash_disponible_ars REAL
         )
         """
@@ -261,6 +262,82 @@ class TestWebCashflowsAuto(unittest.TestCase):
         self.assertEqual(r.get("display_kind"), "external_flow_probable")
         self.assertEqual(r.get("reason_code"), "EXTERNAL_FLOW_SIGN")
         self.assertEqual(r.get("display_label"), "Flujo externo probable (+)")
+
+    def test_prefers_cash_total_and_avoids_next_day_settlement_withdraw(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars) VALUES(?,?,?,?)",
+            [
+                ("2026-02-22", 1000.0, 100.0, 100.0),
+                ("2026-02-23", 1500.0, 102.0, 600.0),
+                ("2026-02-24", 1510.0, 102.0, 100.0),
+            ],
+        )
+        _insert_order(self.conn, 30, "Compra", "buy", 498.0, "2026-02-23T11:00:00")
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("flow_date"), "2026-02-23")
+        self.assertEqual(r.get("kind"), "deposit")
+        self.assertAlmostEqual(float(r.get("amount_ars") or 0.0), 500.0)
+        self.assertAlmostEqual(float(r.get("cash_delta_ars") or 0.0), 2.0)
+        self.assertAlmostEqual(float(r.get("buy_amount_ars") or 0.0), 498.0)
+        self.assertEqual(r.get("display_kind"), "external_flow_probable")
+
+    def test_cashflows_auto_smooths_settlement_carryover_pair(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars) VALUES(?,?,?,?)",
+            [
+                ("2026-02-22", 1000.0, 100.0, 100.0),
+                ("2026-02-23", 1490.0, 600.0, 600.0),
+                ("2026-02-24", 1500.0, 100.0, 100.0),
+            ],
+        )
+        _insert_order(self.conn, 31, "Compra", "buy", 498.0, "2026-02-23T11:00:00")
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 2)
+        by_date = {r.get("flow_date"): r for r in rows}
+        r23 = by_date["2026-02-23"]
+        r24 = by_date["2026-02-24"]
+
+        self.assertAlmostEqual(float(r23.get("amount_ars") or 0.0), 498.0, places=6)
+        self.assertEqual(r23.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r23.get("reason_code"), "SETTLEMENT_SMOOTHED")
+
+        self.assertAlmostEqual(float(r24.get("amount_ars") or 0.0), 0.0, places=6)
+        self.assertEqual(r24.get("kind"), "correction")
+        self.assertEqual(r24.get("display_kind"), "correction")
+        self.assertEqual(r24.get("reason_code"), "SETTLEMENT_CARRYOVER")
+
+    def test_cashflows_auto_smooths_near_cancel_settlement_pair(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars) VALUES(?,?,?,?)",
+            [
+                ("2026-02-09", 2000.0, 1000.0, 1000.0),
+                ("2026-02-10", 1990.0, 882.0, 882.0),
+                ("2026-02-11", 1980.0, 491.0, 491.0),
+            ],
+        )
+        _insert_order(self.conn, 32, "Compra", "buy", 506.0, "2026-02-10T10:00:00")
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 2)
+        by_date = {r.get("flow_date"): r for r in rows}
+        r10 = by_date["2026-02-10"]
+        r11 = by_date["2026-02-11"]
+
+        # +388 then -391 is collapsed to net -3 on traded day and 0 on carryover day.
+        self.assertAlmostEqual(float(r10.get("amount_ars") or 0.0), -3.0, places=6)
+        self.assertEqual(r10.get("reason_code"), "SETTLEMENT_SMOOTHED")
+        self.assertAlmostEqual(float(r11.get("amount_ars") or 0.0), 0.0, places=6)
+        self.assertEqual(r11.get("reason_code"), "SETTLEMENT_CARRYOVER")
 
     def test_zero_net_not_listed(self):
         self.conn.executemany(
