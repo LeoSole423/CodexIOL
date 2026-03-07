@@ -4,6 +4,7 @@ Este indice resume que documento usar para cada necesidad.
 
 ## Operacion para agentes
 - Playbook principal: `AGENT.md`
+- Bootstrap corto para nuevos agentes: `AGENTS.md`
 - Wrapper de prompt: `AsesorFinanciero.md`
 
 ## Oportunidades semanales

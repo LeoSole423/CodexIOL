@@ -12,20 +12,26 @@ Salida esperada: decision final de cartera + recomendaciones (o no-operar) con r
    - `iol advisor context`
 2. Refrescar universo/precios:
    - `iol advisor opportunities snapshot-universe --universe bcba_cedears`
-3. Ejecutar pasada preliminar cuantitativa (`prelim`).
-4. Integrar evidencia web bidireccional (`TopN <-> Web`) en modo estricto:
+3. Ejecutar pasada preliminar cuantitativa (`prelim`) y definir decision/confianza inicial.
+4. Evaluar si escala a web (enfoque por capas, no web-first):
+   - escalar solo si hay gatillo:
+     - decision material en candidatos `new` con evidencia insuficiente,
+     - conflicto fuerte de senales,
+     - catalizador clave no cubierto en contexto local.
+5. Si aplica gatillo, integrar evidencia web bidireccional (`TopN <-> Web`) en modo estricto:
    - `source_policy=strict_official_reuters`
    - simbolos = holdings + TopK preliminar
-5. Recalcular ranking final (`rerank`) con score hibrido y compuertas.
-6. Ejecutar ranking integrado:
-   - `iol advisor opportunities run --mode both --budget-ars <monto> --top 10 --web-link --web-source-policy strict_official_reuters`
+6. Recalcular ranking final (`rerank`) con score hibrido y compuertas.
+7. Ejecutar ranking integrado:
+   - base local-first: `iol advisor opportunities run --mode both --budget-ars <monto> --top 10`
+   - con escalado web: agregar `--web-link --web-source-policy strict_official_reuters`
    - Defaults operativos para futuras busquedas:
      - `--exclude-crypto-new`
      - `--min-volume-amount 50000`
      - `--min-operations 5`
      - `--liquidity-priority`
      - `--diversify-sectors --max-per-sector 2`
-7. Generar reporte:
+8. Generar reporte:
    - `iol advisor opportunities report --run-id <id> --out reports/latest/Oportunidades.md`
 
 ## Salida obligatoria post-run
@@ -54,6 +60,7 @@ Aplicar `prompts/contracts/output_schema.md` tipo `oportunidades` y siempre incl
 - Si `trusted_refs < umbral`, activar `EVIDENCE_INSUFFICIENT`.
 - Si `consensus_state=conflict`, marcar `decision_gate=manual_review` (no bloquear automaticamente).
 - Si falla fetch web, continuar con ranking cuantitativo y advertir en `pipeline_warnings_json`.
+- Si no se activa gatillo web, continuar en modo local y declarar explicitamente "sin escalado web por capas".
 
 ## Scoring hibrido
 - `risk` 35%

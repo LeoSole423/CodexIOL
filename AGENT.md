@@ -28,7 +28,27 @@ Ejecutar antes de analizar o recomendar:
 | 1 | `docker exec -i iol-cli iol auth test` | autentica sin error | detener y corregir credenciales/contenedor |
 | 2 | `docker exec -i iol-cli iol advisor context --out data/context/latest.json` | genera contexto y `as_of` valido | detener y remediar warning bloqueante |
 | 3 | revisar `warnings` en contexto | sin bloqueantes o con remediacion aplicada | aplicar matriz warning->accion |
-| 4 | si hay dudas de frescura, `docker exec -i iol-cli iol portfolio --country argentina` | timestamps consistentes | reportar discrepancia y no inferir |
+| 4 | `docker exec -i iol-cli iol portfolio --country argentina` | snapshot local y foto operativa consistentes | reportar discrepancia y no inferir |
+
+## 3.1) Context hydration del usuario (obligatorio)
+Antes de recomendar, revisar siempre estas 4 fuentes:
+
+1. Portafolio actual:
+   - `docker exec -i iol-cli iol advisor context --out data/context/latest.json`
+   - `docker exec -i iol-cli iol portfolio --country argentina`
+2. Plan vigente (si existe):
+   - `reports/latest/PlanDCA.md`
+   - `reports/latest/RevisionEstrategica.md`
+   - `reports/latest/ResumenRebalanceo.md`
+3. Alertas/eventos activos en SQLite:
+   - `docker exec -i iol-cli iol advisor alert list --status open --limit 50`
+   - `docker exec -i iol-cli iol advisor event list --limit 50`
+4. Memoria resumida:
+   - `reports/latest/Seguimiento.md` (vista)
+   - Fuente de verdad: SQLite (`advisor_logs`, `advisor_alerts`, `advisor_events`)
+
+Regla:
+- Si alguna de estas fuentes no fue revisada, la respuesta debe declararse como parcial y sin recomendaciones definitivas.
 
 ## 4) Go/No-Go gates
 Reglas explicitas para continuar o frenar:
@@ -45,6 +65,17 @@ Reglas explicitas para continuar o frenar:
 - NO-GO: `DB_NOT_FOUND`, `NO_SNAPSHOTS`, `SNAPSHOT_OLD` sin remediar.
 - GO: luego de `snapshot catchup` y nuevo `advisor context`.
 
+### Gate D - Contexto de usuario incompleto
+- NO-GO: si no se revisaron portafolio operativo, plan vigente y alertas/eventos.
+- GO: solo cuando se complete `Context hydration del usuario`.
+
+### Gate E - Escalado web por capas
+- NO-GO para web-first: no abrir busqueda web antes de completar analisis local.
+- GO para capa web: solo si se cumple al menos un gatillo:
+  - decision material de `new` con evidencia local insuficiente,
+  - conflicto fuerte en senales locales/previas,
+  - necesidad de validar catalizador no cubierto en SQLite/contexto.
+
 ## 5) Matriz warning -> accion
 | Warning | Impacto | Accion concreta | Bloqueo |
 |---|---|---|---|
@@ -59,17 +90,35 @@ Reglas explicitas para continuar o frenar:
 ### `context`
 - DoD:
   - contexto JSON generado
+  - portafolio operativo revisado (`iol portfolio`)
+  - plan vigente revisado (si existe en `reports/latest/*`)
+  - alertas/eventos revisados (`advisor alert list`, `advisor event list`)
   - `as_of` informado
   - warnings evaluados con accion
   - supuestos metodologicos explicitados
 
 ### `oportunidades`
 - DoD:
+  - analisis por capas aplicado (`local-first`, `web solo por gatillo`)
   - decision final obligatoria (`comprar|recomprar|no operar`)
   - recomendaciones accionables o "sin operaciones recomendadas"
   - motivos por activo o motivo de no-operar
   - parametros del run + resumen de evidencia
   - siguiente paso seguro (simulacion/validacion manual)
+
+## 6.1) Politica por capas para uso web (sin time budget)
+Orden obligatorio:
+1. Capa local (siempre):
+   - `advisor context` + `portfolio` + plan vigente + alertas/eventos.
+2. Decision preliminar local:
+   - estimar decision y confianza inicial sin web.
+3. Escalado web solo por gatillo:
+   - si aplica Gate E, ejecutar evidencia web en modo estricto.
+4. Recalculo y cierre:
+   - integrar evidencia nueva y ajustar decision/confianza.
+
+Regla:
+- Si no hay gatillo de escalado web, cerrar con capa local y declarar que no fue necesaria revision web adicional.
 
 ### `seguimiento`
 - DoD:
@@ -146,3 +195,8 @@ Actualizar este archivo en el mismo cambio cuando se modifique:
 - reglas de seguridad/gates
 - contratos de salida del asesor
 - criterio de precedencia documental
+
+## 12) Higiene documental
+- Evitar crear nuevos `.md` salvo necesidad real de dominio.
+- Priorizar actualizar `AGENT.md`, `AGENTS.md`, runbooks y prompts existentes.
+- Si se crea un nuevo documento operativo, agregarlo a `docs/INDEX.md` y justificar su existencia.

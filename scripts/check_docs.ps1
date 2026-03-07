@@ -19,6 +19,9 @@ function Get-TrackedMarkdownFiles {
   if ((Test-Path "AGENT.md") -and (-not ($files -contains "AGENT.md"))) {
     $files += "AGENT.md"
   }
+  if ((Test-Path "AGENTS.md") -and (-not ($files -contains "AGENTS.md"))) {
+    $files += "AGENTS.md"
+  }
   return $files
 }
 
@@ -71,6 +74,7 @@ function Test-AgentRequiredSections {
   $text = [System.IO.File]::ReadAllText($AgentPath, [System.Text.UTF8Encoding]::new($false, $true))
   $required = @(
     "## 3) Pre-flight 90s (obligatorio)",
+    "## 3.1) Context hydration del usuario (obligatorio)",
     "## 4) Go/No-Go gates",
     "## 5) Matriz warning -> accion",
     "## 6) Definition of Done por flujo",
@@ -81,6 +85,31 @@ function Test-AgentRequiredSections {
   foreach ($section in $required) {
     if ($text -notmatch [System.Text.RegularExpressions.Regex]::Escape($section)) {
       $Errors.Add("AGENT.md: missing section '$section'")
+    }
+  }
+}
+
+function Test-AgentsBootstrap {
+  param(
+    [string]$AgentsPath,
+    [System.Collections.Generic.List[string]]$Errors
+  )
+  if (-not (Test-Path $AgentsPath)) {
+    $Errors.Add("AGENTS.md: file not found")
+    return
+  }
+  $text = [System.IO.File]::ReadAllText($AgentsPath, [System.Text.UTF8Encoding]::new($false, $true))
+  if ($text -notmatch [System.Text.RegularExpressions.Regex]::Escape("AGENT.md")) {
+    $Errors.Add("AGENTS.md: must reference AGENT.md")
+  }
+  $required = @(
+    "## 1) Bootstrap obligatorio",
+    "## 2) Reglas operativas no negociables",
+    "## 3) Precedencia de fuentes"
+  )
+  foreach ($section in $required) {
+    if ($text -notmatch [System.Text.RegularExpressions.Regex]::Escape($section)) {
+      $Errors.Add("AGENTS.md: missing section '$section'")
     }
   }
 }
@@ -125,6 +154,7 @@ try {
   }
 
   Test-AgentRequiredSections -AgentPath (Join-Path $repoRoot "AGENT.md") -Errors $errors
+  Test-AgentsBootstrap -AgentsPath (Join-Path $repoRoot "AGENTS.md") -Errors $errors
 
   if ($errors.Count -gt 0) {
     Write-Host "Doc checks failed ($($errors.Count) issues):" -ForegroundColor Red

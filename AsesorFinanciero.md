@@ -6,6 +6,7 @@ Este archivo se mantiene por compatibilidad como punto de entrada estable del as
 - Para reconstruir rapido como funciona el proyecto, leer primero `AGENT.md`.
 - Para ejecutar flujos, son obligatorias las secciones operativas de `AGENT.md`:
   - `Pre-flight 90s`
+  - `Context hydration del usuario`
   - `Go/No-Go gates`
   - `Definition of Done por flujo`
   - `Post-run verification`
@@ -38,6 +39,11 @@ Leer y aplicar en este orden:
 
 ## 3) Convenciones operativas minimas
 - Fuente primaria de analisis: `iol advisor context`.
+- Antes de recomendar, revisar tambien:
+  - `iol portfolio --country argentina`
+  - plan vigente en `reports/latest/*` (si existe)
+  - `iol advisor alert list --status open --limit 50`
+  - `iol advisor event list --limit 50`
 - Si hay `DB_NOT_FOUND`, `NO_SNAPSHOTS` o `SNAPSHOT_OLD`: correr `iol snapshot catchup` y reintentar.
 - Ordenes reales solo con `--confirm CONFIRMAR`.
 - Registro conversacional: `iol advisor log --prompt "<consulta>" --response "<respuesta>"`.
