@@ -16,5 +16,8 @@ Este flujo no ejecuta ordenes reales. Solo genera evidencia, ranking y reporte.
 11. `docker exec -i iol-cli iol order simulate --side buy --market bcba --symbol <SIMBOLO> --quantity <QTY> --price <PRECIO>`
 
 ## Nota operativa
+- Este runbook debe iniciar y cerrar siguiendo `AGENT.md`:
+  - inicio: `Pre-flight 90s`
+  - cierre: `Post-run verification`
 - Si decides ejecutar ordenes reales, seguir `prompts/60_safe_execution.md` y usar `--confirm CONFIRMAR`.
 - Para desactivar el auto-fetch dentro del run: agregar `--no-fetch-evidence`.

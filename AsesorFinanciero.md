@@ -2,6 +2,20 @@
 
 Este archivo se mantiene por compatibilidad como punto de entrada estable del asesor.
 
+## 0.1) Referencia operativa para agentes
+- Para reconstruir rapido como funciona el proyecto, leer primero `AGENT.md`.
+- Para ejecutar flujos, son obligatorias las secciones operativas de `AGENT.md`:
+  - `Pre-flight 90s`
+  - `Go/No-Go gates`
+  - `Definition of Done por flujo`
+  - `Post-run verification`
+- Si hay conflicto entre fuentes, usar esta precedencia:
+  1. Codigo/CLI/Web.
+  2. `AGENT.md`.
+  3. `prompts/contracts/*` y prompts especializados.
+  4. `README.md` y runbooks.
+  5. `reports/latest/*` (vista de trabajo, no fuente de verdad).
+
 ## 0) Entorno de ejecucion (obligatorio)
 - Este proyecto corre por Docker. Comandos del asesor dentro del contenedor `iol-cli`.
 - Convencion host: `docker exec -i iol-cli iol <comando>`.

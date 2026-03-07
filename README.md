@@ -199,6 +199,7 @@ Privacidad:
   - `reports/latest/ResumenRebalanceo.md`
   - `reports/latest/PlanDCA.md`
   - `reports/latest/Seguimiento.md`
+- Nota: `reports/latest/*` son vistas de trabajo; la fuente de verdad operativa es SQLite.
 
 Evidencia (JSON crudo, opcional):
 - Por fecha: `data/evidence/<YYYY-MM-DD>/...`
@@ -227,6 +228,28 @@ Flujo recomendado:
 3. Enrutar por intencion via `prompts/00_orquestador.md`.
 4. Emitir salida con contrato y registrar en BD cuando corresponda.
 
+## AGENT.md (para agentes)
+Si trabajas con Codex u otro agente, usa `AGENT.md` como guia operativa principal.
+
+Orden de precedencia recomendado cuando hay conflicto:
+1. Codigo y comportamiento real de CLI/Web.
+2. `AGENT.md`.
+3. Contratos/prompts en `prompts/`.
+4. `README.md` y runbooks.
+5. Reportes en `reports/latest/`.
+
+## Calidad de Markdown
+Validacion recomendada antes de commitear cambios de documentacion:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check_docs.ps1
+```
+
+Reglas de lint declaradas en:
+
+- `.markdownlint.json`
+- `docs/INDEX.md` (mapa documental rapido)
+
 ## Motor de oportunidades
 Pipeline semanal semiautomatico para detectar compras nuevas y recompras (BCBA + CEDEARs):
 
@@ -247,7 +270,7 @@ Notas:
 - No ejecuta ordenes reales.
 - Para operar, usar simulacion/confirmacion del protocolo seguro.
 - Desactivar auto-fetch en run: `--no-fetch-evidence`.
-- Runbook rápido (11 pasos): `docs/Runbook_Oportunidades_Semanal.md`
+- Runbook rapido (11 pasos): `docs/Runbook_Oportunidades_Semanal.md`
 
 ## Notas
 - `IOL_API_URL` define la URL de la API (no se usa sandbox).
@@ -257,7 +280,7 @@ Notas:
   - Si no, algunos endpoints como `www.sec.gov/files/company_tickers.json` pueden devolver `403`.
 - El snapshot diario guarda `cash_disponible_ars`/`cash_disponible_usd` y usa `totalEnPesos` de `/api/v2/estadocuenta` para el total.
 - La web muestra retorno real ajustado por flujo externo estimado (caja + operaciones) y permite correcciones manuales con `iol cashflow ...` o `POST /api/cashflows/manual`.
-- `iol snapshot run` evita pisar un snapshot existente si el nuevo estÃ¡ mÃ¡s lejos del horario de cierre (por ejemplo, si lo corrÃ©s durante horario de mercado). UsÃ¡ `iol snapshot run --force` para sobrescribir igualmente.
+- `iol snapshot run` evita pisar un snapshot existente si el nuevo esta mas lejos del horario de cierre (por ejemplo, si lo corres durante horario de mercado). Usa `iol snapshot run --force` para sobrescribir igualmente.
 - Las ordenes individuales requieren confirmacion (prompt interactivo o `--confirm CONFIRMAR`).
 - `iol batch run` solo ejecuta si pasas `--confirm CONFIRMAR` (sin eso se comporta como dry-run).
 - Para automatizacion, podes ejecutar sin prompt interactivo usando `--confirm CONFIRMAR` (igual sigue siendo una orden real).
@@ -273,3 +296,4 @@ Notas:
 - Paso 2 (simulacion): `iol order simulate --side buy|sell ...`
 - Paso 3 (ejecucion real): `iol order buy|sell ... --confirm CONFIRMAR` o `iol order confirm <confirmation_id> --confirm CONFIRMAR`
 - Para muchas ordenes: usar `iol batch validate` y luego `iol batch run --confirm CONFIRMAR` con un JSON plan temporal (ver `iol batch template`).
+
