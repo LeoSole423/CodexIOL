@@ -100,6 +100,23 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS account_cash_movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            movement_id TEXT,
+            occurred_at TEXT,
+            movement_date TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            amount REAL NOT NULL,
+            kind TEXT NOT NULL,
+            description TEXT,
+            source TEXT,
+            raw_json TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS orders (
             order_number INTEGER PRIMARY KEY,
             status TEXT,
@@ -322,6 +339,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_candidates_run_score ON advisor_opportunity_candidates(run_id, score_total DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_account_balances_date ON account_balances(snapshot_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_manual_cashflow_flow_date ON manual_cashflow_adjustments(flow_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cash_movements_date ON account_cash_movements(movement_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cash_movements_kind ON account_cash_movements(kind)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cash_movements_currency ON account_cash_movements(currency)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cash_movements_movement_id ON account_cash_movements(movement_id) WHERE movement_id IS NOT NULL")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_batch_ops_run ON batch_ops(run_id)")
     conn.commit()
 

@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -37,6 +38,20 @@ class TestCliCashflow(unittest.TestCase):
         try:
             return conn.execute(
                 "SELECT id, flow_date, kind, amount_ars, note FROM manual_cashflow_adjustments ORDER BY id ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def _movement_rows(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            return conn.execute(
+                """
+                SELECT movement_id, movement_date, currency, amount, kind, description
+                FROM account_cash_movements
+                ORDER BY movement_date ASC, movement_id ASC
+                """
             ).fetchall()
         finally:
             conn.close()
@@ -96,6 +111,48 @@ class TestCliCashflow(unittest.TestCase):
         )
         self.assertNotEqual(res.exit_code, 0)
         self.assertIn("--amount", res.output)
+
+    def test_import_movements_normalized_idempotent(self):
+        p = os.path.join(self.tmp.name, "movements.json")
+        payload = [
+            {
+                "movement_date": "2026-02-18",
+                "currency": "ARS",
+                "amount": 500.0,
+                "kind": "external_deposit",
+                "description": "Aporte",
+            },
+            {
+                "occurred_at": "2026-02-19T10:00:00",
+                "currency": "ARS",
+                "amount": 15.0,
+                "kind": "operational_fee_or_tax",
+                "description": "Comision",
+            },
+        ]
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+
+        res1 = self.runner.invoke(
+            app,
+            ["cashflow", "import-movements", "--file", p, "--format", "normalized"],
+            env=self.env,
+        )
+        self.assertEqual(res1.exit_code, 0, msg=res1.output)
+
+        res2 = self.runner.invoke(
+            app,
+            ["cashflow", "import-movements", "--file", p, "--format", "normalized"],
+            env=self.env,
+        )
+        self.assertEqual(res2.exit_code, 0, msg=res2.output)
+
+        rows = self._movement_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["kind"], "external_deposit")
+        self.assertAlmostEqual(float(rows[0]["amount"]), 500.0)
+        self.assertEqual(rows[1]["kind"], "operational_fee_or_tax")
+        self.assertAlmostEqual(float(rows[1]["amount"]), -15.0)
 
 
 if __name__ == "__main__":

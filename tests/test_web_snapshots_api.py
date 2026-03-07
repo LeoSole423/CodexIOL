@@ -157,12 +157,12 @@ class TestWebSnapshotsApi(unittest.TestCase):
 
         self.assertAlmostEqual(float(r23["flow_total_ars"]), 498.0, places=6)
         self.assertAlmostEqual(float(r23["applied_flow_ars"]), 498.0, places=6)
-        self.assertEqual(r23.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r23.get("display_kind"), "external_deposit_probable")
         self.assertEqual(r23.get("reason_code"), "SETTLEMENT_SMOOTHED")
 
         self.assertAlmostEqual(float(r24["flow_total_ars"]), 0.0, places=6)
         self.assertAlmostEqual(float(r24["applied_flow_ars"]), 0.0, places=6)
-        self.assertEqual(r24.get("display_kind"), "correction")
+        self.assertEqual(r24.get("display_kind"), "settlement_carryover")
         self.assertEqual(r24.get("reason_code"), "SETTLEMENT_CARRYOVER")
 
         self.assertAlmostEqual(float(r23["total_value"]), 992.0, places=6)

@@ -143,6 +143,20 @@ def _norm_side(side: Any) -> Optional[str]:
         return "sell"
     if v in ("pago de dividendos", "pago de renta"):
         return "ignore"
+    if v in (
+        "comision",
+        "comision de mercado",
+        "comision de bolsa",
+        "gastos",
+        "gastos operativos",
+        "fee",
+        "tax",
+        "impuesto",
+        "iva",
+        "derechos de mercado",
+        "derecho de mercado",
+    ):
+        return "fee"
     return None
 
 

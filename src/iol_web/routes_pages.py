@@ -20,3 +20,7 @@ def assets(request: Request):
 def history(request: Request):
     return templates.TemplateResponse("history.html", {"request": request})
 
+
+@router.get("/quality", response_class=HTMLResponse)
+def quality(request: Request):
+    return templates.TemplateResponse("quality.html", {"request": request})

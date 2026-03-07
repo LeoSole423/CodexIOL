@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <h1>Calidad</h1>
+    <p class="sub">Estado operativo de inferencias, cobertura y se&ntilde;ales de consistencia de datos.</p>
+  </section>
+
+  <section class="card quality-card">
+    <div class="card-head">
+      <h2>Estado actual</h2>
+      <div class="section-controls">
+        <div class="segmented" id="qualitySeverityButtons">
+          <button data-level="all" class="seg on">Todos</button>
+          <button data-level="warn" class="seg">Revisar</button>
+          <button data-level="ok" class="seg">OK</button>
+          <button data-level="info" class="seg">Informativo</button>
+        </div>
+      </div>
+    </div>
+    <div class="quality-status-layout">
+      <div class="quality-status-list" id="qualityStatusList"></div>
+      <div class="quality-status-detail" id="qualityStatusDetail">
+        <div class="hint">Seleccion&aacute; una fila para ver detalle.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card quality-card">
+    <div class="card-head">
+      <h2>Ajustes manuales de flujo</h2>
+    </div>
+    <div class="cashflow-explain" id="cashflowExplain">
+      Us&aacute; este bloque para corregir aportes/retiros externos que el sistema no pudo inferir con calidad suficiente.
+      Los ajustes manuales impactan el retorno real y quedan auditados por fecha.
+    </div>
+    <form class="cashflow-form" id="cashflowForm">
+      <input class="input" id="cashflowDate" type="date" required />
+      <select id="cashflowKind" class="select">
+        <option value="deposit">Dep&oacute;sito</option>
+        <option value="withdraw">Retiro</option>
+        <option value="correction">Correcci&oacute;n</option>
+      </select>
+      <input class="input" id="cashflowAmount" type="number" step="0.01" placeholder="Monto ARS" required />
+      <input class="input" id="cashflowNote" type="text" placeholder="Nota (opcional)" />
+      <button class="seg on" id="cashflowSubmit" type="submit">Agregar</button>
+    </form>
+    <div class="hint" id="cashflowHint" style="display:none;"></div>
+    <div class="table" id="tblCashflowsManual"></div>
+
+    <div class="cashflow-auto-section">
+      <div class="card-head">
+        <h2>Detecci&oacute;n autom&aacute;tica (solo lectura)</h2>
+      </div>
+      <div class="hint">
+        Flujo inferido v2 por snapshot (&delta;caja, &delta;ARS/USD, FX impl&iacute;cito, &oacute;rdenes y movimientos importados), &uacute;ltimos 30 d&iacute;as.
+      </div>
+      <div class="hint">
+        Estas etiquetas son inferidas; no equivalen a transferencia bancaria confirmada.
+      </div>
+      <div class="table" id="tblCashflowsAuto">
+        <div class="hint">Cargando flujos autom&aacute;ticos...</div>
+      </div>
+    </div>
+  </section>
+{% endblock %}

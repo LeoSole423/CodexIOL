@@ -73,47 +73,23 @@
           <div class="mini-sub" id="retWeeklySub">-</div>
         </div>
         <div class="kpi-mini">
-          <div class="k">30 D&iacute;as</div>
+          <div class="k">Mes</div>
           <div class="v" id="retMonthly">-</div>
           <div class="mini-sub" id="retMonthlySub">-</div>
-        </div>
-        <div class="kpi-mini">
-          <div class="k">YTD</div>
-          <div class="v" id="retYtd">-</div>
-          <div class="mini-sub" id="retYtdSub">-</div>
         </div>
         <div class="kpi-mini">
           <div class="k">A&ntilde;o</div>
           <div class="v" id="retYearly">-</div>
           <div class="mini-sub" id="retYearlySub">-</div>
         </div>
+        <div class="kpi-mini">
+          <div class="k">Desde inicio</div>
+          <div class="v" id="retInception">-</div>
+          <div class="mini-sub" id="retInceptionSub">-</div>
+        </div>
       </div>
     </div>
 
-    <div class="kpi hero-card hero-card-health">
-      <div class="kpi-label">Estado y calidad de datos</div>
-      <div class="hero-health-list">
-        <div class="hero-health-item" id="heroQualityStatus">
-          <div class="health-k">Calidad de inferencia</div>
-          <div class="health-v health-muted">-</div>
-        </div>
-        <div class="hero-health-item" id="heroIpcStatus">
-          <div class="health-k">Estado IPC mensual</div>
-          <div class="health-v health-muted">-</div>
-        </div>
-        <div class="hero-health-item" id="heroCoverageStatus">
-          <div class="health-k">Cobertura de ventanas</div>
-          <div class="health-v health-muted">-</div>
-        </div>
-        <div class="hero-health-item" id="heroUpdatedStatus">
-          <div class="health-k">&Uacute;ltima actualizaci&oacute;n</div>
-          <div class="health-v health-muted">-</div>
-        </div>
-      </div>
-      <div class="kpi-empty-state">
-        Estado informativo: no altera los c&aacute;lculos de rendimiento.
-      </div>
-    </div>
   </div>
 </section>
 
@@ -193,53 +169,13 @@
   <div class="table" id="tblAssetPerformance"></div>
 </section>
 
-<section class="grid utilities-row">
-  <div class="card">
-    <div class="card-head">
-      <h2>Ajustes manuales de flujo</h2>
-    </div>
-    <div class="cashflow-explain" id="cashflowExplain">
-      Us&aacute; este bloque para corregir aportes/retiros externos que el sistema no pudo inferir con calidad suficiente.
-      Los ajustes manuales impactan el retorno real y quedan auditados por fecha.
-    </div>
-    <form class="cashflow-form" id="cashflowForm">
-      <input class="input" id="cashflowDate" type="date" required />
-      <select id="cashflowKind" class="select">
-        <option value="deposit">Dep&oacute;sito</option>
-        <option value="withdraw">Retiro</option>
-        <option value="correction">Correcci&oacute;n</option>
-      </select>
-      <input class="input" id="cashflowAmount" type="number" step="0.01" placeholder="Monto ARS" required />
-      <input class="input" id="cashflowNote" type="text" placeholder="Nota (opcional)" />
-      <button class="seg on" id="cashflowSubmit" type="submit">Agregar</button>
-    </form>
-    <div class="hint" id="cashflowHint" style="display:none;"></div>
-    <div class="table" id="tblCashflowsManual"></div>
-
-    <div class="cashflow-auto-section">
-      <div class="card-head">
-        <h2>Detecci&oacute;n autom&aacute;tica (solo lectura)</h2>
-      </div>
-      <div class="hint">
-        Flujo inferido por snapshot (caja + compras - ventas - ingresos), &uacute;ltimos 30 d&iacute;as.
-      </div>
-      <div class="hint">
-        Estas etiquetas son inferidas; no equivalen a transferencia bancaria confirmada.
-      </div>
-      <div class="table" id="tblCashflowsAuto">
-        <div class="hint">Cargando flujos autom&aacute;ticos...</div>
-      </div>
-    </div>
+<section class="card inflation-compact">
+  <div class="card-head">
+    <h2>&Uacute;ltimo mes vs inflaci&oacute;n</h2>
   </div>
-
-  <div class="card inflation-compact">
-    <div class="card-head">
-      <h2>&Uacute;ltimo mes vs inflaci&oacute;n</h2>
-    </div>
-    <div class="table" id="tblInflationCompare">
-      <div class="hint">Cargando inflaci&oacute;n...</div>
-    </div>
-    <div class="hint" id="inflationHint" style="display:none;"></div>
+  <div class="table" id="tblInflationCompare">
+    <div class="hint">Cargando inflaci&oacute;n...</div>
   </div>
+  <div class="hint" id="inflationHint" style="display:none;"></div>
 </section>
 {% endblock %}

@@ -71,12 +71,47 @@ class TestOrdersFlowSummary(unittest.TestCase):
             self.assertAlmostEqual(amounts["buy_amount"], 100.0)
             self.assertAlmostEqual(amounts["sell_amount"], 60.0)
             self.assertAlmostEqual(amounts["income_amount"], 7.0)
+            self.assertAlmostEqual(amounts["fee_amount"], 0.0)
             self.assertEqual(stats["total"], 6)
             self.assertEqual(stats["classified"], 2)
             self.assertEqual(stats["income_classified"], 2)
+            self.assertEqual(stats["fee_classified"], 0)
             self.assertEqual(stats["unclassified"], 1)
             self.assertEqual(stats["amount_missing"], 1)
+            self.assertEqual(stats["income_missing_deduped"], 0)
             self.assertEqual(stats["ignored"], 0)
+        finally:
+            _cleanup(conn, path)
+
+    def test_dedupes_missing_income_duplicate_and_counts_fee(self):
+        conn, path = _mk_db()
+        try:
+            rows = [
+                (1, "terminada", "SPY US$", "Pago de Dividendos", None, None, None, 0.34, None, "2026-02-03T17:35:24.820", None, None),
+                (2, "terminada", "SPY", "Pago de Dividendos", None, None, None, None, None, "2026-02-03T17:35:24.827", None, None),
+                (3, "terminada", "AAA", "Comision", None, None, None, 10.0, None, "2026-02-03T18:00:00", None, None),
+            ]
+            conn.executemany(
+                """
+                INSERT INTO orders(order_number,status,symbol,side,side_norm,quantity,price,operated_amount,currency,created_at,updated_at,operated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                rows,
+            )
+            conn.commit()
+
+            amounts, stats = orders_flow_summary(
+                conn,
+                dt_from="2026-02-03T00:00:00",
+                dt_to="2026-02-03T23:59:59",
+                currency="peso_Argentino",
+            )
+
+            self.assertAlmostEqual(amounts["income_amount"], 0.34)
+            self.assertAlmostEqual(amounts["fee_amount"], 10.0)
+            self.assertEqual(stats["amount_missing"], 0)
+            self.assertEqual(stats["income_missing_deduped"], 1)
+            self.assertEqual(stats["fee_classified"], 1)
         finally:
             _cleanup(conn, path)
 

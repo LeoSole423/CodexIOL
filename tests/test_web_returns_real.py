@@ -54,6 +54,28 @@ def _mk_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE portfolio_assets (
+          snapshot_date TEXT NOT NULL,
+          symbol TEXT,
+          description TEXT,
+          market TEXT,
+          type TEXT,
+          currency TEXT,
+          plazo TEXT,
+          quantity REAL,
+          last_price REAL,
+          ppc REAL,
+          total_value REAL,
+          daily_var_pct REAL,
+          daily_var_points REAL,
+          gain_pct REAL,
+          gain_amount REAL,
+          committed REAL
+        )
+        """
+    )
     conn.commit()
     return conn, path
 
@@ -160,6 +182,69 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertAlmostEqual(daily["flow_total_ars"], 60.0)
             self.assertAlmostEqual(daily["real_delta"], -10.0)
             self.assertAlmostEqual(daily["real_pct"], -10.0)
+        finally:
+            _cleanup(conn, path)
+
+    def test_returns_calendar_bases_and_inception_alias(self):
+        conn, path = _mk_db()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars)
+                VALUES(?,?,?,?)
+                """,
+                [
+                    ("2025-12-30", 90.0, 0.0, 0.0),
+                    ("2026-01-10", 100.0, 0.0, 0.0),
+                    ("2026-02-01", 110.0, 0.0, 0.0),
+                    ("2026-02-20", 130.0, 0.0, 0.0),
+                ],
+            )
+            conn.commit()
+            os.environ["IOL_DB_PATH"] = path
+
+            out = returns()
+            monthly = out["monthly"]
+            yearly = out["yearly"]
+            ytd = out["ytd"]
+            inception = out["inception"]
+
+            self.assertEqual(monthly["from"], "2026-02-01")
+            self.assertEqual(monthly["to"], "2026-02-20")
+            self.assertEqual(yearly["from"], "2026-01-10")
+            self.assertEqual(yearly["to"], "2026-02-20")
+            self.assertEqual(inception["from"], "2025-12-30")
+            self.assertEqual(inception["to"], "2026-02-20")
+
+            for k in ("from", "to", "delta", "pct", "real_delta", "real_pct", "flow_total_ars"):
+                self.assertEqual(yearly.get(k), ytd.get(k))
+        finally:
+            _cleanup(conn, path)
+
+    def test_returns_partial_progress_when_only_one_snapshot(self):
+        conn, path = _mk_db()
+        try:
+            conn.execute(
+                """
+                INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars)
+                VALUES(?,?,?,?)
+                """,
+                ("2026-03-06", 100.0, 0.0, 0.0),
+            )
+            conn.commit()
+            os.environ["IOL_DB_PATH"] = path
+
+            out = returns()
+            for k in ("monthly", "yearly", "inception"):
+                b = out[k]
+                self.assertEqual(b["from"], "2026-03-06")
+                self.assertEqual(b["to"], "2026-03-06")
+                self.assertAlmostEqual(float(b["delta"]), 0.0)
+                self.assertAlmostEqual(float(b["real_delta"]), 0.0)
+                self.assertAlmostEqual(float(b["real_pct"]), 0.0)
+
+            self.assertEqual(out["ytd"]["from"], out["yearly"]["from"])
+            self.assertEqual(out["ytd"]["to"], out["yearly"]["to"])
         finally:
             _cleanup(conn, path)
 

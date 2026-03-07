@@ -19,7 +19,8 @@ def _mk_db():
           snapshot_date TEXT PRIMARY KEY,
           total_value REAL,
           cash_total_ars REAL,
-          cash_disponible_ars REAL
+          cash_disponible_ars REAL,
+          cash_disponible_usd REAL
         )
         """
     )
@@ -38,6 +39,23 @@ def _mk_db():
           created_at TEXT,
           updated_at TEXT,
           operated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE account_cash_movements (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          movement_id TEXT,
+          occurred_at TEXT,
+          movement_date TEXT,
+          currency TEXT,
+          amount REAL,
+          kind TEXT,
+          description TEXT,
+          source TEXT,
+          raw_json TEXT,
+          created_at TEXT
         )
         """
     )
@@ -96,14 +114,8 @@ class TestWebCashflowsAuto(unittest.TestCase):
 
         out = cashflows_auto(days=30)
         rows = out.get("rows") or []
-        self.assertEqual(len(rows), 1)
-        r = rows[0]
-        self.assertEqual(r.get("kind"), "deposit")
-        self.assertAlmostEqual(float(r.get("amount_ars") or 0.0), 30.0)
-        self.assertAlmostEqual(float(r.get("cash_delta_ars") or 0.0), 30.0)
-        self.assertEqual(r.get("quality_warnings"), [])
-        self.assertEqual(r.get("display_kind"), "external_flow_probable")
-        self.assertEqual(r.get("reason_code"), "EXTERNAL_FLOW_SIGN")
+        # V2 threshold: abs(external_final) < 100 and no FX/imported movement => omitted.
+        self.assertEqual(rows, [])
 
     def test_withdraw_complete(self):
         self.conn.executemany(
@@ -114,12 +126,7 @@ class TestWebCashflowsAuto(unittest.TestCase):
 
         out = cashflows_auto(days=30)
         rows = out.get("rows") or []
-        self.assertEqual(len(rows), 1)
-        r = rows[0]
-        self.assertEqual(r.get("kind"), "withdraw")
-        self.assertAlmostEqual(float(r.get("amount_ars") or 0.0), -30.0)
-        self.assertEqual(r.get("display_kind"), "external_flow_probable")
-        self.assertEqual(r.get("reason_code"), "EXTERNAL_FLOW_SIGN")
+        self.assertEqual(rows, [])
 
     def test_correction_by_orders_incomplete(self):
         self.conn.executemany(
@@ -137,12 +144,7 @@ class TestWebCashflowsAuto(unittest.TestCase):
 
         out = cashflows_auto(days=30)
         rows = out.get("rows") or []
-        self.assertEqual(len(rows), 1)
-        r = rows[0]
-        self.assertEqual(r.get("kind"), "correction")
-        self.assertIn("ORDERS_INCOMPLETE", r.get("quality_warnings") or [])
-        self.assertEqual(r.get("display_kind"), "correction")
-        self.assertEqual(r.get("reason_code"), "QUALITY_INCOMPLETE")
+        self.assertEqual(rows, [])
 
     def test_correction_by_cash_missing(self):
         self.conn.executemany(
@@ -160,13 +162,7 @@ class TestWebCashflowsAuto(unittest.TestCase):
 
         out = cashflows_auto(days=30)
         rows = out.get("rows") or []
-        self.assertEqual(len(rows), 1)
-        r = rows[0]
-        self.assertEqual(r.get("kind"), "correction")
-        self.assertIn("CASH_MISSING", r.get("quality_warnings") or [])
-        self.assertAlmostEqual(float(r.get("amount_ars") or 0.0), 40.0)
-        self.assertEqual(r.get("display_kind"), "correction")
-        self.assertEqual(r.get("reason_code"), "QUALITY_INCOMPLETE")
+        self.assertEqual(rows, [])
 
     def test_rotation_pair_two_days(self):
         self.conn.executemany(
@@ -194,8 +190,8 @@ class TestWebCashflowsAuto(unittest.TestCase):
         self.assertIsNotNone(r9)
         self.assertIsNotNone(r10)
 
-        self.assertEqual(r9.get("display_kind"), "rotation_probable")
-        self.assertEqual(r10.get("display_kind"), "rotation_probable")
+        self.assertEqual(r9.get("display_kind"), "rotation_internal")
+        self.assertEqual(r10.get("display_kind"), "rotation_internal")
         self.assertEqual(r9.get("reason_code"), "ROTATION_PAIR")
         self.assertEqual(r10.get("reason_code"), "ROTATION_PAIR")
         self.assertEqual(r9.get("paired_flow_date"), "2026-02-10")
@@ -223,12 +219,12 @@ class TestWebCashflowsAuto(unittest.TestCase):
         by_date = {r.get("flow_date"): r for r in rows}
         r2 = by_date["2026-02-02"]
         r5 = by_date["2026-02-05"]
-        self.assertEqual(r2.get("display_kind"), "external_flow_probable")
-        self.assertEqual(r5.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r2.get("display_kind"), "external_deposit_probable")
+        self.assertEqual(r5.get("display_kind"), "external_withdraw_probable")
         self.assertIsNone(r2.get("paired_flow_date"))
         self.assertIsNone(r5.get("paired_flow_date"))
 
-    def test_operational_cost_probable(self):
+    def test_operational_fee_or_tax(self):
         self.conn.executemany(
             "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
             [("2026-02-10", 2000000.0, 100000.0), ("2026-02-11", 2000000.0, 80000.0)],
@@ -242,8 +238,8 @@ class TestWebCashflowsAuto(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         r = rows[0]
         self.assertEqual(r.get("kind"), "withdraw")
-        self.assertEqual(r.get("display_kind"), "operational_cost_probable")
-        self.assertEqual(r.get("reason_code"), "OPERATIONAL_COST_RESIDUAL")
+        self.assertEqual(r.get("display_kind"), "operational_fee_or_tax")
+        self.assertEqual(r.get("reason_code"), "OPERATIONAL_FEE_OR_TAX")
         self.assertIsNotNone(r.get("residual_ratio"))
         self.assertLessEqual(float(r.get("residual_ratio") or 1.0), 0.03)
 
@@ -259,8 +255,8 @@ class TestWebCashflowsAuto(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         r = rows[0]
         self.assertEqual(r.get("kind"), "deposit")
-        self.assertEqual(r.get("display_kind"), "external_flow_probable")
-        self.assertEqual(r.get("reason_code"), "EXTERNAL_FLOW_SIGN")
+        self.assertEqual(r.get("display_kind"), "external_deposit_probable")
+        self.assertEqual(r.get("reason_code"), "EXTERNAL_FINAL_SIGN")
         self.assertEqual(r.get("display_label"), "Flujo externo probable (+)")
 
     def test_prefers_cash_total_and_avoids_next_day_settlement_withdraw(self):
@@ -284,7 +280,7 @@ class TestWebCashflowsAuto(unittest.TestCase):
         self.assertAlmostEqual(float(r.get("amount_ars") or 0.0), 500.0)
         self.assertAlmostEqual(float(r.get("cash_delta_ars") or 0.0), 2.0)
         self.assertAlmostEqual(float(r.get("buy_amount_ars") or 0.0), 498.0)
-        self.assertEqual(r.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r.get("display_kind"), "external_deposit_probable")
 
     def test_cashflows_auto_smooths_settlement_carryover_pair(self):
         self.conn.executemany(
@@ -306,12 +302,12 @@ class TestWebCashflowsAuto(unittest.TestCase):
         r24 = by_date["2026-02-24"]
 
         self.assertAlmostEqual(float(r23.get("amount_ars") or 0.0), 498.0, places=6)
-        self.assertEqual(r23.get("display_kind"), "external_flow_probable")
+        self.assertEqual(r23.get("display_kind"), "external_deposit_probable")
         self.assertEqual(r23.get("reason_code"), "SETTLEMENT_SMOOTHED")
 
         self.assertAlmostEqual(float(r24.get("amount_ars") or 0.0), 0.0, places=6)
         self.assertEqual(r24.get("kind"), "correction")
-        self.assertEqual(r24.get("display_kind"), "correction")
+        self.assertEqual(r24.get("display_kind"), "settlement_carryover")
         self.assertEqual(r24.get("reason_code"), "SETTLEMENT_CARRYOVER")
 
     def test_cashflows_auto_smooths_near_cancel_settlement_pair(self):
@@ -338,6 +334,60 @@ class TestWebCashflowsAuto(unittest.TestCase):
         self.assertEqual(r10.get("reason_code"), "SETTLEMENT_SMOOTHED")
         self.assertAlmostEqual(float(r11.get("amount_ars") or 0.0), 0.0, places=6)
         self.assertEqual(r11.get("reason_code"), "SETTLEMENT_CARRYOVER")
+
+    def test_fx_revaluation_usd_cash_not_external_flow(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars,cash_disponible_usd) VALUES(?,?,?,?,?)",
+            [
+                ("2026-02-25", 1000.0, 80735.41, 815.41, 59.2),
+                ("2026-02-27", 1000.0, 81919.41, 815.41, 59.2),
+            ],
+        )
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("display_kind"), "fx_revaluation_usd_cash")
+        self.assertEqual(r.get("reason_code"), "FX_REVALUATION_USD_CASH")
+        self.assertAlmostEqual(float(r.get("external_raw_ars") or 0.0), 1184.0, places=6)
+        self.assertAlmostEqual(float(r.get("external_final_ars") or 0.0), 0.0, places=6)
+        self.assertAlmostEqual(float(r.get("fx_revaluation_ars") or 0.0), 1184.0, places=6)
+
+    def test_imported_external_flow_is_prioritized(self):
+        self.conn.executemany(
+            "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
+            [("2026-02-10", 1000.0, 100.0), ("2026-02-11", 1000.0, 100.0)],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO account_cash_movements(movement_id,occurred_at,movement_date,currency,amount,kind,description,source,raw_json,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "m1",
+                "2026-02-11T11:00:00",
+                "2026-02-11",
+                "ARS",
+                250.0,
+                "external_deposit",
+                "Aporte detectado",
+                "test",
+                "{}",
+                "2026-02-11T11:00:00",
+            ),
+        )
+        self.conn.commit()
+
+        out = cashflows_auto(days=30)
+        rows = out.get("rows") or []
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r.get("display_kind"), "external_deposit_probable")
+        self.assertEqual(r.get("reason_code"), "IMPORTED_EXTERNAL_PRIORITY")
+        self.assertAlmostEqual(float(r.get("external_final_ars") or 0.0), 250.0, places=6)
+        self.assertAlmostEqual(float(r.get("imported_external_ars") or 0.0), 250.0, places=6)
 
     def test_zero_net_not_listed(self):
         self.conn.executemany(
@@ -391,9 +441,8 @@ class TestWebCashflowsAuto(unittest.TestCase):
         out = cashflows_auto()
         self.assertEqual(out.get("from"), "2026-01-21")
         rows = out.get("rows") or []
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].get("base_snapshot"), "2026-01-25")
-        self.assertEqual(rows[0].get("end_snapshot"), "2026-02-20")
+        # Delta +20 (below threshold), no FX/imported movement => omitted in v2.
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":
