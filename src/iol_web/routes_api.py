@@ -43,6 +43,224 @@ def _snapshot_cash_ars(snap: Optional[dbmod.Snapshot]) -> Optional[float]:
     return None
 
 
+EXTERNAL_DISPLAY_KINDS = {"external_deposit_probable", "external_withdraw_probable"}
+
+
+def _norm_currency(v: Any) -> str:
+    s = str(v or "").strip().upper()
+    if s in ("ARS", "PESO_ARGENTINO", "PESO ARGENTINO", "PESOS", "$", "AR$"):
+        return "ARS"
+    if s in ("USD", "US$", "U$S", "DOLAR", "DOLAR_ESTADOUNIDENSE", "DOLAR ESTADOUNIDENSE"):
+        return "USD"
+    if not s:
+        return "ARS"
+    return s
+
+
+def _norm_movement_kind(v: Any) -> str:
+    s = str(v or "").strip().lower()
+    if not s:
+        return "correction_unknown"
+    return s
+
+
+def _snapshot_cash_components(snap: Optional[dbmod.Snapshot]) -> Dict[str, Optional[float]]:
+    if not snap:
+        return {"cash_total_ars": None, "cash_ars": None, "cash_usd": None}
+    cash_total = _snapshot_cash_ars(snap)
+    cash_ars = None
+    cash_usd = None
+    try:
+        if snap.cash_disponible_ars is not None:
+            cash_ars = float(snap.cash_disponible_ars)
+    except Exception:
+        cash_ars = None
+    try:
+        if snap.cash_disponible_usd is not None:
+            cash_usd = float(snap.cash_disponible_usd)
+    except Exception:
+        cash_usd = None
+    return {"cash_total_ars": cash_total, "cash_ars": cash_ars, "cash_usd": cash_usd}
+
+
+def _implied_fx_ars_per_usd(cash_total_ars: Optional[float], cash_ars: Optional[float], cash_usd: Optional[float]) -> Optional[float]:
+    try:
+        if cash_total_ars is None or cash_ars is None or cash_usd is None:
+            return None
+        usd = float(cash_usd)
+        if abs(usd) <= 1e-9:
+            return None
+        return (float(cash_total_ars) - float(cash_ars)) / usd
+    except Exception:
+        return None
+
+
+def _movement_amount_to_ars(
+    movement: Dict[str, Any],
+    fx_end_ars_per_usd: Optional[float],
+    warnings: List[str],
+) -> Optional[float]:
+    amount = movement.get("amount")
+    try:
+        amount_f = float(amount)
+    except Exception:
+        warnings.append("MOVEMENTS_AMOUNT_INVALID")
+        return None
+    ccy = _norm_currency(movement.get("currency"))
+    if ccy == "ARS":
+        return amount_f
+    if ccy == "USD":
+        if fx_end_ars_per_usd is None:
+            warnings.append("MOVEMENTS_USD_NO_FX")
+            return None
+        return amount_f * float(fx_end_ars_per_usd)
+    warnings.append("MOVEMENTS_CURRENCY_UNSUPPORTED")
+    return None
+
+
+def _aggregate_imported_movements(
+    conn,
+    base_date_exclusive: str,
+    end_date_inclusive: str,
+    fx_end_ars_per_usd: Optional[float],
+) -> Dict[str, Any]:
+    rows = dbmod.list_account_cash_movements(conn, base_date_exclusive, end_date_inclusive)
+    imported_external = 0.0
+    imported_internal = 0.0
+    imported_dividend = 0.0
+    imported_fee = 0.0
+    imported_count = 0
+    warnings: List[str] = []
+    for mv in rows:
+        kind = _norm_movement_kind(mv.get("kind"))
+        amt_ars = _movement_amount_to_ars(mv, fx_end_ars_per_usd, warnings)
+        if amt_ars is None:
+            continue
+        imported_count += 1
+        if kind in ("external_deposit", "external_withdraw"):
+            imported_external += float(amt_ars)
+        else:
+            imported_internal += float(amt_ars)
+            if kind == "dividend_or_coupon_income":
+                imported_dividend += float(amt_ars)
+            if kind == "operational_fee_or_tax":
+                imported_fee += float(amt_ars)
+
+    return {
+        "rows_count": int(imported_count),
+        "imported_external_ars": float(imported_external),
+        "imported_internal_ars": float(imported_internal),
+        "imported_dividend_ars": float(imported_dividend),
+        "imported_fee_ars": float(imported_fee),
+        "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
+def _compute_interval_flow_v2(
+    conn,
+    base_snap: dbmod.Snapshot,
+    end_snap: dbmod.Snapshot,
+    include_threshold: bool,
+) -> Optional[Dict[str, Any]]:
+    warnings: List[str] = []
+    base_cash = _snapshot_cash_components(base_snap)
+    end_cash = _snapshot_cash_components(end_snap)
+
+    cash_total_base = base_cash.get("cash_total_ars")
+    cash_total_end = end_cash.get("cash_total_ars")
+    if cash_total_base is None or cash_total_end is None:
+        cash_total_delta = 0.0
+        warnings.append("CASH_MISSING")
+    else:
+        cash_total_delta = float(cash_total_end) - float(cash_total_base)
+
+    cash_ars_base = base_cash.get("cash_ars")
+    cash_ars_end = end_cash.get("cash_ars")
+    cash_usd_base = base_cash.get("cash_usd")
+    cash_usd_end = end_cash.get("cash_usd")
+    cash_ars_delta = None
+    cash_usd_delta = None
+    if cash_ars_base is not None and cash_ars_end is not None:
+        cash_ars_delta = float(cash_ars_end) - float(cash_ars_base)
+    if cash_usd_base is not None and cash_usd_end is not None:
+        cash_usd_delta = float(cash_usd_end) - float(cash_usd_base)
+
+    fx_base = _implied_fx_ars_per_usd(cash_total_base, cash_ars_base, cash_usd_base)
+    fx_end = _implied_fx_ars_per_usd(cash_total_end, cash_ars_end, cash_usd_end)
+    if fx_base is not None and fx_end is not None and cash_usd_base is not None:
+        fx_revaluation_ars = float(cash_usd_base) * (float(fx_end) - float(fx_base))
+    else:
+        fx_revaluation_ars = 0.0
+
+    dt_from = f"{base_snap.snapshot_date}T23:59:59"
+    dt_to = f"{end_snap.snapshot_date}T23:59:59"
+    amounts, stats = dbmod.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
+    if stats.get("unclassified", 0) > 0 or stats.get("amount_missing", 0) > 0:
+        warnings.append("ORDERS_INCOMPLETE")
+
+    buy_amount = float(amounts.get("buy_amount") or 0.0)
+    sell_amount = float(amounts.get("sell_amount") or 0.0)
+    income_amount = float(amounts.get("income_amount") or 0.0)
+    fee_amount = float(amounts.get("fee_amount") or 0.0)
+    order_fee_internal_ars = -abs(float(fee_amount or 0.0))
+
+    imported = _aggregate_imported_movements(conn, base_snap.snapshot_date, end_snap.snapshot_date, fx_end)
+    for w in imported.get("warnings") or []:
+        warnings.append(str(w))
+
+    external_raw = float(cash_total_delta) + buy_amount - sell_amount - income_amount
+    imported_internal = float(imported.get("imported_internal_ars") or 0.0)
+    imported_external = float(imported.get("imported_external_ars") or 0.0)
+    external_adjusted = external_raw - float(fx_revaluation_ars) - imported_internal - order_fee_internal_ars
+    external_final = imported_external if abs(imported_external) > 1e-9 else external_adjusted
+
+    traded_gross = abs(buy_amount) + abs(sell_amount) + abs(income_amount) + abs(fee_amount)
+    residual_ratio = (abs(external_final) / traded_gross) if traded_gross > 0 else None
+
+    has_imported = int(imported.get("rows_count") or 0) > 0
+    if include_threshold and (abs(external_final) < 100.0) and (abs(fx_revaluation_ars) < 100.0) and (not has_imported):
+        return None
+
+    if "CASH_MISSING" in warnings or "ORDERS_INCOMPLETE" in warnings:
+        kind = "correction"
+    elif external_final > 0:
+        kind = "deposit"
+    elif external_final < 0:
+        kind = "withdraw"
+    else:
+        kind = "correction"
+
+    return {
+        "flow_date": end_snap.snapshot_date,
+        "kind": kind,
+        "amount_ars": float(external_final),
+        "base_snapshot": base_snap.snapshot_date,
+        "end_snapshot": end_snap.snapshot_date,
+        "cash_delta_ars": float(cash_total_delta),
+        "cash_total_delta_ars": float(cash_total_delta),
+        "cash_ars_delta": cash_ars_delta,
+        "cash_usd_delta": cash_usd_delta,
+        "buy_amount_ars": buy_amount,
+        "sell_amount_ars": sell_amount,
+        "income_amount_ars": income_amount,
+        "fee_amount_ars": fee_amount,
+        "external_raw_ars": float(external_raw),
+        "external_adjusted_ars": float(external_adjusted),
+        "external_final_ars": float(external_final),
+        "fx_revaluation_ars": float(fx_revaluation_ars),
+        "imported_internal_ars": float(imported_internal),
+        "imported_external_ars": float(imported_external),
+        "quality_warnings": list(dict.fromkeys(warnings)),
+        "orders_stats": stats,
+        "residual_ratio": residual_ratio,
+        "_traded_gross": traded_gross,
+        "_has_imported_movements": has_imported,
+        "_imported_dividend_ars": float(imported.get("imported_dividend_ars") or 0.0),
+        "_imported_fee_ars": float(imported.get("imported_fee_ars") or 0.0),
+        "_orders_total": int(stats.get("total", 0) or 0),
+    }
+
+
 def _return_with_flows(
     conn,
     latest: Optional[dbmod.Snapshot],
@@ -72,38 +290,24 @@ def _return_with_flows(
         ).to_dict()
 
     warnings = []
-    cash_base = _snapshot_cash_ars(base)
-    cash_latest = _snapshot_cash_ars(latest)
-    cash_missing = cash_base is None or cash_latest is None
-    cash_delta = 0.0
-    if cash_missing:
-        warnings.extend(["CASH_MISSING", "INFERENCE_PARTIAL"])
+    iv = _compute_interval_flow_v2(conn, base, latest, include_threshold=False)
+    if iv is None:
+        order_stats = None
+        warnings.append("INFERENCE_PARTIAL")
+        flow_inferred = 0.0
     else:
-        cash_delta = float(cash_latest or 0.0) - float(cash_base or 0.0)
-
-    dt_from = f"{base.snapshot_date}T23:59:59"
-    dt_to = f"{latest.snapshot_date}T23:59:59"
-    order_amounts, order_stats = dbmod.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
-
-    if order_stats.get("total", 0) == 0:
-        warnings.append("ORDERS_NONE")
-    if order_stats.get("unclassified", 0) > 0 or order_stats.get("amount_missing", 0) > 0:
-        warnings.append("ORDERS_INCOMPLETE")
-
+        order_stats = iv.get("orders_stats")
+        warnings.extend(list(iv.get("quality_warnings") or []))
+        if (order_stats or {}).get("total", 0) == 0:
+            warnings.append("ORDERS_NONE")
+        flow_inferred = float(iv.get("external_final_ars") or iv.get("amount_ars") or 0.0)
     flow_manual = dbmod.manual_cashflow_sum(conn, base.snapshot_date, latest.snapshot_date)
-    
-    flow_inferred = (
-        float(cash_delta)
-        + float(order_amounts.get("buy_amount") or 0.0)
-        - float(order_amounts.get("sell_amount") or 0.0)
-        - float(order_amounts.get("income_amount") or 0.0)
-    )
     return enrich_return_block(
         gross=gross_block,
         base=base,
         flow_inferred_ars=flow_inferred,
         flow_manual_adjustment_ars=flow_manual,
-        quality_warnings=warnings,
+        quality_warnings=list(dict.fromkeys(warnings)),
         orders_stats=order_stats,
     ).to_dict()
 
@@ -122,21 +326,18 @@ def _flow_date_or_none(v: Any) -> Optional[date]:
 
 def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
     """
-    Enrich rows in-place with display classification for inferred flows.
-    Expects per-row keys:
-      flow_date, kind, amount_ars, quality_warnings, buy_amount_ars, sell_amount_ars, income_amount_ars
-    Optional:
-      residual_ratio, _traded_gross
+    Enrich rows in-place with display classification for inferred flows (v2 taxonomy).
     """
     for row in rows:
         if "_traded_gross" not in row:
             b = abs(float(row.get("buy_amount_ars") or 0.0))
             s = abs(float(row.get("sell_amount_ars") or 0.0))
             i = abs(float(row.get("income_amount_ars") or 0.0))
-            row["_traded_gross"] = b + s + i
+            f = abs(float(row.get("fee_amount_ars") or 0.0))
+            row["_traded_gross"] = b + s + i + f
         if row.get("residual_ratio") is None:
             tg = float(row.get("_traded_gross") or 0.0)
-            amt = abs(float(row.get("amount_ars") or 0.0))
+            amt = abs(float(row.get("external_final_ars") or row.get("amount_ars") or 0.0))
             row["residual_ratio"] = (amt / tg) if tg > 0 else None
 
     pair_by_idx: Dict[int, int] = {}
@@ -145,7 +346,7 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
         ri = rows[i]
         if _flow_quality_incomplete(ri):
             continue
-        ai = float(ri.get("amount_ars") or 0.0)
+        ai = float(ri.get("external_final_ars") or ri.get("amount_ars") or 0.0)
         if abs(ai) <= 1e-9:
             continue
         di = _flow_date_or_none(ri.get("flow_date"))
@@ -157,7 +358,7 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
             rj = rows[j]
             if _flow_quality_incomplete(rj):
                 continue
-            aj = float(rj.get("amount_ars") or 0.0)
+            aj = float(rj.get("external_final_ars") or rj.get("amount_ars") or 0.0)
             if abs(aj) <= 1e-9 or (ai * aj) >= 0:
                 continue
             dj = _flow_date_or_none(rj.get("flow_date"))
@@ -203,8 +404,8 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
         if _flow_quality_incomplete(ri) or _flow_quality_incomplete(rj):
             continue
 
-        ai = float(ri.get("amount_ars") or 0.0)
-        aj = float(rj.get("amount_ars") or 0.0)
+        ai = float(ri.get("external_final_ars") or ri.get("amount_ars") or 0.0)
+        aj = float(rj.get("external_final_ars") or rj.get("amount_ars") or 0.0)
         if abs(ai) <= 1e-9 or abs(aj) <= 1e-9 or (ai * aj) >= 0:
             continue
 
@@ -244,27 +445,37 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
 
     for i, row in enumerate(rows):
         kind = str(row.get("kind") or "").lower()
-        amount = float(row.get("amount_ars") or 0.0)
+        amount = float(row.get("external_final_ars") or row.get("amount_ars") or 0.0)
         if i in amount_override_by_idx:
             amount = float(amount_override_by_idx[i])
             row["amount_ars"] = amount
+            row["external_final_ars"] = amount
             if abs(amount) <= 1e-9:
                 row["kind"] = "correction"
             else:
                 row["kind"] = "deposit" if amount > 0 else "withdraw"
             kind = str(row.get("kind") or "").lower()
         residual_ratio = row.get("residual_ratio")
+        imported_external = float(row.get("imported_external_ars") or 0.0)
+        imported_internal = float(row.get("imported_internal_ars") or 0.0)
+        imported_dividend = float(row.get("_imported_dividend_ars") or 0.0)
+        imported_fee = float(row.get("_imported_fee_ars") or 0.0)
+        fx_revaluation = float(row.get("fx_revaluation_ars") or 0.0)
+        income_amount = float(row.get("income_amount_ars") or 0.0)
+        fee_amount = float(row.get("fee_amount_ars") or 0.0)
+        orders_total = int(row.get("_orders_total") or 0)
+        has_imported = bool(row.get("_has_imported_movements"))
 
-        display_kind = "external_flow_probable"
+        display_kind = "external_deposit_probable" if amount >= 0 else "external_withdraw_probable"
         display_label = "Flujo externo probable (+)" if amount >= 0 else "Flujo externo probable (-)"
         confidence = "medium"
-        reason_code = "EXTERNAL_FLOW_SIGN"
-        reason_detail = "Clasificado por signo del flujo neto inferido."
+        reason_code = "EXTERNAL_FINAL_SIGN"
+        reason_detail = "Clasificado por signo del flujo externo final (v2)."
         paired_flow_date = None
         paired_amount_ars = None
 
         if _flow_quality_incomplete(row):
-            display_kind = "correction"
+            display_kind = "correction_unknown"
             display_label = "Correcci\u00f3n"
             confidence = "high"
             reason_code = "QUALITY_INCOMPLETE"
@@ -275,8 +486,8 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
             paired_flow_date = paired.get("flow_date")
             paired_amount_ars = float(amount_override_by_idx.get(j, float(paired.get("amount_ars") or 0.0)))
             if abs(amount) <= 1e-9:
-                display_kind = "correction"
-                display_label = "Correcci\u00f3n"
+                display_kind = "settlement_carryover"
+                display_label = "Liquidaci\u00f3n compensada"
                 confidence = "medium"
                 reason_code = "SETTLEMENT_CARRYOVER"
                 reason_detail = (
@@ -285,7 +496,7 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
                     else "Compensado por liquidaci\u00f3n cercana; no se aplica como flujo externo."
                 )
             else:
-                display_kind = "external_flow_probable"
+                display_kind = "external_deposit_probable" if amount >= 0 else "external_withdraw_probable"
                 display_label = "Flujo externo probable (+)" if amount >= 0 else "Flujo externo probable (-)"
                 confidence = "medium"
                 reason_code = "SETTLEMENT_SMOOTHED"
@@ -299,8 +510,8 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
             paired = rows[j]
             paired_flow_date = paired.get("flow_date")
             paired_amount_ars = float(paired.get("amount_ars") or 0.0)
-            display_kind = "rotation_probable"
-            display_label = "Rotaci\u00f3n probable (venta/recompra)"
+            display_kind = "rotation_internal"
+            display_label = "Rotaci\u00f3n interna probable"
             confidence = "medium"
             reason_code = "ROTATION_PAIR"
             reason_detail = (
@@ -308,12 +519,50 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
                 if paired_flow_date
                 else "Par opuesto cercano; neto combinado bajo."
             )
-        elif kind == "withdraw" and isinstance(residual_ratio, (int, float)) and float(residual_ratio) <= 0.03:
-            display_kind = "operational_cost_probable"
-            display_label = "Costo operativo probable"
+        elif abs(imported_external) > 1e-9:
+            display_kind = "external_deposit_probable" if amount >= 0 else "external_withdraw_probable"
+            display_label = "Flujo externo importado (+)" if amount >= 0 else "Flujo externo importado (-)"
+            confidence = "high"
+            reason_code = "IMPORTED_EXTERNAL_PRIORITY"
+            reason_detail = "Se prioriza movimiento externo expl\u00edcito importado."
+        elif (
+            abs(amount) < 100.0
+            and abs(fx_revaluation) >= 100.0
+            and orders_total == 0
+            and abs(imported_external) <= 1e-9
+        ):
+            display_kind = "fx_revaluation_usd_cash"
+            display_label = "Revaluaci\u00f3n FX de caja USD"
+            confidence = "high"
+            reason_code = "FX_REVALUATION_USD_CASH"
+            reason_detail = "Movimiento explicado por variaci\u00f3n de tipo de cambio sobre caja USD."
+        elif abs(amount) < 250.0 and (income_amount > 1e-9 or imported_dividend > 1e-9):
+            display_kind = "dividend_or_coupon_income"
+            display_label = "Dividendo/Renta probable"
+            confidence = "high" if (imported_dividend > 1e-9) else "medium"
+            reason_code = "DIVIDEND_OR_COUPON"
+            reason_detail = "Ingreso interno por dividendos/rentas; no se aplica como flujo externo."
+        elif (
+            fee_amount > 1e-9
+            or abs(imported_fee) > 1e-9
+            or (
+                kind == "withdraw"
+                and isinstance(residual_ratio, (int, float))
+                and float(residual_ratio) <= 0.03
+                and abs(imported_external) <= 1e-9
+            )
+        ):
+            display_kind = "operational_fee_or_tax"
+            display_label = "Costo/Impuesto operativo"
             confidence = "medium"
-            reason_code = "OPERATIONAL_COST_RESIDUAL"
-            reason_detail = "Residual chico vs volumen operado (\u22643%)."
+            reason_code = "OPERATIONAL_FEE_OR_TAX"
+            reason_detail = "Salida interna por costos/impuestos operativos."
+        elif abs(amount) < 100.0 and has_imported and abs(imported_internal) > 1e-9 and abs(imported_external) <= 1e-9:
+            display_kind = "correction_unknown"
+            display_label = "Correcci\u00f3n"
+            confidence = "medium"
+            reason_code = "IMPORTED_INTERNAL_NEUTRALIZED"
+            reason_detail = "Movimiento interno importado compensado; sin flujo externo neto relevante."
 
         row["display_kind"] = display_kind
         row["display_label"] = display_label
@@ -323,6 +572,10 @@ def _annotate_flow_rows(rows: List[Dict[str, Any]]) -> None:
         row["paired_flow_date"] = paired_flow_date
         row["paired_amount_ars"] = paired_amount_ars
         row.pop("_traded_gross", None)
+        row.pop("_has_imported_movements", None)
+        row.pop("_imported_dividend_ars", None)
+        row.pop("_imported_fee_ars", None)
+        row.pop("_orders_total", None)
 
 
 @router.get("/health")
@@ -371,42 +624,56 @@ def snapshots(
                         "gross_delta": gross_delta,
                         "amount_ars": 0.0,
                         "kind": "correction",
+                        "external_raw_ars": 0.0,
+                        "external_adjusted_ars": 0.0,
+                        "external_final_ars": 0.0,
+                        "fx_revaluation_ars": 0.0,
+                        "imported_internal_ars": 0.0,
+                        "imported_external_ars": 0.0,
+                        "cash_total_delta_ars": 0.0,
+                        "cash_ars_delta": None,
+                        "cash_usd_delta": None,
                         "buy_amount_ars": 0.0,
                         "sell_amount_ars": 0.0,
                         "income_amount_ars": 0.0,
+                        "fee_amount_ars": 0.0,
                         "quality_warnings": ["INFERENCE_PARTIAL"],
                         "residual_ratio": None,
                     }
                 )
                 continue
 
-            gross = compute_return(end_snap, base_snap)
-            wf = _return_with_flows(conn, end_snap, base_snap, gross)
-            dt_from = f"{base_snap.snapshot_date}T23:59:59"
-            dt_to = f"{end_snap.snapshot_date}T23:59:59"
-            amounts, _ = dbmod.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
-            buy_amount = float(amounts.get("buy_amount") or 0.0)
-            sell_amount = float(amounts.get("sell_amount") or 0.0)
-            income_amount = float(amounts.get("income_amount") or 0.0)
-            flow_total = float(wf.get("flow_total_ars") or 0.0)
-            traded_gross = abs(buy_amount) + abs(sell_amount) + abs(income_amount)
-            residual_ratio = (abs(flow_total) / traded_gross) if traded_gross > 0 else None
-            warns = list(wf.get("quality_warnings") or [])
-            kind = "correction" if _flow_quality_incomplete({"quality_warnings": warns}) else ("deposit" if flow_total >= 0 else "withdraw")
-            intervals.append(
-                {
+            iv = _compute_interval_flow_v2(conn, base_snap, end_snap, include_threshold=False)
+            if iv is None:
+                iv = {
                     "flow_date": end_d,
-                    "gross_delta": gross_delta,
-                    "amount_ars": flow_total,
-                    "kind": kind,
-                    "buy_amount_ars": buy_amount,
-                    "sell_amount_ars": sell_amount,
-                    "income_amount_ars": income_amount,
-                    "quality_warnings": warns,
-                    "residual_ratio": residual_ratio,
-                    "_traded_gross": traded_gross,
+                    "kind": "correction",
+                    "amount_ars": 0.0,
+                    "external_raw_ars": 0.0,
+                    "external_adjusted_ars": 0.0,
+                    "external_final_ars": 0.0,
+                    "fx_revaluation_ars": 0.0,
+                    "imported_internal_ars": 0.0,
+                    "imported_external_ars": 0.0,
+                    "cash_delta_ars": 0.0,
+                    "cash_total_delta_ars": 0.0,
+                    "cash_ars_delta": None,
+                    "cash_usd_delta": None,
+                    "buy_amount_ars": 0.0,
+                    "sell_amount_ars": 0.0,
+                    "income_amount_ars": 0.0,
+                    "fee_amount_ars": 0.0,
+                    "quality_warnings": [],
+                    "residual_ratio": None,
                 }
-            )
+            stats = iv.get("orders_stats") or {}
+            if int(stats.get("total", 0) or 0) == 0:
+                warns = list(iv.get("quality_warnings") or [])
+                if "ORDERS_NONE" not in warns:
+                    warns.append("ORDERS_NONE")
+                iv["quality_warnings"] = warns
+            iv["gross_delta"] = gross_delta
+            intervals.append(iv)
 
         _annotate_flow_rows(intervals)
 
@@ -430,7 +697,7 @@ def snapshots(
             flow_total = float(iv.get("amount_ars") or 0.0)
             display_kind = str(iv.get("display_kind") or "")
             # Apply adjustment only for external-flow-like movements.
-            applied_flow = flow_total if display_kind == "external_flow_probable" else 0.0
+            applied_flow = flow_total if display_kind in EXTERNAL_DISPLAY_KINDS else 0.0
             adjusted_prev = adjusted_prev + (gross_delta - applied_flow)
             out.append(
                 {
@@ -439,6 +706,12 @@ def snapshots(
                     "raw_total_value": float(end_v or 0.0),
                     "flow_total_ars": flow_total,
                     "applied_flow_ars": applied_flow,
+                    "external_raw_ars": float(iv.get("external_raw_ars") or 0.0),
+                    "external_adjusted_ars": float(iv.get("external_adjusted_ars") or 0.0),
+                    "external_final_ars": float(iv.get("external_final_ars") or flow_total),
+                    "fx_revaluation_ars": float(iv.get("fx_revaluation_ars") or 0.0),
+                    "imported_internal_ars": float(iv.get("imported_internal_ars") or 0.0),
+                    "imported_external_ars": float(iv.get("imported_external_ars") or 0.0),
                     "display_kind": display_kind,
                     "display_label": iv.get("display_label"),
                     "reason_code": iv.get("reason_code"),
@@ -538,21 +811,24 @@ def returns():
         conn = dbmod.get_conn()
     except FileNotFoundError:
         empty = _return_with_flows(None, None, None, compute_return(None, None))
-        return {"daily": empty, "weekly": empty, "monthly": empty, "yearly": empty, "ytd": empty}
+        return {"daily": empty, "weekly": empty, "monthly": empty, "yearly": empty, "ytd": empty, "inception": empty}
 
     try:
         latest = dbmod.latest_snapshot(conn)
         if not latest:
             empty = _return_with_flows(conn, None, None, compute_return(None, None))
-            return {"daily": empty, "weekly": empty, "monthly": empty, "yearly": empty, "ytd": empty}
+            return {"daily": empty, "weekly": empty, "monthly": empty, "yearly": empty, "ytd": empty, "inception": empty}
 
         base_daily = dbmod.snapshot_before(conn, latest.snapshot_date)
         base_weekly = dbmod.snapshot_on_or_before(conn, target_date(latest.snapshot_date, 7))
-        base_monthly = dbmod.snapshot_on_or_before(conn, target_date(latest.snapshot_date, 30))
-        base_yearly = dbmod.snapshot_on_or_before(conn, target_date(latest.snapshot_date, 365))
+        latest_d = date.fromisoformat(latest.snapshot_date)
+        month_start = latest_d.replace(day=1).isoformat()
+        base_monthly = dbmod.first_snapshot_in_range(conn, month_start, latest.snapshot_date) or latest
 
-        y = date.fromisoformat(latest.snapshot_date).year
-        base_ytd = dbmod.first_snapshot_of_year(conn, y, latest.snapshot_date) or dbmod.earliest_snapshot(conn)
+        y = latest_d.year
+        base_yearly = dbmod.first_snapshot_of_year(conn, y, latest.snapshot_date) or latest
+        base_ytd = base_yearly
+        base_inception = dbmod.earliest_snapshot(conn) or latest
 
         daily_gross = None
         if base_daily:
@@ -569,6 +845,7 @@ def returns():
             "monthly": _return_with_flows(conn, latest, base_monthly, compute_return(latest, base_monthly)),
             "yearly": _return_with_flows(conn, latest, base_yearly, compute_return(latest, base_yearly)),
             "ytd": _return_with_flows(conn, latest, base_ytd, compute_return(latest, base_ytd)),
+            "inception": _return_with_flows(conn, latest, base_inception, compute_return(latest, base_inception)),
         }
     finally:
         conn.close()
@@ -605,53 +882,9 @@ def cashflows_auto(days: int = 30):
             end_snap = dbmod.snapshot_on_or_before(conn, snap_dates[i])
             if not base_snap or not end_snap:
                 continue
-
-            warnings = []
-            cash_base = _snapshot_cash_ars(base_snap)
-            cash_end = _snapshot_cash_ars(end_snap)
-            if cash_base is None or cash_end is None:
-                cash_delta = 0.0
-                warnings.append("CASH_MISSING")
-            else:
-                cash_delta = float(cash_end or 0.0) - float(cash_base or 0.0)
-
-            dt_from = f"{base_snap.snapshot_date}T23:59:59"
-            dt_to = f"{end_snap.snapshot_date}T23:59:59"
-            amounts, stats = dbmod.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
-            if stats.get("unclassified", 0) > 0 or stats.get("amount_missing", 0) > 0:
-                warnings.append("ORDERS_INCOMPLETE")
-
-            buy_amount = float(amounts.get("buy_amount") or 0.0)
-            sell_amount = float(amounts.get("sell_amount") or 0.0)
-            income_amount = float(amounts.get("income_amount") or 0.0)
-            flow_inferred = float(cash_delta) + buy_amount - sell_amount - income_amount
-            if abs(flow_inferred) <= 1e-9:
-                continue
-            traded_gross = abs(buy_amount) + abs(sell_amount) + abs(income_amount)
-            residual_ratio = (abs(flow_inferred) / traded_gross) if traded_gross > 0 else None
-
-            if "CASH_MISSING" in warnings or "ORDERS_INCOMPLETE" in warnings:
-                kind = "correction"
-            else:
-                kind = "deposit" if flow_inferred > 0 else "withdraw"
-
-            rows.append(
-                {
-                    "flow_date": end_snap.snapshot_date,
-                    "kind": kind,
-                    "amount_ars": flow_inferred,
-                    "base_snapshot": base_snap.snapshot_date,
-                    "end_snapshot": end_snap.snapshot_date,
-                    "cash_delta_ars": cash_delta,
-                    "buy_amount_ars": buy_amount,
-                    "sell_amount_ars": sell_amount,
-                    "income_amount_ars": income_amount,
-                    "quality_warnings": warnings,
-                    "orders_stats": stats,
-                    "residual_ratio": residual_ratio,
-                    "_traded_gross": traded_gross,
-                }
-            )
+            row = _compute_interval_flow_v2(conn, base_snap, end_snap, include_threshold=True)
+            if row is not None:
+                rows.append(row)
 
         _annotate_flow_rows(rows)
 

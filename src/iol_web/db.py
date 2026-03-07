@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import unicodedata
 from dataclasses import dataclass
@@ -318,9 +319,30 @@ def _norm_order_side(v: Any) -> Optional[str]:
         return "sell"
     if s in ("pago de dividendos", "pago de renta"):
         return "income"
+    if s in (
+        "comision",
+        "comision de mercado",
+        "comision de bolsa",
+        "gastos",
+        "gastos operativos",
+        "fee",
+        "tax",
+        "impuesto",
+        "iva",
+        "derechos de mercado",
+        "derecho de mercado",
+    ):
+        return "fee"
     if s in ("ignore",):
         return "ignore"
     return None
+
+
+def _symbol_base_for_dedupe(v: Any) -> str:
+    s = str(v or "").strip().upper()
+    if not s:
+        return ""
+    return re.sub(r"\s+(US\$|USD)$", "", s).strip()
 
 
 def _order_amount(row: sqlite3.Row) -> Optional[float]:
@@ -431,7 +453,7 @@ def orders_cashflows_by_symbol(
         if side is None:
             unclassified += 1
             continue
-        if side in ("ignore", "income"):
+        if side in ("ignore", "income", "fee"):
             ignored += 1
             continue
 
@@ -467,12 +489,24 @@ def orders_flow_summary(
     Aggregate executed order flows for the period (dt_from, dt_to].
 
     Returns (amounts, stats):
-      amounts = {"buy_amount": x, "sell_amount": y, "income_amount": z}
-      stats = {"total": n, "classified": n, "income_classified": n, "unclassified": n, "amount_missing": n, "ignored": n}
+      amounts = {"buy_amount": x, "sell_amount": y, "income_amount": z, "fee_amount": f}
+      stats = {
+        "total": n, "classified": n, "income_classified": n, "fee_classified": n,
+        "unclassified": n, "amount_missing": n, "income_missing_deduped": n, "ignored": n
+      }
     """
     cols = _table_columns(conn, "orders")
-    empty_amounts = {"buy_amount": 0.0, "sell_amount": 0.0, "income_amount": 0.0}
-    empty_stats = {"total": 0, "classified": 0, "income_classified": 0, "unclassified": 0, "amount_missing": 0, "ignored": 0}
+    empty_amounts = {"buy_amount": 0.0, "sell_amount": 0.0, "income_amount": 0.0, "fee_amount": 0.0}
+    empty_stats = {
+        "total": 0,
+        "classified": 0,
+        "income_classified": 0,
+        "fee_classified": 0,
+        "unclassified": 0,
+        "amount_missing": 0,
+        "income_missing_deduped": 0,
+        "ignored": 0,
+    }
     if not cols:
         return empty_amounts, empty_stats
 
@@ -511,6 +545,8 @@ def orders_flow_summary(
     price_expr = "price" if "price" in cols else "NULL"
     sql = f"""
         SELECT
+            symbol AS symbol,
+            COALESCE({ts_col}, created_at) AS event_ts,
             {side_expr} AS side,
             {operated_amount_expr} AS operated_amount,
             {quantity_expr} AS quantity,
@@ -520,8 +556,23 @@ def orders_flow_summary(
     """
     rows = conn.execute(sql, tuple(params)).fetchall()
 
-    amounts = {"buy_amount": 0.0, "sell_amount": 0.0, "income_amount": 0.0}
-    total = classified = income_classified = unclassified = amount_missing = ignored = 0
+    amounts = {"buy_amount": 0.0, "sell_amount": 0.0, "income_amount": 0.0, "fee_amount": 0.0}
+    total = classified = income_classified = fee_classified = unclassified = amount_missing = ignored = 0
+    income_missing_deduped = 0
+
+    income_keys_with_amount = set()
+    for r in rows:
+        side = _norm_order_side(r["side"])
+        if side != "income":
+            continue
+        amt = _order_amount(r)
+        if amt is None:
+            continue
+        ts = str(r["event_ts"] or "")[:19]
+        sym_base = _symbol_base_for_dedupe(r["symbol"])
+        if ts and sym_base:
+            income_keys_with_amount.add((ts, sym_base, "income"))
+
     for r in rows:
         total += 1
         side = _norm_order_side(r["side"])
@@ -534,6 +585,13 @@ def orders_flow_summary(
 
         amt = _order_amount(r)
         if amt is None:
+            if side == "income":
+                ts = str(r["event_ts"] or "")[:19]
+                sym_base = _symbol_base_for_dedupe(r["symbol"])
+                if (ts, sym_base, "income") in income_keys_with_amount:
+                    income_missing_deduped += 1
+                    ignored += 1
+                    continue
             amount_missing += 1
             continue
 
@@ -543,16 +601,23 @@ def orders_flow_summary(
         elif side == "sell":
             amounts["sell_amount"] += amt
             classified += 1
-        else:
+        elif side == "income":
             amounts["income_amount"] += amt
             income_classified += 1
+        elif side == "fee":
+            amounts["fee_amount"] += abs(float(amt))
+            fee_classified += 1
+        else:
+            ignored += 1
 
     stats = {
         "total": total,
         "classified": classified,
         "income_classified": income_classified,
+        "fee_classified": fee_classified,
         "unclassified": unclassified,
         "amount_missing": amount_missing,
+        "income_missing_deduped": income_missing_deduped,
         "ignored": ignored,
     }
     return amounts, stats
@@ -574,6 +639,45 @@ def manual_cashflow_sum(conn: sqlite3.Connection, date_from_exclusive: str, date
         return float((row["total"] if row and row["total"] is not None else 0.0) or 0.0)
     except Exception:
         return 0.0
+
+
+def list_account_cash_movements(
+    conn: sqlite3.Connection,
+    date_from_exclusive: str,
+    date_to_inclusive: str,
+) -> List[Dict[str, Any]]:
+    cols = _table_columns(conn, "account_cash_movements")
+    if not cols:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                movement_id, occurred_at, movement_date, currency, amount, kind, description, source
+            FROM account_cash_movements
+            WHERE movement_date > ? AND movement_date <= ?
+            ORDER BY movement_date ASC, COALESCE(occurred_at, movement_date) ASC, id ASC
+            """,
+            (date_from_exclusive, date_to_inclusive),
+        ).fetchall()
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for r in rows or []:
+        out.append(
+            {
+                "movement_id": str(r["movement_id"]) if r["movement_id"] is not None else None,
+                "occurred_at": str(r["occurred_at"]) if r["occurred_at"] is not None else None,
+                "movement_date": str(r["movement_date"]),
+                "currency": str(r["currency"]) if r["currency"] is not None else "ARS",
+                "amount": float(r["amount"] or 0.0),
+                "kind": str(r["kind"]) if r["kind"] is not None else "correction_unknown",
+                "description": str(r["description"]) if r["description"] is not None else None,
+                "source": str(r["source"]) if r["source"] is not None else None,
+            }
+        )
+    return out
 
 
 def list_manual_cashflow_adjustments(
