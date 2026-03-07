@@ -12,6 +12,15 @@
   const fmtNum = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 });
 
   function el(id) { return document.getElementById(id); }
+  function escHtml(v) {
+    return String(v == null ? "" : v)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+  function escAttr(v) {
+    return escHtml(v).replace(/"/g, "&quot;");
+  }
 
   function signClass(v) {
     if (v == null) return "";
@@ -101,6 +110,13 @@
     const t = String(block.to || "").trim();
     if (!f || !t || f === t) return false;
     return true;
+  }
+
+  function hasRenderableRange(block) {
+    if (!block) return false;
+    const f = String(block.from || "").trim();
+    const t = String(block.to || "").trim();
+    return !!(f && t);
   }
 
   async function fetchJSON(url, options) {
@@ -358,6 +374,15 @@
   let chartInflationSeries = null;
   let chartInflationAnnual = null;
   let assetCtx = { latestYear: null, latestMonth: null, years: [] };
+  let qualityCtx = {
+    level: "all",
+    activeId: null,
+    days: 30,
+    warnOnly: false,
+    warnQuery: "",
+    events: [],
+    model: null,
+  };
 
   function buildLineChart(canvas, labels, values) {
     const ctx = canvas.getContext("2d");
@@ -566,12 +591,16 @@
     root.innerHTML = rows;
   }
 
-  function putReturnCard(mainId, subId, block, label) {
+  function putReturnCard(mainId, subId, block, label, options) {
+    const opts = Object.assign({
+      allowPartialRange: false,
+      suppressEmptyState: false,
+    }, options || {});
     const n = el(mainId);
-    const hasRange = hasValidRange(block);
+    const hasRange = opts.allowPartialRange ? hasRenderableRange(block) : hasValidRange(block);
     if (n) {
       if (!hasRange) {
-        n.textContent = "Sin base";
+        n.textContent = opts.suppressEmptyState ? "-" : "Sin base";
         n.className = "v muted";
       } else {
         const mainPct = (block && block.real_pct != null) ? block.real_pct : null;
@@ -582,7 +611,25 @@
     const s = el(subId);
     if (s) {
       if (!hasRange) {
-        s.innerHTML = `<div class="kpi-empty-state">Sin snapshots suficientes para ventana${label ? ` (${label})` : ""}.</div>`;
+        if (!opts.suppressEmptyState) {
+          s.innerHTML = `<div class="kpi-empty-state">Sin snapshots suficientes para ventana${label ? ` (${label})` : ""}.</div>`;
+          return;
+        }
+        s.innerHTML = `
+          <div style="font-size: 14px; font-weight: 600; margin-top: 4px; margin-bottom: 12px;" class="muted">
+            -
+          </div>
+          <div class="mini-grid">
+            <div class="mg-row">
+              <span class="mg-lbl">Var. Saldo</span>
+              <span class="mg-val">-</span>
+            </div>
+            <div class="mg-row">
+              <span class="mg-lbl">Dep./Retiros</span>
+              <span class="mg-val">-</span>
+            </div>
+          </div>
+        `;
         return;
       }
       const netArsStr = (block && block.real_delta != null) ? fmtDeltaARS(block.real_delta) : "-";
@@ -607,68 +654,163 @@
     }
   }
 
-  function renderRangeState(mainId, subId, block, label) {
-    putReturnCard(mainId, subId, block, label);
+  function renderRangeState(mainId, subId, block, label, options) {
+    putReturnCard(mainId, subId, block, label, options);
+  }
+
+  function qualityKindClass(kind) {
+    if (kind === "ok") return "health-ok";
+    if (kind === "warn") return "health-warn";
+    return "health-muted";
+  }
+
+  function buildQualityModel(ret, monthlyKpi, latestSnap) {
+    const periodBlocks = [
+      { key: "daily", label: "Día", block: ret && ret.daily },
+      { key: "weekly", label: "Semana", block: ret && ret.weekly },
+      { key: "monthly", label: "Mes", block: ret && ret.monthly },
+      { key: "yearly", label: "Año", block: ret && ret.yearly },
+      { key: "inception", label: "Desde inicio", block: ret && ret.inception },
+    ];
+
+    const warnSet = new Set();
+    const warnsBySource = [];
+    periodBlocks.forEach((item) => {
+      const warns = Array.isArray(item.block && item.block.quality_warnings) ? item.block.quality_warnings : [];
+      if (warns.length) {
+        warnsBySource.push(`${item.label}: ${warns.join(", ")}`);
+      }
+      warns.forEach((w) => warnSet.add(String(w)));
+    });
+
+    const monthlyWarns = Array.isArray(monthlyKpi && monthlyKpi.quality_warnings) ? monthlyKpi.quality_warnings : [];
+    if (monthlyWarns.length) warnsBySource.push(`KPI mensual: ${monthlyWarns.join(", ")}`);
+    monthlyWarns.forEach((w) => warnSet.add(String(w)));
+
+    const criticalWarns = ["CASH_MISSING", "ORDERS_INCOMPLETE", "INFERENCE_PARTIAL"];
+    const criticalCount = criticalWarns.filter((w) => warnSet.has(w)).length;
+    let qualityValue = "OK";
+    let qualityKind = "ok";
+    let qualityDetail = "No se detectan señales de riesgo en la inferencia.";
+    if (criticalCount > 0) {
+      qualityValue = `Revisar (${criticalCount})`;
+      qualityKind = "warn";
+      qualityDetail = "Se detectaron señales críticas de calidad que pueden requerir validación manual.";
+    } else if (warnSet.size > 0) {
+      qualityValue = "OK (sin operaciones)";
+      qualityKind = "info";
+      qualityDetail = "Hay señales informativas, pero sin impacto crítico sobre la inferencia.";
+    }
+
+    const ipcStatus = String((monthlyKpi && monthlyKpi.status) || "");
+    let ipcValue = "Sin dato";
+    let ipcKind = "info";
+    let ipcDetail = "No hay estado mensual de IPC disponible.";
+    if (ipcStatus === "ok" && monthlyKpi && monthlyKpi.inflation_projected) {
+      ipcValue = "Estimado";
+      ipcKind = "warn";
+      ipcDetail = "El IPC del mes actual es estimado con información parcial.";
+    } else if (ipcStatus === "ok") {
+      ipcValue = "OK";
+      ipcKind = "ok";
+      ipcDetail = "El cálculo mensual usa un dato IPC confirmado.";
+    } else if (ipcStatus === "inflation_unavailable") {
+      ipcValue = "No disponible";
+      ipcKind = "warn";
+      ipcDetail = "No se pudo obtener el IPC para el período evaluado.";
+    } else if (ipcStatus === "insufficient_snapshots") {
+      ipcValue = "Sin base mensual";
+      ipcKind = "info";
+      ipcDetail = "Faltan snapshots para construir una base mensual confiable.";
+    }
+
+    const coverageCount = periodBlocks.filter((x) => hasValidRange(x.block)).length;
+    const missingCoverage = periodBlocks.filter((x) => !hasValidRange(x.block)).map((x) => x.label);
+    let coverageKind = "info";
+    if (coverageCount >= 4) coverageKind = "ok";
+    else if (coverageCount >= 2) coverageKind = "warn";
+    const coverageDetail = missingCoverage.length
+      ? `Ventanas sin base válida: ${missingCoverage.join(", ")}.`
+      : "Todas las ventanas tienen base válida.";
+
+    const rel = latestSnap && latestSnap.retrieved_at ? relativeTime(latestSnap.retrieved_at) : null;
+    const updatedValue = rel ? `Actualizado ${rel}` : "Sin timestamp";
+    const updatedDetail = latestSnap && latestSnap.retrieved_at
+      ? `Último retrieval: ${latestSnap.retrieved_at}.`
+      : "No hay timestamp de actualización en el último snapshot.";
+
+    return {
+      rows: [
+        {
+          id: "quality_inference",
+          label: "Calidad de inferencia",
+          value: qualityValue,
+          kind: qualityKind,
+          detail: qualityDetail,
+          sources: warnsBySource.length ? warnsBySource : ["Sin warnings reportados por ventanas."],
+          codes: Array.from(warnSet).sort(),
+        },
+        {
+          id: "ipc_monthly",
+          label: "Estado IPC mensual",
+          value: ipcValue,
+          kind: ipcKind,
+          detail: ipcDetail,
+          sources: [
+            `Status KPI: ${ipcStatus || "n/a"}`,
+            `Mes KPI: ${String((monthlyKpi && monthlyKpi.month) || "-")}`,
+          ],
+          codes: monthlyWarns.map((w) => String(w)),
+        },
+        {
+          id: "coverage_windows",
+          label: "Cobertura de ventanas",
+          value: `${coverageCount}/5 con base valida`,
+          kind: coverageKind,
+          detail: coverageDetail,
+          sources: periodBlocks.map((x) => {
+            const b = x.block || {};
+            return `${x.label}: ${String(b.from || "-")} -> ${String(b.to || "-")}`;
+          }),
+          codes: [],
+        },
+        {
+          id: "updated_at",
+          label: "Ultima actualizacion",
+          value: updatedValue,
+          kind: "info",
+          detail: updatedDetail,
+          sources: [
+            `Snapshot: ${String((latestSnap && latestSnap.snapshot_date) || "-")}`,
+            `Retrieved_at: ${String((latestSnap && latestSnap.retrieved_at) || "-")}`,
+          ],
+          codes: [],
+        },
+      ],
+    };
   }
 
   function setHeroHealthStatus(rowId, label, value, kind) {
     const row = el(rowId);
     if (!row) return;
-    const cls = (kind === "ok") ? "health-ok" : ((kind === "warn") ? "health-warn" : "health-muted");
     row.innerHTML = `
       <div class="health-k">${label}</div>
-      <div class="health-v ${cls}">${value}</div>
+      <div class="health-v ${qualityKindClass(kind)}">${value}</div>
     `;
   }
 
   function renderHeroHealth(ret, monthlyKpi, latestSnap) {
-    const blocks = [
-      ret && ret.daily,
-      ret && ret.weekly,
-      ret && ret.monthly,
-      ret && ret.yearly,
-      ret && ret.ytd,
-    ];
-
-    const warnSet = new Set();
-    blocks.forEach((b) => {
-      const warns = Array.isArray(b && b.quality_warnings) ? b.quality_warnings : [];
-      warns.forEach((w) => warnSet.add(String(w)));
+    const model = buildQualityModel(ret, monthlyKpi, latestSnap);
+    const map = {
+      quality_inference: "heroQualityStatus",
+      ipc_monthly: "heroIpcStatus",
+      coverage_windows: "heroCoverageStatus",
+      updated_at: "heroUpdatedStatus",
+    };
+    (model.rows || []).forEach((row) => {
+      const id = map[row.id];
+      if (id) setHeroHealthStatus(id, row.label, row.value, row.kind);
     });
-    const monthlyWarns = Array.isArray(monthlyKpi && monthlyKpi.quality_warnings) ? monthlyKpi.quality_warnings : [];
-    monthlyWarns.forEach((w) => warnSet.add(String(w)));
-
-    const criticalWarns = ["CASH_MISSING", "ORDERS_INCOMPLETE", "INFERENCE_PARTIAL"];
-    const criticalCount = criticalWarns.filter((w) => warnSet.has(w)).length;
-    if (criticalCount > 0) {
-      setHeroHealthStatus("heroQualityStatus", "Calidad de inferencia", `Revisar (${criticalCount})`, "warn");
-    } else if (warnSet.size > 0) {
-      setHeroHealthStatus("heroQualityStatus", "Calidad de inferencia", "OK (sin operaciones)", "muted");
-    } else {
-      setHeroHealthStatus("heroQualityStatus", "Calidad de inferencia", "OK", "ok");
-    }
-
-    const status = String((monthlyKpi && monthlyKpi.status) || "");
-    if (status === "ok" && monthlyKpi && monthlyKpi.inflation_projected) {
-      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "Estimado", "warn");
-    } else if (status === "ok") {
-      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "OK", "ok");
-    } else if (status === "inflation_unavailable") {
-      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "No disponible", "warn");
-    } else if (status === "insufficient_snapshots") {
-      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "Sin base mensual", "muted");
-    } else {
-      setHeroHealthStatus("heroIpcStatus", "Estado IPC mensual", "Sin dato", "muted");
-    }
-
-    const coverageCount = blocks.filter((b) => hasValidRange(b)).length;
-    const coverageText = `${coverageCount}/5 con base valida`;
-    const coverageKind = coverageCount >= 4 ? "ok" : (coverageCount >= 2 ? "warn" : "muted");
-    setHeroHealthStatus("heroCoverageStatus", "Cobertura de ventanas", coverageText, coverageKind);
-
-    const rel = latestSnap && latestSnap.retrieved_at ? relativeTime(latestSnap.retrieved_at) : null;
-    const updatedText = rel ? `Actualizado ${rel}` : "Sin timestamp";
-    setHeroHealthStatus("heroUpdatedStatus", "Ultima actualizacion", updatedText, "muted");
   }
 
   function renderMonthVsInflationKpi(kpi) {
@@ -797,6 +939,214 @@
     node.className = "kpi-meta hero-window muted";
   }
 
+  function renderQualityStatusDetail(model, rowId) {
+    const root = el("qualityStatusDetail");
+    if (!root) return;
+    const rows = (model && model.rows) ? model.rows : [];
+    const row = rows.find((r) => r.id === rowId) || rows[0];
+    if (!row) {
+      root.innerHTML = `<div class="hint">Sin estado disponible.</div>`;
+      return;
+    }
+    const sources = Array.isArray(row.sources) ? row.sources : [];
+    const codes = Array.isArray(row.codes) ? row.codes : [];
+    const sourcesHtml = sources.length
+      ? `<ul class="quality-list-details">${sources.map((s) => `<li>${escHtml(s)}</li>`).join("")}</ul>`
+      : `<div class="hint">Sin señales fuente.</div>`;
+    const codesHtml = codes.length
+      ? `<div class="quality-code-row">${codes.map((c) => `<span class="quality-code">${escHtml(c)}</span>`).join("")}</div>`
+      : `<div class="hint">Sin códigos asociados.</div>`;
+    root.innerHTML = `
+      <div class="quality-detail-head">
+        <div class="quality-detail-title">${escHtml(row.label)}</div>
+        <div class="quality-detail-value ${qualityKindClass(row.kind)}">${escHtml(row.value)}</div>
+      </div>
+      <div class="quality-detail-text">${escHtml(row.detail || "-")}</div>
+      <div class="quality-detail-block">
+        <div class="quality-detail-label">Señales fuente</div>
+        ${sourcesHtml}
+      </div>
+      <div class="quality-detail-block">
+        <div class="quality-detail-label">Códigos</div>
+        ${codesHtml}
+      </div>
+    `;
+  }
+
+  function renderQualityStatusList(model) {
+    const root = el("qualityStatusList");
+    if (!root) return;
+    const rows = Array.isArray(model && model.rows) ? model.rows : [];
+    const level = String(qualityCtx.level || "all");
+    const filtered = rows.filter((r) => level === "all" || r.kind === level);
+    if (!filtered.length) {
+      root.innerHTML = `<div class="hint">No hay filas para el filtro seleccionado.</div>`;
+      renderQualityStatusDetail(model, null);
+      return;
+    }
+    if (!filtered.some((r) => r.id === qualityCtx.activeId)) {
+      qualityCtx.activeId = filtered[0].id;
+    }
+    root.innerHTML = filtered.map((row) => {
+      const isActive = row.id === qualityCtx.activeId;
+      return `
+        <button class="quality-item${isActive ? " active" : ""}" data-quality-id="${escAttr(row.id)}" type="button">
+          <span class="quality-item-main">
+            <span class="quality-item-label">${escHtml(row.label)}</span>
+            <span class="quality-item-value ${qualityKindClass(row.kind)}">${escHtml(row.value)}</span>
+          </span>
+          <span class="quality-item-sub">${escHtml(row.detail || "")}</span>
+        </button>
+      `;
+    }).join("");
+    renderQualityStatusDetail(model, qualityCtx.activeId);
+  }
+
+  function renderQualityEventsTable(rows) {
+    const root = el("qualityEventsTable");
+    if (!root) return;
+    const list = Array.isArray(rows) ? rows : [];
+    const onlyWarn = !!qualityCtx.warnOnly;
+    const q = String(qualityCtx.warnQuery || "").trim().toUpperCase();
+    const filtered = list.filter((r) => {
+      const warns = Array.isArray(r && r.quality_warnings) ? r.quality_warnings.map((w) => String(w)) : [];
+      if (onlyWarn && warns.length === 0) return false;
+      if (!q) return true;
+      const hay = warns.join(" ").toUpperCase();
+      return hay.includes(q);
+    });
+    if (!filtered.length) {
+      root.innerHTML = `<div class="hint">Sin eventos para los filtros elegidos.</div>`;
+      return;
+    }
+    const head = `
+      <th>Fecha</th>
+      <th>Etiqueta</th>
+      <th>Reason</th>
+      <th>Warnings</th>
+      <th class="num">Monto neto</th>
+      <th class="num">FX</th>
+      <th class="num">Imp. interno</th>
+      <th class="num">Imp. externo</th>
+    `;
+    const body = filtered.map((r) => {
+      const warns = Array.isArray(r && r.quality_warnings) ? r.quality_warnings.map((w) => String(w)) : [];
+      const warnText = warns.length ? warns.join(", ") : "-";
+      const label = String(r.display_label || r.display_kind || "-");
+      const reason = String(r.reason_code || "-");
+      return `
+        <tr>
+          <td>${escHtml(r.flow_date || "-")}</td>
+          <td>${escHtml(label)}</td>
+          <td><code>${escHtml(reason)}</code></td>
+          <td>${escHtml(warnText)}</td>
+          <td class="num ${signClass(r.amount_ars)}">${fmtDeltaARS(r.amount_ars)}</td>
+          <td class="num ${signClass(r.fx_revaluation_ars)}">${fmtDeltaARS(r.fx_revaluation_ars || 0)}</td>
+          <td class="num ${signClass(r.imported_internal_ars)}">${fmtDeltaARS(r.imported_internal_ars || 0)}</td>
+          <td class="num ${signClass(r.imported_external_ars)}">${fmtDeltaARS(r.imported_external_ars || 0)}</td>
+        </tr>
+      `;
+    }).join("");
+    root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  function getQualityDays() {
+    const wrap = el("qualityDaysButtons");
+    if (!wrap) return qualityCtx.days || 30;
+    const on = wrap.querySelector("button.on");
+    const d = parseInt(on ? on.getAttribute("data-days") : "", 10);
+    if (Number.isFinite(d) && d > 0) return d;
+    return qualityCtx.days || 30;
+  }
+
+  async function loadQualityEvents(days) {
+    const d = parseInt(days || 30, 10) || 30;
+    qualityCtx.days = d;
+    try {
+      const out = await fetchJSON(`/api/cashflows/auto?days=${encodeURIComponent(d)}`);
+      qualityCtx.events = (out && Array.isArray(out.rows)) ? out.rows : [];
+      renderQualityEventsTable(qualityCtx.events);
+    } catch (_) {
+      qualityCtx.events = [];
+      const root = el("qualityEventsTable");
+      if (root) root.innerHTML = `<div class="hint">No se pudieron cargar los eventos recientes.</div>`;
+    }
+  }
+
+  async function loadQualityPage() {
+    const [latest, ret, monthlyKpi] = await Promise.all([
+      fetchJSON("/api/latest").catch(() => null),
+      fetchJSON("/api/returns").catch(() => null),
+      fetchJSON("/api/kpi/monthly-vs-inflation").catch(() => null),
+    ]);
+    const snap = latest && latest.snapshot ? latest.snapshot : null;
+    const model = buildQualityModel(ret || {}, monthlyKpi || {}, snap);
+    qualityCtx.model = model;
+    if (!qualityCtx.activeId) {
+      const firstWarn = (model.rows || []).find((r) => r.kind === "warn");
+      qualityCtx.activeId = (firstWarn || (model.rows || [])[0] || {}).id || null;
+    }
+    renderQualityStatusList(model);
+    await Promise.all([
+      refreshManualCashflows(),
+      refreshAutoCashflows(30),
+    ]);
+  }
+
+  function initQualityPageControls() {
+    const severityWrap = el("qualitySeverityButtons");
+    if (severityWrap) {
+      severityWrap.addEventListener("click", (ev) => {
+        const btn = ev.target && ev.target.closest("button");
+        if (!btn) return;
+        const level = String(btn.getAttribute("data-level") || "all");
+        qualityCtx.level = level;
+        Array.from(severityWrap.querySelectorAll("button")).forEach((b) => b.classList.remove("on"));
+        btn.classList.add("on");
+        renderQualityStatusList(qualityCtx.model || { rows: [] });
+      });
+    }
+
+    const list = el("qualityStatusList");
+    if (list) {
+      list.addEventListener("click", (ev) => {
+        const btn = ev.target && ev.target.closest("button[data-quality-id]");
+        if (!btn) return;
+        qualityCtx.activeId = String(btn.getAttribute("data-quality-id") || "");
+        renderQualityStatusList(qualityCtx.model || { rows: [] });
+      });
+    }
+
+    const daysWrap = el("qualityDaysButtons");
+    if (daysWrap) {
+      daysWrap.addEventListener("click", async (ev) => {
+        const btn = ev.target && ev.target.closest("button");
+        if (!btn) return;
+        const days = parseInt(btn.getAttribute("data-days") || "", 10);
+        if (!Number.isFinite(days) || days <= 0) return;
+        Array.from(daysWrap.querySelectorAll("button")).forEach((b) => b.classList.remove("on"));
+        btn.classList.add("on");
+        await loadQualityEvents(days);
+      });
+    }
+
+    const warnOnly = el("qualityWarnOnly");
+    if (warnOnly) {
+      warnOnly.addEventListener("change", () => {
+        qualityCtx.warnOnly = !!warnOnly.checked;
+        renderQualityEventsTable(qualityCtx.events || []);
+      });
+    }
+
+    const search = el("qualityWarnSearch");
+    if (search) {
+      search.addEventListener("input", () => {
+        qualityCtx.warnQuery = String(search.value || "");
+        renderQualityEventsTable(qualityCtx.events || []);
+      });
+    }
+  }
+
   function renderManualCashflows(rows) {
     const root = el("tblCashflowsManual");
     if (!root) return;
@@ -868,9 +1218,9 @@
       const residual = calcResidualRatio(row);
       if (k === "withdraw" && residual != null && residual <= 0.03) {
         return {
-          label: "Costo operativo probable",
+          label: "Costo/Impuesto operativo",
           className: "row-badge row-badge-operational",
-          detail: "Residual chico vs volumen operado (\u22643%).",
+          detail: "Salida interna probable por costos/impuestos.",
         };
       }
       const amount = toNumber(row && row.amount_ars);
@@ -886,10 +1236,14 @@
       const label = String((row && row.display_label) || "").trim();
       if (!dk && !label) return null;
       const cls = {
-        correction: "row-badge row-badge-correction",
-        operational_cost_probable: "row-badge row-badge-operational",
-        rotation_probable: "row-badge row-badge-rotation",
-        external_flow_probable: "row-badge row-badge-external",
+        correction_unknown: "row-badge row-badge-correction",
+        operational_fee_or_tax: "row-badge row-badge-operational",
+        dividend_or_coupon_income: "row-badge row-badge-income",
+        rotation_internal: "row-badge row-badge-rotation",
+        settlement_carryover: "row-badge row-badge-settlement",
+        fx_revaluation_usd_cash: "row-badge row-badge-fx",
+        external_deposit_probable: "row-badge row-badge-external",
+        external_withdraw_probable: "row-badge row-badge-external",
       };
       return {
         label: label || "-",
@@ -919,17 +1273,24 @@
       const hasWarn = warns.length > 0;
       const warnTxt = hasWarn ? warns.join(", ") : "-";
       const kind = kindMeta(r);
+      const compDetail = [
+        `Ext final ${fmtDeltaARS(r.external_final_ars != null ? r.external_final_ars : r.amount_ars)}`,
+        `Ext raw ${fmtDeltaARS(r.external_raw_ars || 0)}`,
+        `FX ${fmtDeltaARS(r.fx_revaluation_ars || 0)}`,
+        `Imp int ${fmtDeltaARS(r.imported_internal_ars || 0)}`,
+        `Imp ext ${fmtDeltaARS(r.imported_external_ars || 0)}`,
+      ].join(" | ");
+      const tooltip = [kind.detail, compDetail].filter(Boolean).join(" | ");
       const warnBadge = hasWarn
         ? `<span class="row-badge row-badge-correction">${warnTxt}</span>`
         : `<span class="muted">-</span>`;
       const kindCell = kind.className
-        ? `<span class="${kind.className}">${kind.label}</span>`
-        : (kind.label || "-");
-      const kindDetail = kind.detail ? `<div class="row-subhint">${kind.detail}</div>` : "";
+        ? `<span class="${kind.className}" title="${escAttr(tooltip)}">${kind.label}</span>`
+        : `<span title="${escAttr(tooltip)}">${kind.label || "-"}</span>`;
       return `
         <tr>
           <td>${r.flow_date || "-"}</td>
-          <td>${kindCell}${kindDetail}</td>
+          <td>${kindCell}</td>
           <td class="num ${signClass(r.amount_ars)}">${fmtDeltaARS(r.amount_ars)}</td>
           <td class="num ${signClass(r.cash_delta_ars)}">${fmtDeltaARS(r.cash_delta_ars)}</td>
           <td class="num">${fmtDeltaARS(r.buy_amount_ars || 0)}</td>
@@ -1073,15 +1434,15 @@
       `;
     }
 
-    renderRangeState("retWeekly", "retWeeklySub", ret.weekly, "7 dias");
-    renderRangeState("retMonthly", "retMonthlySub", ret.monthly, "30 dias");
-    renderRangeState("retYtd", "retYtdSub", ret.ytd, "YTD");
-    renderRangeState("retYearly", "retYearlySub", ret.yearly, "Ano");
+    const horizonsOpts = { allowPartialRange: true, suppressEmptyState: true };
+    renderRangeState("retWeekly", "retWeeklySub", ret.weekly, "7 dias", horizonsOpts);
+    renderRangeState("retMonthly", "retMonthlySub", ret.monthly, "Mes", horizonsOpts);
+    renderRangeState("retYearly", "retYearlySub", ret.yearly, "Ano", horizonsOpts);
+    renderRangeState("retInception", "retInceptionSub", ret.inception, "Desde inicio", horizonsOpts);
     renderMonthVsInflationKpi(monthlyKpi);
     renderHeroMonthInsights(monthlyKpi);
     renderWindowStatus("heroDailyWindow", daily);
     renderWindowStatus("heroMonthlyWindow", monthlyKpi);
-    renderHeroHealth(ret, monthlyKpi, snap);
 
     // Keep compact inflation card aligned with the same monthly KPI used in the hero cards.
     renderInflationCompactFromKpi("tblInflationCompare", monthlyKpi);
@@ -1770,6 +2131,10 @@
     initAssetPerformanceControls();
     initAssetPickerControls();
     if (el("chartTotal")) loadDashboard(getActiveRange());
+    if (el("qualityStatusList")) {
+      initQualityPageControls();
+      loadQualityPage();
+    }
     if (el("assetsTable")) loadAssetsPage();
     if (el("chartHistory")) loadHistoryPage();
   });
