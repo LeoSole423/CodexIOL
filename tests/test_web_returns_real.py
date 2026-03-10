@@ -76,6 +76,23 @@ def _mk_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE account_cash_movements (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          movement_id TEXT,
+          occurred_at TEXT,
+          movement_date TEXT NOT NULL,
+          currency TEXT NOT NULL,
+          amount REAL NOT NULL,
+          kind TEXT NOT NULL,
+          description TEXT,
+          source TEXT,
+          raw_json TEXT,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     return conn, path
 
@@ -120,6 +137,10 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertAlmostEqual(daily["real_delta"], 0.0)
             self.assertAlmostEqual(daily["real_pct"], 0.0)
             self.assertIn("ORDERS_NONE", daily.get("quality_warnings") or [])
+            self.assertEqual(daily.get("flow_confidence"), "low")
+            self.assertTrue(bool(daily.get("estimated")))
+            self.assertEqual((daily.get("orders_coverage") or {}).get("status"), "none")
+            self.assertEqual((daily.get("movements_coverage") or {}).get("status"), "none")
         finally:
             _cleanup(conn, path)
 
@@ -151,6 +172,7 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertAlmostEqual(daily["flow_inferred_ars"], 0.0)
             self.assertAlmostEqual(daily["real_delta"], 0.0)
             self.assertAlmostEqual(daily["real_pct"], 0.0)
+            self.assertEqual(daily.get("flow_confidence"), "medium")
         finally:
             _cleanup(conn, path)
 
@@ -182,6 +204,49 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertAlmostEqual(daily["flow_total_ars"], 60.0)
             self.assertAlmostEqual(daily["real_delta"], -10.0)
             self.assertAlmostEqual(daily["real_pct"], -10.0)
+        finally:
+            _cleanup(conn, path)
+
+    def test_returns_with_imported_cashflow_is_high_confidence(self):
+        conn, path = _mk_db()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars)
+                VALUES(?,?,?,?)
+                """,
+                [
+                    ("2026-02-17", 100.0, 20.0, 20.0),
+                    ("2026-02-18", 150.0, 70.0, 70.0),
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO account_cash_movements(
+                  movement_id,occurred_at,movement_date,currency,amount,kind,description,source,raw_json,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "m1",
+                    "2026-02-18T10:00:00",
+                    "2026-02-18",
+                    "ARS",
+                    50.0,
+                    "external_deposit",
+                    "aporte",
+                    "test",
+                    "{}",
+                    "2026-02-18T12:00:00Z",
+                ),
+            )
+            conn.commit()
+            os.environ["IOL_DB_PATH"] = path
+            out = returns()
+            daily = out["daily"]
+            self.assertEqual(daily.get("flow_confidence"), "high")
+            self.assertFalse(bool(daily.get("estimated")))
+            self.assertEqual((daily.get("movements_coverage") or {}).get("rows_count"), 1)
+            self.assertEqual((daily.get("movements_coverage") or {}).get("status"), "imported")
         finally:
             _cleanup(conn, path)
 

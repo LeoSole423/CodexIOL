@@ -259,7 +259,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             error_message TEXT,
             config_json TEXT NOT NULL,
-            pipeline_warnings_json TEXT
+            pipeline_warnings_json TEXT,
+            run_metrics_json TEXT
         )
         """
     )
@@ -286,6 +287,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             trusted_refs_count INTEGER,
             consensus_state TEXT,
             decision_gate TEXT,
+            candidate_status TEXT,
             evidence_summary_json TEXT,
             FOREIGN KEY(run_id) REFERENCES advisor_opportunity_runs(id)
         )
@@ -386,7 +388,15 @@ def init_db(conn: sqlite3.Connection) -> None:
             "trusted_refs_count": "INTEGER",
             "consensus_state": "TEXT",
             "decision_gate": "TEXT",
+            "candidate_status": "TEXT",
             "evidence_summary_json": "TEXT",
+        },
+    )
+    ensure_columns(
+        conn,
+        "advisor_opportunity_runs",
+        {
+            "run_metrics_json": "TEXT",
         },
     )
 

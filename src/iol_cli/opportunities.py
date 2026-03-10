@@ -422,6 +422,7 @@ def evidence_stats(rows: Sequence[Dict[str, Any]], as_of: str) -> Dict[str, Any]
     d_asof = date.fromisoformat(as_of)
     recent_45: List[Dict[str, Any]] = []
     recent_14: List[Dict[str, Any]] = []
+    freshest_age_days: Optional[int] = None
     for r in rows:
         raw = str(r.get("retrieved_at_utc") or "")
         if len(raw) < 10:
@@ -433,6 +434,8 @@ def evidence_stats(rows: Sequence[Dict[str, Any]], as_of: str) -> Dict[str, Any]
         delta = (d_asof - rd).days
         if delta < 0:
             continue
+        if freshest_age_days is None or delta < freshest_age_days:
+            freshest_age_days = int(delta)
         if delta <= 45:
             recent_45.append(dict(r))
         if delta <= 14:
@@ -480,7 +483,9 @@ def evidence_stats(rows: Sequence[Dict[str, Any]], as_of: str) -> Dict[str, Any]
         (str(r.get("confidence") or "").strip().lower() in ("medium", "high")) for r in recent_14
     )
     trusted_ref_keys = set()
+    fresh_trusted_ref_keys = set()
     trusted_rows: List[Dict[str, Any]] = []
+    fresh_trusted_rows: List[Dict[str, Any]] = []
     stances: List[float] = []
     has_bullish = False
     has_bearish = False
@@ -498,39 +503,53 @@ def evidence_stats(rows: Sequence[Dict[str, Any]], as_of: str) -> Dict[str, Any]
             str(r.get("published_date") or "").strip().lower(),
         )
         trusted_ref_keys.add(key)
+        raw = str(r.get("retrieved_at_utc") or "")
+        rd = date.fromisoformat(raw[:10])
+        age_days = (d_asof - rd).days
+        max_age = 120 if tier == "official" else 10
+        if age_days <= max_age:
+            fresh_trusted_rows.append(r)
+            fresh_trusted_ref_keys.add(key)
         stance = str(n.get("stance") or "").strip().lower()
         conf = str(r.get("confidence") or "").strip().lower()
         conf_mult = 1.0 if conf == "high" else (0.6 if conf == "medium" else 0.3)
-        if stance == "bullish":
-            stances.append(1.0 * conf_mult)
-            has_bullish = True
-        elif stance == "bearish":
-            stances.append(-1.0 * conf_mult)
-            has_bearish = True
-        else:
-            stances.append(0.0)
-            has_neutral = True
+        if age_days <= max_age:
+            if stance == "bullish":
+                stances.append(1.0 * conf_mult)
+                has_bullish = True
+            elif stance == "bearish":
+                stances.append(-1.0 * conf_mult)
+                has_bearish = True
+            else:
+                stances.append(0.0)
+                has_neutral = True
 
     expert_signal = 50.0
     if stances:
         avg = sum(stances) / float(len(stances))
         expert_signal = clamp(50.0 + avg * 50.0, 0.0, 100.0)
     trusted_refs_count = len(trusted_ref_keys)
+    fresh_trusted_refs_count = len(fresh_trusted_ref_keys)
 
-    if has_bullish and has_bearish:
+    if fresh_trusted_refs_count <= 0:
+        consensus_state = "insufficient"
+    elif has_bullish and has_bearish:
         consensus_state = "conflict"
     elif (has_bullish and has_neutral) or (has_bearish and has_neutral):
         consensus_state = "mixed"
-    elif has_bullish or has_bearish:
+    elif has_bullish or has_bearish or has_neutral:
         consensus_state = "aligned"
     else:
-        consensus_state = "mixed"
+        consensus_state = "insufficient"
 
     evidence_summary = {
         "trusted_refs_count": trusted_refs_count,
         "trusted_rows_count": len(trusted_rows),
+        "fresh_trusted_refs_count": fresh_trusted_refs_count,
+        "fresh_trusted_rows_count": len(fresh_trusted_rows),
         "consensus_state": consensus_state,
         "expert_signal_score": expert_signal,
+        "freshest_age_days": freshest_age_days,
     }
     return {
         "catalyst_score": catalyst,
@@ -538,9 +557,66 @@ def evidence_stats(rows: Sequence[Dict[str, Any]], as_of: str) -> Dict[str, Any]
         "has_recent_catalyst": has_recent_catalyst,
         "unresolved_conflict": bool(unresolved or consensus_state == "conflict"),
         "trusted_refs_count": trusted_refs_count,
+        "fresh_trusted_refs_count": fresh_trusted_refs_count,
         "expert_signal_score": expert_signal,
         "consensus_state": consensus_state,
+        "freshest_age_days": freshest_age_days,
         "evidence_summary_json": json.dumps(evidence_summary, ensure_ascii=True, sort_keys=True),
+    }
+
+
+def _percentile_score(values: Sequence[float], value: float) -> float:
+    vals = sorted(float(v) for v in values)
+    if not vals:
+        return 50.0
+    if len(vals) == 1:
+        return 100.0
+    last_idx = 0
+    for idx, cur in enumerate(vals):
+        if float(cur) <= float(value):
+            last_idx = idx
+        else:
+            break
+    return clamp((float(last_idx) / float(len(vals) - 1)) * 100.0, 0.0, 100.0)
+
+
+def summarize_run_metrics(candidates: Sequence["OpportunityCandidate"]) -> Dict[str, Any]:
+    rows = list(candidates or [])
+    scores = [float(c.score_total) for c in rows]
+    mean_score = sum(scores) / float(len(scores)) if scores else 0.0
+    variance = sum((s - mean_score) ** 2 for s in scores) / float(len(scores)) if scores else 0.0
+    stddev = variance ** 0.5
+    operable = [c for c in rows if str(c.candidate_status) == "operable"]
+    watchlist = [c for c in rows if str(c.candidate_status) == "watchlist"]
+    manual = [c for c in rows if str(c.candidate_status) == "manual_review"]
+    rejected = [c for c in rows if str(c.candidate_status) == "rejected"]
+    fresh_refs = 0
+    freshest_days: List[int] = []
+    for c in rows:
+        summary = _parse_notes_json(c.evidence_summary_json)
+        fresh_refs += int(summary.get("fresh_trusted_refs_count") or 0)
+        age = summary.get("freshest_age_days")
+        if age is not None:
+            try:
+                freshest_days.append(int(age))
+            except Exception:
+                pass
+    total = len(rows)
+    return {
+        "candidate_count": total,
+        "operable_count": len(operable),
+        "watchlist_count": len(watchlist),
+        "manual_review_count": len(manual),
+        "rejected_count": len(rejected),
+        "score_mean": mean_score,
+        "score_stddev": stddev,
+        "score_dispersion": (max(scores) - min(scores)) if scores else 0.0,
+        "operable_ratio": (len(operable) / float(total)) if total else 0.0,
+        "watchlist_ratio": (len(watchlist) / float(total)) if total else 0.0,
+        "rejected_ratio": (len(rejected) / float(total)) if total else 0.0,
+        "fresh_evidence_ratio": (sum(1 for c in rows if int(c.trusted_refs_count or 0) > 0) / float(total)) if total else 0.0,
+        "fresh_trusted_refs_total": fresh_refs,
+        "latest_evidence_age_days_avg": (sum(freshest_days) / float(len(freshest_days))) if freshest_days else None,
     }
 
 
@@ -602,6 +678,7 @@ class OpportunityCandidate:
     trusted_refs_count: int
     consensus_state: str
     decision_gate: str
+    candidate_status: str
     evidence_summary_json: str
     liquidity_score: float
     sector_bucket: str
@@ -628,6 +705,7 @@ class OpportunityCandidate:
             "trusted_refs_count": self.trusted_refs_count,
             "consensus_state": self.consensus_state,
             "decision_gate": self.decision_gate,
+            "candidate_status": self.candidate_status,
             "evidence_summary_json": self.evidence_summary_json,
             "liquidity_score": self.liquidity_score,
             "sector_bucket": self.sector_bucket,
@@ -655,7 +733,7 @@ def build_candidates(
     max_per_sector: int = 0,
 ) -> List[OpportunityCandidate]:
     mode_n = (mode or "").strip().lower()
-    out: List[OpportunityCandidate] = []
+    staged: List[Dict[str, Any]] = []
     for symbol, m in latest_metrics.items():
         in_port = float(holdings_value_by_symbol.get(symbol, 0.0) or 0.0) > 0.0
         candidate_type = None
@@ -676,13 +754,13 @@ def build_candidates(
         sector_bucket = _infer_sector_bucket(symbol, ev)
         is_crypto = bool(_is_crypto_symbol_hint(symbol) or sector_bucket == "crypto")
         dd = drawdown_pct(s, as_of)
-        v_score = value_score(s, as_of)
-        m_score = momentum_score(s, as_of)
-        c_score = float(evs["catalyst_score"])
+        v_score_raw = value_score(s, as_of)
+        m_score_raw = momentum_score(s, as_of)
+        c_score_raw = float(evs["catalyst_score"])
         expert_score = float(evs.get("expert_signal_score") or 50.0)
-        c_final = 0.6 * c_score + 0.4 * expert_score if apply_expert_overlay else c_score
-        trusted_refs_count = int(evs.get("trusted_refs_count") or 0)
-        consensus_state = str(evs.get("consensus_state") or "mixed")
+        c_final_raw = 0.6 * c_score_raw + 0.4 * expert_score if apply_expert_overlay else c_score_raw
+        trusted_refs_count = int(evs.get("fresh_trusted_refs_count") or evs.get("trusted_refs_count") or 0)
+        consensus_state = str(evs.get("consensus_state") or "insufficient")
         decision_gate = "manual_review" if (consensus_state == "conflict" and conflict_mode == "manual_review") else "auto"
         cur_w = 0.0
         if portfolio_total_ars > 0:
@@ -752,7 +830,6 @@ def build_candidates(
             flags.append("EVIDENCE_CONFLICT")
             risk_penalty += 10.0
         if int(min_trusted_refs) > 0 and trusted_refs_count < int(min_trusted_refs):
-            hard_ok = False
             flags.append("EVIDENCE_INSUFFICIENT")
 
         # Rebuy rule = buy the dip + thesis valid + no unresolved conflict.
@@ -762,8 +839,7 @@ def build_candidates(
             if not dip_ok or not thesis_ok:
                 continue
 
-        risk_score = clamp(100.0 - risk_penalty, 0.0, 100.0)
-        total = 0.35 * risk_score + 0.20 * v_score + 0.35 * m_score + 0.10 * c_final
+        risk_score_raw = clamp(100.0 - risk_penalty, 0.0, 100.0)
 
         last_price = _safe_float(m.get("last_price"))
         entry_low = None
@@ -781,42 +857,102 @@ def build_candidates(
             if dd is not None
             else f"{candidate_type} | dd20=NA "
         )
-        reason += (
-            f"| risk={risk_score:.1f} value={v_score:.1f} momentum={m_score:.1f} "
-            f"catalyst={c_final:.1f} catalyst_base={c_score:.1f} expert={expert_score:.1f}"
+        staged.append(
+            {
+                "symbol": symbol,
+                "candidate_type": candidate_type,
+                "entry_low": entry_low,
+                "entry_high": entry_high,
+                "flags": list(flags),
+                "filters_passed": 1 if hard_ok else 0,
+                "current_weight_pct": cur_w,
+                "expert_signal_score": expert_score,
+                "trusted_refs_count": trusted_refs_count,
+                "consensus_state": consensus_state,
+                "decision_gate": decision_gate,
+                "evidence_summary_json": str(evs.get("evidence_summary_json") or "{}"),
+                "liquidity_score": float(liq_score),
+                "sector_bucket": sector_bucket,
+                "is_crypto_proxy": 1 if is_crypto else 0,
+                "score_risk_raw": float(risk_score_raw),
+                "score_value_raw": float(v_score_raw),
+                "score_momentum_raw": float(m_score_raw),
+                "score_catalyst_raw": float(c_final_raw),
+                "score_catalyst_base_raw": float(c_score_raw),
+                "dd": dd,
+            }
+        )
+
+    if not staged:
+        return []
+
+    risk_values = [float(r["score_risk_raw"]) for r in staged]
+    value_values = [float(r["score_value_raw"]) for r in staged]
+    momentum_values = [float(r["score_momentum_raw"]) for r in staged]
+    catalyst_values = [float(r["score_catalyst_raw"]) for r in staged]
+
+    out: List[OpportunityCandidate] = []
+    for r in staged:
+        risk_score = _percentile_score(risk_values, float(r["score_risk_raw"]))
+        v_score = _percentile_score(value_values, float(r["score_value_raw"]))
+        m_score = _percentile_score(momentum_values, float(r["score_momentum_raw"]))
+        c_final = _percentile_score(catalyst_values, float(r["score_catalyst_raw"]))
+        total = 0.35 * risk_score + 0.20 * v_score + 0.35 * m_score + 0.10 * c_final
+
+        flags = list(r.get("flags") or [])
+        candidate_status = "operable"
+        if int(r.get("filters_passed") or 0) != 1:
+            candidate_status = "rejected"
+        elif str(r.get("decision_gate") or "").strip().lower() == "manual_review":
+            candidate_status = "manual_review"
+        elif "EVIDENCE_INSUFFICIENT" in flags or str(r.get("consensus_state") or "") == "insufficient":
+            candidate_status = "watchlist"
+
+        dd = r.get("dd")
+        reason = (
+            f"{r.get('candidate_type')} | dd20={float(dd):.2f}% "
+            if dd is not None
+            else f"{r.get('candidate_type')} | dd20=NA "
         )
         reason += (
-            f" | refs={trusted_refs_count} consensus={consensus_state} gate={decision_gate} "
-            f"liq={liq_score:.1f} sector={sector_bucket}"
+            f"| risk={risk_score:.1f} value={v_score:.1f} momentum={m_score:.1f} "
+            f"catalyst={c_final:.1f} catalyst_base={float(r.get('score_catalyst_base_raw') or 0.0):.1f} "
+            f"expert={float(r.get('expert_signal_score') or 0.0):.1f}"
+        )
+        reason += (
+            f" | refs={int(r.get('trusted_refs_count') or 0)} consensus={r.get('consensus_state')} "
+            f"gate={r.get('decision_gate')} status={candidate_status} liq={float(r.get('liquidity_score') or 0.0):.1f} "
+            f"sector={r.get('sector_bucket')}"
         )
         if flags:
             reason += f" | flags={','.join(flags)}"
 
         out.append(
             OpportunityCandidate(
-                symbol=symbol,
-                candidate_type=candidate_type,
+                symbol=str(r.get("symbol") or ""),
+                candidate_type=str(r.get("candidate_type") or "new"),
                 score_total=float(total),
                 score_risk=float(risk_score),
                 score_value=float(v_score),
                 score_momentum=float(m_score),
                 score_catalyst=float(c_final),
-                entry_low=entry_low,
-                entry_high=entry_high,
+                entry_low=r.get("entry_low"),
+                entry_high=r.get("entry_high"),
                 suggested_weight_pct=None,
                 suggested_amount_ars=None,
                 reason_summary=reason,
                 risk_flags_json=str(flags).replace("'", '"'),
-                filters_passed=1 if hard_ok else 0,
-                current_weight_pct=cur_w,
-                expert_signal_score=expert_score,
-                trusted_refs_count=trusted_refs_count,
-                consensus_state=consensus_state,
-                decision_gate=decision_gate,
-                evidence_summary_json=str(evs.get("evidence_summary_json") or "{}"),
-                liquidity_score=float(liq_score),
-                sector_bucket=sector_bucket,
-                is_crypto_proxy=1 if is_crypto else 0,
+                filters_passed=int(r.get("filters_passed") or 0),
+                current_weight_pct=float(r.get("current_weight_pct") or 0.0),
+                expert_signal_score=float(r.get("expert_signal_score") or 0.0),
+                trusted_refs_count=int(r.get("trusted_refs_count") or 0),
+                consensus_state=str(r.get("consensus_state") or "insufficient"),
+                decision_gate=str(r.get("decision_gate") or "auto"),
+                candidate_status=candidate_status,
+                evidence_summary_json=str(r.get("evidence_summary_json") or "{}"),
+                liquidity_score=float(r.get("liquidity_score") or 0.0),
+                sector_bucket=str(r.get("sector_bucket") or "unknown"),
+                is_crypto_proxy=int(r.get("is_crypto_proxy") or 0),
             )
         )
 
@@ -829,9 +965,9 @@ def build_candidates(
         )
     )
 
-    operable = [c for c in out if c.filters_passed == 1 and c.score_total >= 50.0]
+    operable = [c for c in out if c.candidate_status == "operable" and c.score_total >= 50.0]
     if not operable:
-        operable = [c for c in out if c.filters_passed == 1]
+        operable = [c for c in out if c.candidate_status == "operable"]
     selected: List[OpportunityCandidate] = []
     sector_cap = int(max_per_sector)
     sector_counts: Dict[str, int] = {}
@@ -902,13 +1038,16 @@ def report_markdown(
     budget = _safe_float(run.get("budget_ars")) or 0.0
     top_n = int(run.get("top_n") or 0)
     rows = list(candidates or [])
-    top_weighted = [
-        r
-        for r in rows
-        if int(r.get("filters_passed") or 0) == 1 and r.get("suggested_weight_pct") is not None
-    ]
-    top = top_weighted[:top_n] if top_weighted else [r for r in rows if int(r.get("filters_passed") or 0) == 1][:top_n]
-    manual = [r for r in rows if str(r.get("decision_gate") or "").strip().lower() == "manual_review"][:top_n]
+    run_metrics = _parse_notes_json(run.get("run_metrics_json"))
+    operable = [
+        r for r in rows if str(r.get("candidate_status") or "").strip().lower() == "operable"
+    ][:top_n]
+    watchlist = [
+        r for r in rows if str(r.get("candidate_status") or "").strip().lower() in ("watchlist", "manual_review")
+    ][:top_n]
+    rejected = [
+        r for r in rows if str(r.get("candidate_status") or "").strip().lower() == "rejected"
+    ][:top_n]
     lines: List[str] = []
     lines.append("# Oportunidades de Portafolio (Semanal)")
     lines.append("")
@@ -918,47 +1057,64 @@ def report_markdown(
     lines.append(f"- `budget_ars`: {budget:,.2f}".replace(",", "."))
     if run.get("pipeline_warnings_json"):
         lines.append(f"- `pipeline_warnings_json`: {run.get('pipeline_warnings_json')}")
-    lines.append("")
-    lines.append("## Top candidatos operables")
-    if not top:
-        lines.append("- Sin candidatos operables para este run.")
-        return "\n".join(lines) + "\n"
-
-    lines.append("")
-    lines.append("| Symbol | Tipo | Score | Entry Low | Entry High | Weight % | Amount ARS | trusted_refs | expert_signal | consensus_state | decision_gate |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
-    for r in top:
+    if run_metrics:
         lines.append(
-            "| {sym} | {typ} | {sc:.2f} | {el} | {eh} | {w} | {amt} | {refs} | {expert} | {consensus} | {gate} |".format(
-                sym=r.get("symbol"),
-                typ=r.get("candidate_type"),
-                sc=float(r.get("score_total") or 0.0),
-                el=("-" if r.get("entry_low") is None else f"{float(r.get('entry_low')):.2f}"),
-                eh=("-" if r.get("entry_high") is None else f"{float(r.get('entry_high')):.2f}"),
-                w=("-" if r.get("suggested_weight_pct") is None else f"{float(r.get('suggested_weight_pct')):.2f}"),
-                amt=("-" if r.get("suggested_amount_ars") is None else f"{float(r.get('suggested_amount_ars')):.2f}"),
-                refs=int(r.get("trusted_refs_count") or 0),
-                expert=f"{float(r.get('expert_signal_score') or 0.0):.1f}",
-                consensus=str(r.get("consensus_state") or "-"),
-                gate=str(r.get("decision_gate") or "auto"),
+            "- `run_metrics`: dispersion={disp:.2f} | operable_ratio={opr:.1%} | watchlist_ratio={wr:.1%} | fresh_evidence_ratio={fr:.1%}".format(
+                disp=float(run_metrics.get("score_dispersion") or 0.0),
+                opr=float(run_metrics.get("operable_ratio") or 0.0),
+                wr=float(run_metrics.get("watchlist_ratio") or 0.0),
+                fr=float(run_metrics.get("fresh_evidence_ratio") or 0.0),
             )
         )
-    if manual:
+    lines.append("")
+    lines.append("## Operables")
+    if not operable:
+        lines.append("- Sin candidatos operables para este run.")
+    else:
         lines.append("")
-        lines.append("## Candidatos con decision manual")
-        for r in manual:
+        lines.append("| Symbol | Tipo | Estado | Score | Entry Low | Entry High | Weight % | Amount ARS | refs frescas | consenso |")
+        lines.append("|---|---:|---|---:|---:|---:|---:|---:|---:|---|")
+        for r in operable:
             lines.append(
-                "- **{sym}**: conflicto de referentes o alta incertidumbre. "
-                "Estado=`{gate}` consensus=`{consensus}` refs={refs}".format(
+                "| {sym} | {typ} | {status} | {sc:.2f} | {el} | {eh} | {w} | {amt} | {refs} | {consensus} |".format(
                     sym=r.get("symbol"),
-                    gate=r.get("decision_gate") or "manual_review",
-                    consensus=r.get("consensus_state") or "conflict",
+                    typ=r.get("candidate_type"),
+                    status=r.get("candidate_status") or "operable",
+                    sc=float(r.get("score_total") or 0.0),
+                    el=("-" if r.get("entry_low") is None else f"{float(r.get('entry_low')):.2f}"),
+                    eh=("-" if r.get("entry_high") is None else f"{float(r.get('entry_high')):.2f}"),
+                    w=("-" if r.get("suggested_weight_pct") is None else f"{float(r.get('suggested_weight_pct')):.2f}"),
+                    amt=("-" if r.get("suggested_amount_ars") is None else f"{float(r.get('suggested_amount_ars')):.2f}"),
                     refs=int(r.get("trusted_refs_count") or 0),
+                    consensus=str(r.get("consensus_state") or "-"),
+                )
+            )
+
+    lines.append("")
+    lines.append("## Watchlist por falta de evidencia o revisión manual")
+    if not watchlist:
+        lines.append("- Sin candidatos en watchlist.")
+    else:
+        for r in watchlist:
+            lines.append(
+                "- **{sym}**: estado=`{status}` consensus=`{consensus}` refs={refs} motivo={reason}".format(
+                    sym=r.get("symbol"),
+                    status=r.get("candidate_status") or "watchlist",
+                    consensus=r.get("consensus_state") or "insufficient",
+                    refs=int(r.get("trusted_refs_count") or 0),
+                    reason=r.get("reason_summary") or "-",
                 )
             )
     lines.append("")
+    lines.append("## Rechazados por riesgo/liquidez")
+    if not rejected:
+        lines.append("- Sin rechazados destacados.")
+    else:
+        for r in rejected:
+            lines.append(f"- **{r.get('symbol')}**: {r.get('reason_summary')}")
+    lines.append("")
     lines.append("## Razones y riesgos")
-    for r in top:
+    for r in operable:
         lines.append(f"- **{r.get('symbol')}**: {r.get('reason_summary')}")
     lines.append("")
     lines.append("Nota: esto no ejecuta ordenes reales; usar simulacion y confirmacion explicita.")

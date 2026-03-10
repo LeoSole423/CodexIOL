@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import calendar
-from datetime import date
+from datetime import date, datetime, timezone
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Query
@@ -156,6 +157,118 @@ def _aggregate_imported_movements(
     }
 
 
+def _snapshot_data_freshness(snap: Optional[dbmod.Snapshot]) -> Dict[str, Any]:
+    if not snap:
+        return {"status": "missing", "days_stale": None, "snapshot_date": None, "retrieved_at": None}
+    days_stale = None
+    try:
+        days_stale = max(0, (date.today() - date.fromisoformat(snap.snapshot_date)).days)
+    except Exception:
+        days_stale = None
+    status = "fresh"
+    if days_stale is None:
+        status = "unknown"
+    elif days_stale > 3:
+        status = "stale"
+    elif days_stale > 1:
+        status = "aging"
+    return {
+        "status": status,
+        "days_stale": days_stale,
+        "snapshot_date": snap.snapshot_date,
+        "retrieved_at": snap.retrieved_at,
+    }
+
+
+def _orders_coverage_payload(stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    s = dict(stats or {})
+    total = int(s.get("total", 0) or 0)
+    ignored = int(s.get("ignored", 0) or 0)
+    effective_total = max(0, total - ignored)
+    classified = int(s.get("classified", 0) or 0)
+    coverage_pct = (float(classified) / float(effective_total) * 100.0) if effective_total > 0 else 0.0
+    status = "none"
+    if effective_total <= 0:
+        status = "none"
+    elif int(s.get("unclassified", 0) or 0) > 0 or int(s.get("amount_missing", 0) or 0) > 0:
+        status = "partial"
+    else:
+        status = "full"
+    out = dict(s)
+    out.update({"effective_total": effective_total, "coverage_pct": coverage_pct, "status": status})
+    return out
+
+
+def _movements_coverage_payload(imported_rows_count: int, warnings: Optional[List[str]] = None) -> Dict[str, Any]:
+    warns = set(str(w) for w in (warnings or []))
+    blocking_warns = warns - {"ORDERS_NONE"}
+    status = "none"
+    if imported_rows_count > 0 and not blocking_warns:
+        status = "imported"
+    elif imported_rows_count > 0:
+        status = "partial"
+    return {
+        "rows_count": int(imported_rows_count or 0),
+        "warnings": sorted(warns),
+        "status": status,
+    }
+
+
+def _flow_confidence_from_inputs(
+    *,
+    base: Optional[dbmod.Snapshot],
+    warnings: Optional[List[str]],
+    orders_stats: Optional[Dict[str, Any]],
+    imported_rows_count: int,
+) -> str:
+    warns = set(str(w) for w in (warnings or []))
+    if not base:
+        return "low"
+    if {"CASH_MISSING", "ORDERS_INCOMPLETE", "INFERENCE_PARTIAL"} & warns:
+        return "low"
+    if int(imported_rows_count or 0) > 0:
+        return "high"
+    order_cov = _orders_coverage_payload(orders_stats)
+    if str(order_cov.get("status")) == "full" and int(order_cov.get("effective_total") or 0) > 0:
+        return "medium"
+    return "low"
+
+
+def _decorate_return_payload(
+    payload: Dict[str, Any],
+    *,
+    latest: Optional[dbmod.Snapshot],
+    base: Optional[dbmod.Snapshot],
+    interval_meta: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    out = dict(payload or {})
+    warnings = list(out.get("quality_warnings") or [])
+    order_stats = out.get("orders_stats")
+    imported_rows_count = int((interval_meta or {}).get("_imported_rows_count") or 0)
+    flow_confidence = _flow_confidence_from_inputs(
+        base=base,
+        warnings=warnings,
+        orders_stats=order_stats,
+        imported_rows_count=imported_rows_count,
+    )
+    out["flow_confidence"] = flow_confidence
+    out["estimated"] = bool(flow_confidence != "high")
+    out["data_freshness"] = _snapshot_data_freshness(latest)
+    out["orders_coverage"] = _orders_coverage_payload(order_stats)
+    out["movements_coverage"] = _movements_coverage_payload(imported_rows_count, warnings)
+    out["flow_breakdown"] = {
+        "gross_delta_ars": out.get("delta"),
+        "market_delta_ars": out.get("real_delta") if out.get("real_delta") is not None else out.get("delta"),
+        "external_flow_ars": out.get("flow_total_ars"),
+        "inferred_external_flow_ars": out.get("flow_inferred_ars"),
+        "manual_adjustment_ars": out.get("flow_manual_adjustment_ars"),
+        "fx_revaluation_ars": (interval_meta or {}).get("fx_revaluation_ars"),
+        "imported_external_ars": (interval_meta or {}).get("imported_external_ars"),
+        "imported_internal_ars": (interval_meta or {}).get("imported_internal_ars"),
+    }
+    return out
+
+
 def _compute_interval_flow_v2(
     conn,
     base_snap: dbmod.Snapshot,
@@ -255,6 +368,7 @@ def _compute_interval_flow_v2(
         "residual_ratio": residual_ratio,
         "_traded_gross": traded_gross,
         "_has_imported_movements": has_imported,
+        "_imported_rows_count": int(imported.get("rows_count") or 0),
         "_imported_dividend_ars": float(imported.get("imported_dividend_ars") or 0.0),
         "_imported_fee_ars": float(imported.get("imported_fee_ars") or 0.0),
         "_orders_total": int(stats.get("total", 0) or 0),
@@ -268,7 +382,7 @@ def _return_with_flows(
     gross_block,
 ):
     if not latest:
-        return enrich_return_block(
+        payload = enrich_return_block(
             gross=gross_block,
             base=base,
             flow_inferred_ars=None,
@@ -276,10 +390,11 @@ def _return_with_flows(
             quality_warnings=["INFERENCE_PARTIAL"],
             orders_stats=None,
         ).to_dict()
+        return _decorate_return_payload(payload, latest=latest, base=base, interval_meta=None)
 
     # One-snapshot fallback (no base): keep useful daily estimate, mark as partial.
     if not base:
-        return enrich_return_block(
+        payload = enrich_return_block(
             gross=gross_block,
             base=base,
             flow_inferred_ars=0.0,
@@ -288,6 +403,7 @@ def _return_with_flows(
             orders_stats=None,
             fallback_real_pct=gross_block.pct,
         ).to_dict()
+        return _decorate_return_payload(payload, latest=latest, base=base, interval_meta=None)
 
     warnings = []
     iv = _compute_interval_flow_v2(conn, base, latest, include_threshold=False)
@@ -302,7 +418,7 @@ def _return_with_flows(
             warnings.append("ORDERS_NONE")
         flow_inferred = float(iv.get("external_final_ars") or iv.get("amount_ars") or 0.0)
     flow_manual = dbmod.manual_cashflow_sum(conn, base.snapshot_date, latest.snapshot_date)
-    return enrich_return_block(
+    payload = enrich_return_block(
         gross=gross_block,
         base=base,
         flow_inferred_ars=flow_inferred,
@@ -310,6 +426,7 @@ def _return_with_flows(
         quality_warnings=list(dict.fromkeys(warnings)),
         orders_stats=order_stats,
     ).to_dict()
+    return _decorate_return_payload(payload, latest=latest, base=base, interval_meta=iv)
 
 
 def _flow_quality_incomplete(row: Dict[str, Any]) -> bool:
@@ -753,6 +870,11 @@ def _monthly_vs_inflation_payload(
     beats_inflation: Optional[bool] = None,
     quality_warnings: Optional[list[str]] = None,
     inflation_available_to: Optional[str] = None,
+    flow_confidence: Optional[str] = None,
+    data_freshness: Optional[Dict[str, Any]] = None,
+    orders_coverage: Optional[Dict[str, Any]] = None,
+    movements_coverage: Optional[Dict[str, Any]] = None,
+    estimated: Optional[bool] = None,
 ) -> Dict[str, Any]:
     return {
         "month": month,
@@ -769,6 +891,11 @@ def _monthly_vs_inflation_payload(
         "beats_inflation": beats_inflation,
         "quality_warnings": list(quality_warnings or []),
         "inflation_available_to": inflation_available_to,
+        "flow_confidence": flow_confidence,
+        "data_freshness": data_freshness,
+        "orders_coverage": orders_coverage,
+        "movements_coverage": movements_coverage,
+        "estimated": bool(estimated) if estimated is not None else False,
         "status": status,
     }
 
@@ -847,6 +974,314 @@ def returns():
             "ytd": _return_with_flows(conn, latest, base_ytd, compute_return(latest, base_ytd)),
             "inception": _return_with_flows(conn, latest, base_inception, compute_return(latest, base_inception)),
         }
+    finally:
+        conn.close()
+
+
+def _quality_row(
+    row_id: str,
+    label: str,
+    value: str,
+    kind: str,
+    detail: str,
+    *,
+    sources: Optional[List[str]] = None,
+    codes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    return {
+        "id": row_id,
+        "label": label,
+        "value": value,
+        "kind": kind,
+        "detail": detail,
+        "sources": list(sources or []),
+        "codes": list(codes or []),
+    }
+
+
+def _latest_evidence_stats(conn, as_of: str) -> Dict[str, Any]:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(advisor_evidence)").fetchall()}
+    if not cols:
+        return {"latest_retrieved_at": None, "recent_14d": 0, "recent_45d": 0}
+    row = conn.execute(
+        """
+        SELECT
+            MAX(retrieved_at_utc) AS latest_retrieved_at,
+            SUM(CASE WHEN substr(retrieved_at_utc, 1, 10) >= ? THEN 1 ELSE 0 END) AS recent_14d,
+            SUM(CASE WHEN substr(retrieved_at_utc, 1, 10) >= ? THEN 1 ELSE 0 END) AS recent_45d
+        FROM advisor_evidence
+        """,
+        (target_date(as_of, 14), target_date(as_of, 45)),
+    ).fetchone()
+    return dict(row or {})
+
+
+def _cashflow_import_stats(conn, as_of: str) -> Dict[str, Any]:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(account_cash_movements)").fetchall()}
+    if not cols:
+        return {"total_rows": 0, "recent_rows": 0, "latest_movement_date": None}
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS total_rows,
+            SUM(CASE WHEN movement_date >= ? THEN 1 ELSE 0 END) AS recent_rows,
+            MAX(movement_date) AS latest_movement_date
+        FROM account_cash_movements
+        """,
+        (target_date(as_of, 30),),
+    ).fetchone()
+    return dict(row or {})
+
+
+def _latest_run_quality(conn) -> Dict[str, Any]:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(advisor_opportunity_runs)").fetchall()}
+    if not cols or "created_at_utc" not in cols or "as_of" not in cols:
+        return {"run_metrics": None, "created_at_utc": None, "as_of": None}
+    select_metrics = "run_metrics_json" if "run_metrics_json" in cols else "NULL AS run_metrics_json"
+    status_filter = "WHERE status = 'ok'" if "status" in cols else ""
+    row = conn.execute(
+        f"""
+        SELECT {select_metrics}, created_at_utc, as_of
+        FROM advisor_opportunity_runs
+        {status_filter}
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return {"run_metrics": None, "created_at_utc": None, "as_of": None}
+    metrics = {}
+    try:
+        metrics = json.loads(str(row["run_metrics_json"] or "{}"))
+        if not isinstance(metrics, dict):
+            metrics = {}
+    except Exception:
+        metrics = {}
+    return {
+        "run_metrics": metrics,
+        "created_at_utc": row["created_at_utc"],
+        "as_of": row["as_of"],
+    }
+
+
+@router.get("/quality")
+def quality():
+    ret = returns()
+    monthly_kpi = kpi_monthly_vs_inflation()
+    try:
+        conn = dbmod.get_conn()
+    except FileNotFoundError:
+        return {"rows": []}
+
+    try:
+        latest = dbmod.latest_snapshot(conn)
+        latest_snapshot_date = latest.snapshot_date if latest else date.today().isoformat()
+        period_blocks = [
+            {"label": "Día", "block": ret.get("daily") or {}},
+            {"label": "Semana", "block": ret.get("weekly") or {}},
+            {"label": "Mes", "block": ret.get("monthly") or {}},
+            {"label": "Año", "block": ret.get("yearly") or {}},
+            {"label": "Desde inicio", "block": ret.get("inception") or {}},
+        ]
+
+        warn_set = set()
+        warns_by_source: List[str] = []
+        coverage_count = 0
+        for item in period_blocks:
+            block = item["block"]
+            if hasValid := bool(block.get("from")) and bool(block.get("to")) and str(block.get("from")) != str(block.get("to")):
+                coverage_count += 1
+            warns = [str(w) for w in (block.get("quality_warnings") or [])]
+            if warns:
+                warns_by_source.append(f"{item['label']}: {', '.join(warns)}")
+            for w in warns:
+                warn_set.add(w)
+        monthly_warns = [str(w) for w in (monthly_kpi.get("quality_warnings") or [])]
+        if monthly_warns:
+            warns_by_source.append(f"KPI mensual: {', '.join(monthly_warns)}")
+        for w in monthly_warns:
+            warn_set.add(w)
+
+        critical_warns = ["CASH_MISSING", "ORDERS_INCOMPLETE", "INFERENCE_PARTIAL"]
+        critical_count = len([w for w in critical_warns if w in warn_set])
+        inference_kind = "ok"
+        inference_value = "OK"
+        inference_detail = "No se detectan señales críticas de inferencia."
+        if critical_count > 0:
+            inference_kind = "warn"
+            inference_value = f"Revisar ({critical_count})"
+            inference_detail = "El retorno real sigue dependiendo de inferencias parciales o cobertura incompleta."
+        elif warn_set:
+            inference_kind = "info"
+            inference_value = "Estimado"
+            inference_detail = "Hay señales informativas; el cálculo es usable pero no totalmente confirmado."
+
+        freshness = _snapshot_data_freshness(latest)
+        fresh_kind = "ok" if freshness.get("status") == "fresh" else ("info" if freshness.get("status") == "aging" else "warn")
+        fresh_value = "Actualizado"
+        if freshness.get("status") == "aging":
+            fresh_value = f"{freshness.get('days_stale')}d"
+        elif freshness.get("status") in ("stale", "missing"):
+            fresh_value = "Desactualizado"
+
+        cashflow_stats = _cashflow_import_stats(conn, latest_snapshot_date)
+        imported_recent = int(cashflow_stats.get("recent_rows") or 0)
+        cashflow_kind = "ok" if imported_recent > 0 else "warn"
+        cashflow_value = f"{imported_recent} recientes" if imported_recent > 0 else "Sin importación"
+        cashflow_detail = (
+            "Hay movimientos de caja importados en la ventana reciente."
+            if imported_recent > 0
+            else "No hay movimientos importados recientes; el retorno real se degrada a estimado."
+        )
+
+        evidence_stats = _latest_evidence_stats(conn, latest_snapshot_date)
+        latest_evidence = str(evidence_stats.get("latest_retrieved_at") or "")
+        evidence_kind = "warn"
+        evidence_value = "Sin evidencia"
+        evidence_detail = "No hay evidencia reciente para sostener el reranking."
+        if latest_evidence:
+            try:
+                age_days = max(0, (date.fromisoformat(latest_snapshot_date) - date.fromisoformat(latest_evidence[:10])).days)
+            except Exception:
+                age_days = None
+            if age_days is not None and age_days <= 7:
+                evidence_kind = "ok"
+                evidence_value = f"{int(evidence_stats.get('recent_14d') or 0)} fresca"
+                evidence_detail = "La evidencia reciente está dentro de la ventana operativa."
+            elif age_days is not None and age_days <= 21:
+                evidence_kind = "info"
+                evidence_value = f"{age_days}d"
+                evidence_detail = "La evidencia empieza a perder frescura para oportunidades nuevas."
+            else:
+                evidence_value = "Vieja"
+                evidence_detail = "La evidencia disponible está vieja para operar con confianza."
+
+        run_health = _latest_run_quality(conn)
+        metrics = dict(run_health.get("run_metrics") or {})
+        dispersion = float(metrics.get("score_dispersion") or 0.0)
+        fresh_ratio = float(metrics.get("fresh_evidence_ratio") or 0.0)
+        scoring_kind = "warn"
+        scoring_value = "Sin run"
+        scoring_detail = "Todavía no hay una corrida reciente de oportunidades con métricas registradas."
+        if metrics:
+            if dispersion >= 10.0 and fresh_ratio >= 0.30:
+                scoring_kind = "ok"
+                scoring_value = f"Disp. {dispersion:.1f}"
+                scoring_detail = "El scoring muestra dispersión suficiente y evidencia fresca razonable."
+            elif dispersion >= 5.0:
+                scoring_kind = "info"
+                scoring_value = f"Disp. {dispersion:.1f}"
+                scoring_detail = "El scoring discrimina algo, pero todavía hay margen para mayor señal."
+            else:
+                scoring_value = f"Disp. {dispersion:.1f}"
+                scoring_detail = "El scoring sigue demasiado comprimido para tomarlo como ranking fuerte."
+
+        ipc_status = str(monthly_kpi.get("status") or "")
+        ipc_kind = "info"
+        ipc_value = "Sin dato"
+        ipc_detail = "No hay KPI mensual de IPC disponible."
+        if ipc_status == "ok" and bool(monthly_kpi.get("inflation_projected")):
+            ipc_kind = "warn"
+            ipc_value = "Estimado"
+            ipc_detail = "El IPC del mes actual se proyecta con información parcial."
+        elif ipc_status == "ok":
+            ipc_kind = "ok"
+            ipc_value = "OK"
+            ipc_detail = "El KPI mensual usa un IPC disponible."
+        elif ipc_status == "inflation_unavailable":
+            ipc_kind = "warn"
+            ipc_value = "No disponible"
+            ipc_detail = "No se pudo obtener el IPC para la ventana actual."
+        elif ipc_status == "insufficient_snapshots":
+            ipc_kind = "info"
+            ipc_value = "Sin base"
+            ipc_detail = "Faltan snapshots para comparar contra inflación."
+
+        coverage_kind = "ok" if coverage_count == len(period_blocks) else ("info" if coverage_count >= 3 else "warn")
+        rows = [
+            _quality_row(
+                "quality_inference",
+                "Calidad de inferencia",
+                inference_value,
+                inference_kind,
+                inference_detail,
+                sources=warns_by_source or ["Sin warnings por ventanas."],
+                codes=sorted(warn_set),
+            ),
+            _quality_row(
+                "snapshot_freshness",
+                "Frescura de snapshots",
+                fresh_value,
+                fresh_kind,
+                "Última foto de cartera y retrieval operativo.",
+                sources=[
+                    f"Snapshot: {freshness.get('snapshot_date') or '-'}",
+                    f"Retrieval: {freshness.get('retrieved_at') or '-'}",
+                    f"Días stale: {freshness.get('days_stale')}",
+                ],
+                codes=[str(freshness.get("status") or "unknown").upper()],
+            ),
+            _quality_row(
+                "cashflow_imports",
+                "Cobertura cashflows",
+                cashflow_value,
+                cashflow_kind,
+                cashflow_detail,
+                sources=[
+                    f"Rows totales: {int(cashflow_stats.get('total_rows') or 0)}",
+                    f"Rows 30d: {imported_recent}",
+                    f"Último movimiento: {cashflow_stats.get('latest_movement_date') or '-'}",
+                ],
+                codes=["CASHFLOW_IMPORTED" if imported_recent > 0 else "CASHFLOW_IMPORT_MISSING"],
+            ),
+            _quality_row(
+                "evidence_freshness",
+                "Frescura de evidencia",
+                evidence_value,
+                evidence_kind,
+                evidence_detail,
+                sources=[
+                    f"Última evidencia: {latest_evidence or '-'}",
+                    f"Filas 14d: {int(evidence_stats.get('recent_14d') or 0)}",
+                    f"Filas 45d: {int(evidence_stats.get('recent_45d') or 0)}",
+                ],
+                codes=["EVIDENCE_FRESH" if evidence_kind == "ok" else "EVIDENCE_STALE"],
+            ),
+            _quality_row(
+                "scoring_health",
+                "Salud del scoring",
+                scoring_value,
+                scoring_kind,
+                scoring_detail,
+                sources=[
+                    f"Run as_of: {run_health.get('as_of') or '-'}",
+                    f"Dispersion: {dispersion:.2f}",
+                    f"Fresh evidence ratio: {fresh_ratio:.1%}",
+                ],
+                codes=["SCORING_HEALTHY" if scoring_kind == "ok" else "SCORING_DEGENERATE"],
+            ),
+            _quality_row(
+                "ipc_monthly",
+                "Estado IPC mensual",
+                ipc_value,
+                ipc_kind,
+                ipc_detail,
+                sources=[
+                    f"Status KPI: {ipc_status or '-'}",
+                    f"Mes KPI: {monthly_kpi.get('month') or '-'}",
+                ],
+                codes=[str(w) for w in monthly_warns],
+            ),
+            _quality_row(
+                "coverage_windows",
+                "Cobertura de ventanas",
+                f"{coverage_count}/5 con base valida",
+                coverage_kind,
+                "Cuántas ventanas de retorno tienen base histórica usable.",
+                sources=[f"{item['label']}: {item['block'].get('from')} -> {item['block'].get('to')}" for item in period_blocks],
+            ),
+        ]
+        return {"rows": rows, "meta": {"snapshot_date": latest_snapshot_date}}
     finally:
         conn.close()
 
@@ -1041,6 +1476,11 @@ def kpi_monthly_vs_inflation():
         net_pct = with_flows.get("real_pct")
         net_delta_ars = with_flows.get("real_delta")
         quality_warnings = with_flows.get("quality_warnings") or []
+        flow_confidence = with_flows.get("flow_confidence")
+        data_freshness = with_flows.get("data_freshness")
+        orders_coverage = with_flows.get("orders_coverage")
+        movements_coverage = with_flows.get("movements_coverage")
+        estimated = with_flows.get("estimated")
 
         inflation_available_to = None
         inflation_pct = None
@@ -1088,6 +1528,11 @@ def kpi_monthly_vs_inflation():
                 net_delta_ars=net_delta_ars,
                 quality_warnings=quality_warnings,
                 inflation_available_to=inflation_available_to,
+                flow_confidence=flow_confidence,
+                data_freshness=data_freshness,
+                orders_coverage=orders_coverage,
+                movements_coverage=movements_coverage,
+                estimated=estimated,
             )
 
         real_vs_inflation_pct = None
@@ -1114,6 +1559,11 @@ def kpi_monthly_vs_inflation():
             beats_inflation=beats_inflation,
             quality_warnings=quality_warnings,
             inflation_available_to=inflation_available_to,
+            flow_confidence=flow_confidence,
+            data_freshness=data_freshness,
+            orders_coverage=orders_coverage,
+            movements_coverage=movements_coverage,
+            estimated=estimated,
         )
     finally:
         conn.close()

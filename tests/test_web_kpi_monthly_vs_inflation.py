@@ -99,6 +99,8 @@ class TestWebKpiMonthlyVsInflation(unittest.TestCase):
             self.assertAlmostEqual(out["inflation_pct"], 10.0, places=6)
             self.assertAlmostEqual(out["real_vs_inflation_pct"], -9.0909, places=3)
             self.assertFalse(bool(out["beats_inflation"]))
+            self.assertEqual(out.get("flow_confidence"), "low")
+            self.assertTrue(bool(out.get("estimated")))
         finally:
             _cleanup(conn, path)
 
@@ -132,6 +134,7 @@ class TestWebKpiMonthlyVsInflation(unittest.TestCase):
             self.assertTrue(bool(out["inflation_projected"]))
             self.assertAlmostEqual(out["inflation_pct"], 10.0, places=6)
             self.assertEqual(out["inflation_available_to"], "2026-01")
+            self.assertIsNotNone(out.get("orders_coverage"))
         finally:
             _cleanup(conn, path)
 

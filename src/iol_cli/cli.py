@@ -27,6 +27,7 @@ from .opportunities import (
     report_markdown,
     snapshot_row_from_panel,
     snapshot_row_from_quote,
+    summarize_run_metrics,
 )
 from .util import (
     default_valid_until,
@@ -2185,8 +2186,8 @@ def advisor_opportunities_run(
         cur = conn.execute(
             """
             INSERT INTO advisor_opportunity_runs (
-                created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, config_json, pipeline_warnings_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, config_json, pipeline_warnings_json, run_metrics_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 now,
@@ -2198,6 +2199,7 @@ def advisor_opportunities_run(
                 "running",
                 None,
                 json.dumps(cfg, ensure_ascii=True),
+                None,
                 None,
             ),
         )
@@ -2309,16 +2311,25 @@ def advisor_opportunities_run(
         if web_link_enabled and not apply_web_overlay:
             pipeline_warnings.append("WEB_FETCH_EMPTY_FALLBACK_TO_QUANT")
 
-        candidates = build_candidates(
+        rerank_symbols = set(_pick_symbols_for_web_link(
+            holdings_map=holdings_map,
+            prelim_candidates=[c.to_dict() for c in prelim_candidates],
+            top_k=int(web_top_k),
+        ))
+        latest_metrics_final = {sym: row for sym, row in latest_metrics.items() if sym in rerank_symbols}
+        series_by_symbol_final = {sym: row for sym, row in series_by_symbol.items() if sym in rerank_symbols}
+        evidence_map_final = {sym: evidence_map.get(sym, []) for sym in rerank_symbols}
+
+        final_candidates = build_candidates(
             as_of=as_of_v,
             mode=mode_v,
             budget_ars=float(budget_ars),
             top_n=int(top),
             portfolio_total_ars=portfolio_total,
             holdings_value_by_symbol=holdings_map,
-            latest_metrics=latest_metrics,
-            series_by_symbol=series_by_symbol,
-            evidence_by_symbol=evidence_map,
+            latest_metrics=latest_metrics_final,
+            series_by_symbol=series_by_symbol_final,
+            evidence_by_symbol=evidence_map_final,
             min_trusted_refs=min_refs_final,
             apply_expert_overlay=apply_web_overlay,
             conflict_mode=web_conflict_mode_v,
@@ -2328,6 +2339,14 @@ def advisor_opportunities_run(
             liquidity_priority=bool(liquidity_priority),
             max_per_sector=int(max_per_sector) if bool(diversify_sectors) else 0,
         )
+        final_symbols = {str(c.symbol).strip().upper() for c in final_candidates}
+        prelim_non_operable = [
+            c
+            for c in prelim_candidates
+            if str(c.symbol).strip().upper() not in final_symbols and str(c.candidate_status) != "operable"
+        ]
+        candidates = list(final_candidates) + prelim_non_operable
+        run_metrics = summarize_run_metrics(candidates)
 
         conn = connect(db_path)
         init_db(conn)
@@ -2341,8 +2360,8 @@ def advisor_opportunities_run(
                         run_id, symbol, candidate_type, score_total, score_risk, score_value, score_momentum,
                         score_catalyst, entry_low, entry_high, suggested_weight_pct, suggested_amount_ars,
                         reason_summary, risk_flags_json, filters_passed, expert_signal_score,
-                        trusted_refs_count, consensus_state, decision_gate, evidence_summary_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        trusted_refs_count, consensus_state, decision_gate, candidate_status, evidence_summary_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         int(run_id),
@@ -2362,15 +2381,16 @@ def advisor_opportunities_run(
                         int(d["filters_passed"]),
                         float(d.get("expert_signal_score") or 0.0),
                         int(d.get("trusted_refs_count") or 0),
-                        str(d.get("consensus_state") or "mixed"),
+                        str(d.get("consensus_state") or "insufficient"),
                         str(d.get("decision_gate") or "auto"),
+                        str(d.get("candidate_status") or "watchlist"),
                         str(d.get("evidence_summary_json") or "{}"),
                     ),
                 )
             warnings_json = json.dumps(pipeline_warnings, ensure_ascii=True) if pipeline_warnings else None
             conn.execute(
-                "UPDATE advisor_opportunity_runs SET status='ok', error_message=NULL, pipeline_warnings_json=? WHERE id = ?",
-                (warnings_json, int(run_id)),
+                "UPDATE advisor_opportunity_runs SET status='ok', error_message=NULL, pipeline_warnings_json=?, run_metrics_json=? WHERE id = ?",
+                (warnings_json, json.dumps(run_metrics, ensure_ascii=True, sort_keys=True), int(run_id)),
             )
             conn.commit()
         finally:
@@ -2379,13 +2399,18 @@ def advisor_opportunities_run(
         weighted_rows = [
             c.to_dict()
             for c in candidates
-            if int(c.filters_passed) == 1 and c.suggested_weight_pct is not None
+            if str(c.candidate_status) == "operable" and c.suggested_weight_pct is not None
         ]
-        top_rows = weighted_rows[: int(top)] if weighted_rows else [c.to_dict() for c in candidates if int(c.filters_passed) == 1][: int(top)]
+        top_rows = weighted_rows[: int(top)] if weighted_rows else [c.to_dict() for c in candidates if str(c.candidate_status) == "operable"][: int(top)]
         manual_rows = [
             c.to_dict()
             for c in candidates
-            if str(c.decision_gate).strip().lower() == "manual_review"
+            if str(c.candidate_status).strip().lower() == "manual_review"
+        ][: int(top)]
+        watchlist_rows = [
+            c.to_dict()
+            for c in candidates
+            if str(c.candidate_status).strip().lower() == "watchlist"
         ][: int(top)]
         _print_json(
             {
@@ -2397,8 +2422,10 @@ def advisor_opportunities_run(
                 "top_n": int(top),
                 "evidence_fetch": evidence_fetch_summary,
                 "pipeline_warnings": pipeline_warnings,
+                "run_metrics": run_metrics,
                 "candidates_total": len(candidates),
                 "top_operable": top_rows,
+                "watchlist": watchlist_rows,
                 "manual_review": manual_rows,
             }
         )
@@ -2407,8 +2434,8 @@ def advisor_opportunities_run(
         init_db(conn)
         try:
             conn.execute(
-                "UPDATE advisor_opportunity_runs SET status='error', error_message=?, pipeline_warnings_json=? WHERE id = ?",
-                (str(exc), json.dumps(["RUN_ERROR"], ensure_ascii=True), int(run_id)),
+                "UPDATE advisor_opportunity_runs SET status='error', error_message=?, pipeline_warnings_json=?, run_metrics_json=? WHERE id = ?",
+                (str(exc), json.dumps(["RUN_ERROR"], ensure_ascii=True), None, int(run_id)),
             )
             conn.commit()
         finally:
@@ -2429,7 +2456,7 @@ def advisor_opportunities_report(
     try:
         run = conn.execute(
             """
-            SELECT id, created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, pipeline_warnings_json
+            SELECT id, created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, pipeline_warnings_json, run_metrics_json
             FROM advisor_opportunity_runs
             WHERE id = ?
             """,
@@ -2442,7 +2469,7 @@ def advisor_opportunities_report(
             """
             SELECT symbol, candidate_type, score_total, score_risk, score_value, score_momentum, score_catalyst,
                    entry_low, entry_high, suggested_weight_pct, suggested_amount_ars, reason_summary, risk_flags_json,
-                   filters_passed, expert_signal_score, trusted_refs_count, consensus_state, decision_gate,
+                   filters_passed, expert_signal_score, trusted_refs_count, consensus_state, decision_gate, candidate_status,
                    evidence_summary_json
             FROM advisor_opportunity_candidates
             WHERE run_id = ?

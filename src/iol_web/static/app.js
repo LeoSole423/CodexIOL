@@ -842,7 +842,7 @@
       const net = (kpi.net_pct != null) ? fmtPct(kpi.net_pct) : "-";
       v.textContent = net;
       v.className = baseClass + " " + signClass(kpi.net_pct);
-      s.textContent = `Neto ${net} | IPC no disponible`;
+      s.textContent = `Neto ${net} | IPC no disponible | ${flowConfidenceLabel(kpi)}`;
       return;
     }
 
@@ -854,17 +854,20 @@
 
     v.textContent = real == null ? "-" : fmtPct(real);
     v.className = baseClass + " " + signClass(real);
-    s.textContent = `Neto ${net} | IPC ${ipc}`;
+    s.textContent = `Neto ${net} | IPC ${ipc} | ${flowConfidenceLabel(kpi)}`;
 
     if (kpi.beats_inflation == null || real == null) {
       b.style.display = "inline-flex";
       b.className = "kpi-status-badge kpi-status-neutral";
-      b.textContent = "Sin senal";
+      b.textContent = kpi.estimated ? "Estimado" : "Sin senal";
       return;
     }
 
     b.style.display = "inline-flex";
-    if (kpi.beats_inflation) {
+    if (kpi.estimated) {
+      b.className = "kpi-status-badge kpi-status-neutral";
+      b.textContent = "Estimado";
+    } else if (kpi.beats_inflation) {
       b.className = "kpi-status-badge kpi-status-up";
       b.textContent = "Le ganas al IPC";
     } else {
@@ -884,6 +887,48 @@
     node.textContent = formatter ? formatter(value) : String(value);
     const spacing = baseClass ? " " : "";
     node.className = baseClass + spacing + signClass(Number(value));
+  }
+
+  function flowConfidenceLabel(block) {
+    const c = String((block && block.flow_confidence) || "");
+    if (c === "high") return "Confirmado";
+    if (c === "medium") return "Parcial";
+    if (c === "low") return "Estimado";
+    return "Sin señal";
+  }
+
+  function renderFlowBreakdown(targetId, block) {
+    const root = el(targetId);
+    if (!root) return;
+    const flow = (block && block.flow_breakdown) ? block.flow_breakdown : {};
+    const gross = flow.gross_delta_ars != null ? flow.gross_delta_ars : (block && block.delta);
+    const market = flow.market_delta_ars != null ? flow.market_delta_ars : (block && block.real_delta);
+    const external = flow.external_flow_ars != null ? flow.external_flow_ars : (block && block.flow_total_ars);
+    const fx = flow.fx_revaluation_ars;
+    root.innerHTML = `
+      <div class="mini-grid" style="margin-bottom: 12px;">
+        <div class="mg-row">
+          <span class="mg-lbl">Var. saldo</span>
+          <span class="mg-val">${fmtDeltaARS(gross)}</span>
+        </div>
+        <div class="mg-row">
+          <span class="mg-lbl">Mercado neto</span>
+          <span class="mg-val">${fmtDeltaARS(market)}</span>
+        </div>
+        <div class="mg-row">
+          <span class="mg-lbl">Flujos externos</span>
+          <span class="mg-val">${fmtDeltaARS(external)}</span>
+        </div>
+        <div class="mg-row">
+          <span class="mg-lbl">FX caja USD</span>
+          <span class="mg-val">${fmtDeltaARS(fx)}</span>
+        </div>
+        <div class="mg-row">
+          <span class="mg-lbl">Confianza</span>
+          <span class="mg-val">${escHtml(flowConfidenceLabel(block))}</span>
+        </div>
+      </div>
+    `;
   }
 
   function renderHeroMonthInsights(kpi) {
@@ -925,6 +970,32 @@
     putTextAndSign("kpiMonthNetPct", null, null, "kpi-pct");
     if (el("kpiMonthGrossFlow")) el("kpiMonthGrossFlow").innerHTML = "";
     putTextAndSign("kpiMonthNetArs", null, null, "kpi-value");
+  }
+
+  function renderHeroMonthInsightsEnhanced(kpi) {
+    if (!kpi) {
+      renderHeroMonthInsights(kpi);
+      return;
+    }
+    const status = String(kpi.status || "");
+    if (status !== "ok" && status !== "inflation_unavailable") {
+      renderHeroMonthInsights(kpi);
+      return;
+    }
+    putTextAndSign("kpiMonthNetPct", kpi.net_pct, (v) => fmtPct(v), "kpi-pct");
+    renderFlowBreakdown("kpiMonthGrossFlow", {
+      delta: kpi.market_delta_ars,
+      real_delta: kpi.net_delta_ars,
+      flow_total_ars: kpi.contributions_ars,
+      flow_confidence: kpi.flow_confidence,
+      flow_breakdown: {
+        gross_delta_ars: kpi.market_delta_ars,
+        market_delta_ars: kpi.net_delta_ars,
+        external_flow_ars: kpi.contributions_ars,
+        fx_revaluation_ars: null,
+      },
+    });
+    putTextAndSign("kpiMonthNetArs", kpi.net_delta_ars, (v) => fmtDeltaARS(v), "kpi-value");
   }
 
   function renderWindowStatus(targetId, block) {
@@ -1074,13 +1145,18 @@
   }
 
   async function loadQualityPage() {
-    const [latest, ret, monthlyKpi] = await Promise.all([
-      fetchJSON("/api/latest").catch(() => null),
-      fetchJSON("/api/returns").catch(() => null),
-      fetchJSON("/api/kpi/monthly-vs-inflation").catch(() => null),
-    ]);
-    const snap = latest && latest.snapshot ? latest.snapshot : null;
-    const model = buildQualityModel(ret || {}, monthlyKpi || {}, snap);
+    let model = null;
+    try {
+      model = await fetchJSON("/api/quality");
+    } catch (_) {
+      const [latest, ret, monthlyKpi] = await Promise.all([
+        fetchJSON("/api/latest").catch(() => null),
+        fetchJSON("/api/returns").catch(() => null),
+        fetchJSON("/api/kpi/monthly-vs-inflation").catch(() => null),
+      ]);
+      const snap = latest && latest.snapshot ? latest.snapshot : null;
+      model = buildQualityModel(ret || {}, monthlyKpi || {}, snap);
+    }
     qualityCtx.model = model;
     if (!qualityCtx.activeId) {
       const firstWarn = (model.rows || []).find((r) => r.kind === "warn");
@@ -1432,6 +1508,7 @@
           </div>
         </div>
       `;
+      renderFlowBreakdown("kpiDailyGross", daily);
     }
 
     const horizonsOpts = { allowPartialRange: true, suppressEmptyState: true };
@@ -1440,7 +1517,7 @@
     renderRangeState("retYearly", "retYearlySub", ret.yearly, "Ano", horizonsOpts);
     renderRangeState("retInception", "retInceptionSub", ret.inception, "Desde inicio", horizonsOpts);
     renderMonthVsInflationKpi(monthlyKpi);
-    renderHeroMonthInsights(monthlyKpi);
+    renderHeroMonthInsightsEnhanced(monthlyKpi);
     renderWindowStatus("heroDailyWindow", daily);
     renderWindowStatus("heroMonthlyWindow", monthlyKpi);
 
