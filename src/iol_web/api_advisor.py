@@ -14,7 +14,7 @@ from iol_advisor.service import (
 from . import db as dbmod
 
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 
 def _advisor_cadence(v: str) -> str:

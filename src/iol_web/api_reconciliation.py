@@ -16,7 +16,7 @@ from iol_reconciliation.service import (
 from . import db as dbmod
 
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 
 @router.get("/reconciliation/latest")

@@ -15,7 +15,7 @@ def build_cashflows_router(
     compute_interval_flow: Callable[[Any, Any, Any, bool], Optional[Dict[str, Any]]],
     annotate_flow_rows: Callable[[List[Dict[str, Any]]], None],
 ) -> Tuple[APIRouter, Callable[..., Any], Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
-    router = APIRouter(prefix="/api")
+    router = APIRouter()
 
     @router.get("/cashflows/auto")
     def cashflows_auto(days: int = 30):

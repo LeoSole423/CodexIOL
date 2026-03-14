@@ -132,7 +132,7 @@ def build_quality_router(
     monthly_kpi_fn: Callable[[], Dict[str, Any]],
     snapshot_data_freshness_fn: Callable[[Any], Dict[str, Any]],
 ) -> Tuple[APIRouter, Callable[[], Dict[str, Any]]]:
-    router = APIRouter(prefix="/api")
+    router = APIRouter()
 
     @router.get("/quality")
     def quality():

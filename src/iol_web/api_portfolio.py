@@ -12,7 +12,7 @@ from .metrics import target_date
 from .movers import build_union_movers, build_union_movers_pnl
 
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 
 @router.get("/latest")

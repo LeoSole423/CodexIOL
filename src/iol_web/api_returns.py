@@ -17,7 +17,7 @@ def build_returns_router(
     annotate_flow_rows: Callable,
     return_with_flows: Callable,
 ) -> Tuple[APIRouter, Callable, Callable, Callable]:
-    router = APIRouter(prefix="/api")
+    router = APIRouter()
 
     @router.get("/health")
     def health() -> Dict[str, Any]:

@@ -76,7 +76,7 @@ def build_inflation_router(
     return_with_flows: Callable[[Any, Any, Any, Dict[str, Any]], Dict[str, Any]],
     get_inflation_series: Callable[..., Any],
 ) -> Tuple[APIRouter, Callable[..., Any], Callable[..., Any], Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
-    router = APIRouter(prefix="/api")
+    router = APIRouter()
 
     @router.get("/inflation")
     def inflation(date_from: Optional[str] = Query(None, alias="from"), date_to: Optional[str] = Query(None, alias="to")):
