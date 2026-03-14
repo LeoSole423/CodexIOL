@@ -40,41 +40,6 @@ function advisorGroupCounts(recommendations, watchlist) {
 
 /* ── Table renderers ── */
 
-function renderTable(targetId, rows, metricKey, metricLabel, currencyCode) {
-  const root = el(targetId);
-  if (!root) return;
-
-  const fmtCur = (currencyCode === "USD") ? fmtUSD : fmtARS;
-
-  const head = `
-    <th>S\u00edmbolo</th>
-    <th>Desc</th>
-    <th class="num">Valor</th>
-    <th class="num">${metricLabel || (metricKey === "daily_var_points" ? "D\u00eda" : "PnL")}</th>
-  `;
-
-  const body = (rows || []).map((r, idx) => {
-    const metric = r[metricKey];
-    const pct = (metricKey === "delta_value") ? r["delta_pct"] : null;
-    const metricText = fmtDelta(metric, fmtCur);
-    const pctText = (pct == null) ? "" : ` <span class="muted">(${fmtPct(pct)})</span>`;
-    const flowTag = (metricKey === "delta_value") ? String(r.flow_tag || "none") : "none";
-    let flowBadge = "";
-    if (flowTag === "liquidated") flowBadge = `<span class="row-badge row-badge-liquidated">Liquidado</span>`;
-    if (flowTag === "missing_cashflow") flowBadge = `<span class="row-badge row-badge-missing">Cerrado s/ flujo</span>`;
-    return `
-      <tr style="animation: fade-in 0.3s ease ${idx * 40}ms both;">
-        <td>${r.symbol || "-"}</td>
-        <td><div class="desc-wrap"><span class="muted">${(r.description || "").slice(0, 42)}</span>${flowBadge}</div></td>
-        <td class="num">${fmtCur.format(r.total_value || 0)}</td>
-        <td class="num ${signClass(metric)}">${metricText}${pctText}</td>
-      </tr>
-    `;
-  }).join("");
-
-  root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-}
-
 function renderAssetPerformanceTable(targetId, rows) {
   const root = el(targetId);
   if (!root) return;
@@ -112,95 +77,6 @@ function renderAssetPerformanceTable(targetId, rows) {
   }).join("");
 
   root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-}
-
-function normalizeLegacyRows(rows, metricKey, pctKey) {
-  const bySymbol = {};
-  for (const r of (rows || [])) {
-    const sym = String((r && r.symbol) || "").trim();
-    if (!sym) continue;
-    const prev = bySymbol[sym];
-    const curMetric = Number((r && r[metricKey]) || 0);
-    const prevMetric = prev ? Number((prev && prev[metricKey]) || 0) : null;
-    if (!prev || Math.abs(curMetric) >= Math.abs(prevMetric)) bySymbol[sym] = r;
-  }
-  const out = Object.values(bySymbol).map((r) => ({
-    symbol: r.symbol,
-    description: r.description,
-    currency: r.currency || "unknown",
-    market: r.market,
-    type: r.type,
-    total_value: Number(r.total_value || 0),
-    base_total_value: r.base_total_value == null ? null : Number(r.base_total_value || 0),
-    selected_value: Number(r[metricKey] || 0),
-    selected_pct: (pctKey && r[pctKey] != null) ? Number(r[pctKey]) : null,
-    flow_tag: String(r.flow_tag || "none"),
-  }));
-
-  const totalVisible = out.reduce((s, it) => s + Number(it.total_value || 0), 0);
-  for (const it of out) {
-    const tv = Number(it.total_value || 0);
-    it.weight_pct = totalVisible > 0 ? (tv / totalVisible * 100.0) : 0.0;
-  }
-  out.sort((a, b) => {
-    const am = Number(a.selected_value || 0);
-    const bm = Number(b.selected_value || 0);
-    if (bm !== am) return bm - am;
-    const at = Number(a.total_value || 0);
-    const bt = Number(b.total_value || 0);
-    if (bt !== at) return bt - at;
-    return String(a.symbol || "").localeCompare(String(b.symbol || ""));
-  });
-  return out;
-}
-
-async function fetchLegacyAssetPerformance(period, latestYear, latestMonth, years) {
-  try {
-    if (period === "accumulated") {
-      const total = await fetchJSON("/api/movers?kind=total&limit=100");
-      const merged = (total.gainers || []).concat(total.losers || []);
-      return {
-        period,
-        from: null,
-        to: null,
-        warnings: [],
-        orders_stats: null,
-        rows: normalizeLegacyRows(merged, "gain_amount", null),
-        fallback: true,
-      };
-    }
-
-    let url = `/api/movers?kind=period&period=${encodeURIComponent(period)}&limit=100&metric=pnl&currency=all`;
-    if (period === "monthly") {
-      const m = getAssetMonth(latestMonth || 1);
-      url = `/api/movers?kind=period&period=monthly&month=${encodeURIComponent(m)}&year=${encodeURIComponent(latestYear)}&limit=100&metric=pnl&currency=all`;
-    } else if (period === "yearly") {
-      const y = getAssetYear(latestYear || new Date().getFullYear(), years);
-      url = `/api/movers?kind=period&period=yearly&year=${encodeURIComponent(y)}&limit=100&metric=pnl&currency=all`;
-    }
-
-    const mv = await fetchJSON(url);
-    const merged = (mv.gainers || []).concat(mv.losers || []);
-    return {
-      period,
-      from: mv.from || null,
-      to: mv.to || null,
-      warnings: mv.warnings || [],
-      orders_stats: mv.orders_stats || null,
-      rows: normalizeLegacyRows(merged, "delta_value", "delta_pct"),
-      fallback: true,
-    };
-  } catch (_) {
-    return {
-      period,
-      from: null,
-      to: null,
-      warnings: [],
-      orders_stats: null,
-      rows: [],
-      fallback: true,
-    };
-  }
 }
 
 /* ── KPI / return card renderers ── */
@@ -1003,15 +879,9 @@ export async function loadDashboard(rangeDays) {
     return url;
   }
 
-  let assetsPerf = null;
-  try {
-    assetsPerf = await fetchJSON(buildAssetPerformanceUrl());
-  } catch (_) {
-    assetsPerf = await fetchLegacyAssetPerformance(period, latestYear, latestMonth, years);
-  }
-  if (!assetsPerf) {
-    assetsPerf = { period, from: null, to: null, warnings: [], orders_stats: null, rows: [] };
-  }
+  const assetsPerf = await fetchJSON(buildAssetPerformanceUrl()).catch(() => ({
+    period, from: null, to: null, warnings: [], orders_stats: null, rows: [],
+  }));
   updateAssetPicker(period, latestYear, latestMonth, years);
   if (period !== "daily" && assetsPerf && assetsPerf.from == null) {
     const msg = (period === "monthly")
@@ -1039,10 +909,6 @@ export async function loadDashboard(rangeDays) {
       ah.innerHTML = msg;
     } else {
       ah.style.display = "none";
-    }
-    if ((!warns || !warns.length) && assetsPerf.fallback) {
-      ah.style.display = "block";
-      ah.textContent = "Usando fallback de compatibilidad (endpoint nuevo no disponible). Reinicia el servicio web para activar /api/assets/performance.";
     }
   }
 
