@@ -1,5 +1,5 @@
-import os
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -10,15 +10,7 @@ from typer.testing import CliRunner
 from iol_cli.cli import app
 from iol_cli.db import connect, init_db
 from iol_cli.opportunities import allocate_with_caps
-
-
-def _base_env(db_path: str) -> dict:
-    env = os.environ.copy()
-    env["IOL_USERNAME"] = "user"
-    env["IOL_PASSWORD"] = "pass"
-    env["IOL_DB_PATH"] = db_path
-    env["IOL_API_URL"] = "https://api.invertironline.com"
-    return env
+from tests_support import base_cli_env
 
 
 class _FakeClient:
@@ -73,7 +65,7 @@ class TestAdvisorOpportunities(unittest.TestCase):
         self.runner = CliRunner()
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmp.name, "opportunities.db")
-        self.env = _base_env(self.db_path)
+        self.env = base_cli_env(self.db_path)
         conn = connect(self.db_path)
         init_db(conn)
         conn.close()

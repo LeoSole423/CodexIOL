@@ -1,48 +1,13 @@
-import os
 import unittest
 
 from fastapi.responses import JSONResponse
 
 from iol_web.routes_api import snapshots
-from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
+from tests_support import WebDbTestCase, SCHEMA_SNAPSHOTS, SCHEMA_ORDERS
 
 
-TEST_SCHEMA = """
-CREATE TABLE portfolio_snapshots (
-  snapshot_date TEXT PRIMARY KEY,
-  total_value REAL,
-  cash_total_ars REAL,
-  cash_disponible_ars REAL
-);
-CREATE TABLE orders (
-  order_number INTEGER PRIMARY KEY,
-  status TEXT,
-  symbol TEXT,
-  side TEXT,
-  side_norm TEXT,
-  quantity REAL,
-  price REAL,
-  operated_amount REAL,
-  currency TEXT,
-  created_at TEXT,
-  updated_at TEXT,
-  operated_at TEXT
-);
-"""
-
-
-class TestWebSnapshotsApi(unittest.TestCase):
-    def setUp(self):
-        self.conn, self.path = create_temp_sqlite_db(TEST_SCHEMA)
-        self.prev_env = os.environ.get("IOL_DB_PATH")
-        os.environ["IOL_DB_PATH"] = self.path
-
-    def tearDown(self):
-        if self.prev_env is None:
-            os.environ.pop("IOL_DB_PATH", None)
-        else:
-            os.environ["IOL_DB_PATH"] = self.prev_env
-        cleanup_temp_sqlite_db(self.conn, self.path)
+class TestWebSnapshotsApi(WebDbTestCase):
+    schema_sql = SCHEMA_SNAPSHOTS + SCHEMA_ORDERS
 
     def test_raw_mode_unchanged(self):
         self.conn.executemany(

@@ -6,15 +6,7 @@ import unittest
 from typer.testing import CliRunner
 
 from iol_cli.cli import app
-
-
-def _base_env(db_path: str) -> dict:
-    env = os.environ.copy()
-    env["IOL_USERNAME"] = "user"
-    env["IOL_PASSWORD"] = "pass"
-    env["IOL_DB_PATH"] = db_path
-    env["IOL_API_URL"] = "https://api.invertironline.com"
-    return env
+from tests_support import base_cli_env
 
 
 class TestAdvisorAlertsEvents(unittest.TestCase):
@@ -22,7 +14,7 @@ class TestAdvisorAlertsEvents(unittest.TestCase):
         self.runner = CliRunner()
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmp.name, "test_alerts.db")
-        self.env = _base_env(self.db_path)
+        self.env = base_cli_env(self.db_path)
 
     def tearDown(self):
         self.tmp.cleanup()

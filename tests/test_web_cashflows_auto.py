@@ -1,48 +1,9 @@
-import os
 import unittest
 
 from fastapi.responses import JSONResponse
 
 from iol_web.routes_api import cashflows_auto
-from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
-
-
-TEST_SCHEMA = """
-CREATE TABLE portfolio_snapshots (
-  snapshot_date TEXT PRIMARY KEY,
-  total_value REAL,
-  cash_total_ars REAL,
-  cash_disponible_ars REAL,
-  cash_disponible_usd REAL
-);
-CREATE TABLE orders (
-  order_number INTEGER PRIMARY KEY,
-  status TEXT,
-  symbol TEXT,
-  side TEXT,
-  side_norm TEXT,
-  quantity REAL,
-  price REAL,
-  operated_amount REAL,
-  currency TEXT,
-  created_at TEXT,
-  updated_at TEXT,
-  operated_at TEXT
-);
-CREATE TABLE account_cash_movements (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  movement_id TEXT,
-  occurred_at TEXT,
-  movement_date TEXT,
-  currency TEXT,
-  amount REAL,
-  kind TEXT,
-  description TEXT,
-  source TEXT,
-  raw_json TEXT,
-  created_at TEXT
-);
-"""
+from tests_support import WebDbTestCase, SCHEMA_SNAPSHOTS, SCHEMA_ORDERS, SCHEMA_CASH_MOVEMENTS
 
 
 def _insert_order(conn, order_number, side, side_norm, operated_amount, ts):
@@ -68,18 +29,8 @@ def _insert_order(conn, order_number, side, side_norm, operated_amount, ts):
     )
 
 
-class TestWebCashflowsAuto(unittest.TestCase):
-    def setUp(self):
-        self.conn, self.path = create_temp_sqlite_db(TEST_SCHEMA)
-        self.prev_env = os.environ.get("IOL_DB_PATH")
-        os.environ["IOL_DB_PATH"] = self.path
-
-    def tearDown(self):
-        if self.prev_env is None:
-            os.environ.pop("IOL_DB_PATH", None)
-        else:
-            os.environ["IOL_DB_PATH"] = self.prev_env
-        cleanup_temp_sqlite_db(self.conn, self.path)
+class TestWebCashflowsAuto(WebDbTestCase):
+    schema_sql = SCHEMA_SNAPSHOTS + SCHEMA_ORDERS + SCHEMA_CASH_MOVEMENTS
 
     def test_deposit_complete(self):
         self.conn.executemany(
