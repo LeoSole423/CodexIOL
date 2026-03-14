@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import typer
 
-from .advisor_context import build_advisor_context_from_db_path
+from iol_advisor.advisor_context import build_advisor_context_from_db_path
 from .advisor_opportunity_support import (
     CONFLICT_MODES,
     OPP_MODES,

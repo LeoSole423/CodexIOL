@@ -3,7 +3,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import typer
 
-from .advisor_context import build_advisor_context_from_db_path
+from iol_advisor.advisor_context import build_advisor_context_from_db_path
 from .db import connect, init_db, resolve_db_path
 from .opportunities import parse_iso_date
 

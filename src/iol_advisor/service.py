@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
-from iol_cli.advisor_context import build_advisor_context_from_db_path
-from iol_cli.db import connect, ensure_columns, resolve_db_path
+from iol_advisor.advisor_context import build_advisor_context_from_db_path
+from iol_shared.db import connect, ensure_columns, resolve_db_path
 
 
 DEFAULT_SOURCE_POLICY = "strict_official_reuters"

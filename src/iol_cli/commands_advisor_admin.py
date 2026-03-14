@@ -9,7 +9,7 @@ from rich.console import Console
 
 from iol_advisor.service import build_unified_context, load_briefing_history_payload, load_latest_briefing_payload
 
-from .advisor_context import render_advisor_context_md
+from iol_advisor.advisor_context import render_advisor_context_md
 from .db import connect, init_db, resolve_db_path
 
 
