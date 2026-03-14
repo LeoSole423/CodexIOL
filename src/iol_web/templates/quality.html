@@ -27,6 +27,23 @@
 
   <section class="card quality-card">
     <div class="card-head">
+      <h2>Resolver movimientos</h2>
+    </div>
+    <div class="cashflow-explain" id="reconciliationExplain">
+      Este panel revisa intervalos entre snapshots, detecta faltantes y propone c&oacute;mo destrabar la inferencia:
+      importar movimientos, aceptar un ajuste manual o marcar un caso como interno.
+    </div>
+    <div class="hint" id="reconciliationHint" style="display:none;"></div>
+    <div class="quality-status-detail" id="reconciliationSummary">
+      <div class="hint">Analizando conciliaci&oacute;n...</div>
+    </div>
+    <div class="table" id="tblReconciliationOpen">
+      <div class="hint">Cargando propuestas de conciliaci&oacute;n...</div>
+    </div>
+  </section>
+
+  <section class="card quality-card">
+    <div class="card-head">
       <h2>Ajustes manuales de flujo</h2>
     </div>
     <div class="cashflow-explain" id="cashflowExplain">

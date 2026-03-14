@@ -8,6 +8,19 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 
+from iol_advisor.service import (
+    load_briefing_history_payload,
+    load_latest_briefing_payload,
+    load_latest_opportunity_payload,
+)
+from iol_reconciliation.service import (
+    apply_proposal as apply_reconciliation_proposal,
+    dismiss_proposal as dismiss_reconciliation_proposal,
+    ensure_latest_run as ensure_latest_reconciliation_run,
+    explain_interval as explain_reconciliation_interval,
+    get_latest_payload as get_latest_reconciliation_payload,
+    get_open_payload as get_open_reconciliation_payload,
+)
 from . import db as dbmod
 from .inflation_ar import get_inflation_series
 from .inflation_compare import compounded_inflation_pct, inflation_factor_for_date, month_key
@@ -26,6 +39,13 @@ def _parse_date(v: Optional[str]) -> Optional[str]:
         return None
     date.fromisoformat(v)
     return v
+
+
+def _advisor_cadence(v: str) -> str:
+    c = str(v or "").strip().lower()
+    if c not in ("daily", "weekly"):
+        raise ValueError("cadence must be daily|weekly")
+    return c
 
 
 def _snapshot_cash_ars(snap: Optional[dbmod.Snapshot]) -> Optional[float]:
@@ -932,6 +952,39 @@ def latest():
         conn.close()
 
 
+@router.get("/advisor/latest")
+def advisor_latest(cadence: str = "daily"):
+    try:
+        cadence_v = _advisor_cadence(cadence)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    payload = load_latest_briefing_payload(dbmod.resolve_db_path(), cadence_v)
+    return {"cadence": cadence_v, "briefing": payload}
+
+
+@router.get("/advisor/history")
+def advisor_history(cadence: Optional[str] = None, limit: int = 20):
+    cadence_v = None
+    if cadence is not None and str(cadence).strip():
+        try:
+            cadence_v = _advisor_cadence(cadence)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+    limit_v = int(limit)
+    if limit_v < 1 or limit_v > 200:
+        return JSONResponse(status_code=400, content={"error": "limit must be 1..200"})
+    rows = load_briefing_history_payload(dbmod.resolve_db_path(), cadence_v, limit_v)
+    return {"cadence": cadence_v, "rows": rows}
+
+
+@router.get("/advisor/opportunities/latest")
+def advisor_opportunities_latest():
+    payload = load_latest_opportunity_payload(dbmod.resolve_db_path())
+    if not payload:
+        return {"run": None}
+    return {"run": payload}
+
+
 @router.get("/returns")
 def returns():
     try:
@@ -1064,12 +1117,40 @@ def _latest_run_quality(conn) -> Dict[str, Any]:
     }
 
 
+def _reconciliation_quality_summary(conn, latest_snapshot_date: Optional[str]) -> Dict[str, Any]:
+    try:
+        payload = ensure_latest_reconciliation_run(conn, as_of=latest_snapshot_date, days=30)
+    except Exception:
+        return {
+            "coverage_mode": "none",
+            "open_intervals": 0,
+            "suppressed_intervals": 0,
+            "counts": {},
+            "headline": "No se pudo analizar la conciliacion.",
+            "latest_run_id": None,
+        }
+    summary = dict(payload.get("summary") or {})
+    summary["latest_run_id"] = payload.get("id")
+    summary["created_at_utc"] = payload.get("created_at_utc")
+    return summary
+
+
+def _reconciliation_kind(summary: Dict[str, Any]) -> str:
+    open_intervals = int(summary.get("open_intervals") or 0)
+    coverage_mode = str(summary.get("coverage_mode") or "none")
+    if open_intervals > 0:
+        return "warn"
+    if coverage_mode in ("imported", "manual", "mixed"):
+        return "ok"
+    return "info"
+
+
 @router.get("/quality")
 def quality():
     ret = returns()
     monthly_kpi = kpi_monthly_vs_inflation()
     try:
-        conn = dbmod.get_conn()
+        conn = dbmod.get_conn_rw()
     except FileNotFoundError:
         return {"rows": []}
 
@@ -1102,12 +1183,34 @@ def quality():
         for w in monthly_warns:
             warn_set.add(w)
 
+        reconciliation_summary = _reconciliation_quality_summary(conn, latest_snapshot_date)
+        reconciliation_kind = _reconciliation_kind(reconciliation_summary)
+        reconciliation_sources = [
+            f"Cobertura: {str(reconciliation_summary.get('coverage_mode') or 'none')}",
+            f"Abiertos: {int(reconciliation_summary.get('open_intervals') or 0)}",
+            f"Importados 30d: {int(((reconciliation_summary.get('import_stats') or {}).get('recent_rows') or 0))}",
+            f"Manuales 30d: {int(((reconciliation_summary.get('manual_stats') or {}).get('recent_rows') or 0))}",
+        ]
+
         critical_warns = ["CASH_MISSING", "ORDERS_INCOMPLETE", "INFERENCE_PARTIAL"]
         critical_count = len([w for w in critical_warns if w in warn_set])
         inference_kind = "ok"
         inference_value = "OK"
         inference_detail = "No se detectan señales críticas de inferencia."
-        if critical_count > 0:
+        if reconciliation_kind == "warn":
+            inference_kind = "warn"
+            inference_value = f"Revisar ({int(reconciliation_summary.get('open_intervals') or 0)})"
+            inference_detail = str(reconciliation_summary.get("headline") or "Hay intervalos pendientes de conciliación.")
+        elif reconciliation_kind == "ok":
+            coverage_mode = str(reconciliation_summary.get("coverage_mode") or "manual")
+            inference_kind = "ok"
+            inference_value = {
+                "imported": "Importado",
+                "manual": "Manual OK",
+                "mixed": "Mixto",
+            }.get(coverage_mode, "OK")
+            inference_detail = str(reconciliation_summary.get("headline") or "La inferencia quedó conciliada.")
+        elif critical_count > 0:
             inference_kind = "warn"
             inference_value = f"Revisar ({critical_count})"
             inference_detail = "El retorno real sigue dependiendo de inferencias parciales o cobertura incompleta."
@@ -1126,12 +1229,26 @@ def quality():
 
         cashflow_stats = _cashflow_import_stats(conn, latest_snapshot_date)
         imported_recent = int(cashflow_stats.get("recent_rows") or 0)
-        cashflow_kind = "ok" if imported_recent > 0 else "warn"
-        cashflow_value = f"{imported_recent} recientes" if imported_recent > 0 else "Sin importación"
+        manual_recent = int(((reconciliation_summary.get("manual_stats") or {}).get("recent_rows") or 0))
+        coverage_mode = str(reconciliation_summary.get("coverage_mode") or "none")
+        cashflow_kind = "warn" if coverage_mode == "none" else ("ok" if reconciliation_kind == "ok" else "info")
+        cashflow_value = {
+            "imported": f"{imported_recent} importados",
+            "manual": f"{manual_recent} manuales",
+            "mixed": "Mixto",
+        }.get(coverage_mode, "Sin cobertura")
         cashflow_detail = (
-            "Hay movimientos de caja importados en la ventana reciente."
-            if imported_recent > 0
-            else "No hay movimientos importados recientes; el retorno real se degrada a estimado."
+            "La conciliación usa movimientos importados confirmados."
+            if coverage_mode == "imported"
+            else (
+                "La conciliación quedó resuelta con ajustes manuales auditados."
+                if coverage_mode == "manual"
+                else (
+                    "La conciliación combina movimientos importados y ajustes manuales."
+                    if coverage_mode == "mixed"
+                    else "No hay cobertura suficiente de cashflows; falta importar movimientos o confirmar ajustes."
+                )
+            )
         )
 
         evidence_stats = _latest_evidence_stats(conn, latest_snapshot_date)
@@ -1205,8 +1322,8 @@ def quality():
                 inference_value,
                 inference_kind,
                 inference_detail,
-                sources=warns_by_source or ["Sin warnings por ventanas."],
-                codes=sorted(warn_set),
+                sources=(warns_by_source or ["Sin warnings por ventanas."]) + reconciliation_sources,
+                codes=sorted(set(list(warn_set) + [f"RECON_{str(reconciliation_summary.get('coverage_mode') or 'none').upper()}"])),
             ),
             _quality_row(
                 "snapshot_freshness",
@@ -1230,9 +1347,25 @@ def quality():
                 sources=[
                     f"Rows totales: {int(cashflow_stats.get('total_rows') or 0)}",
                     f"Rows 30d: {imported_recent}",
+                    f"Ajustes 30d: {manual_recent}",
                     f"Último movimiento: {cashflow_stats.get('latest_movement_date') or '-'}",
                 ],
-                codes=["CASHFLOW_IMPORTED" if imported_recent > 0 else "CASHFLOW_IMPORT_MISSING"],
+                codes=[
+                    "CASHFLOW_IMPORTED" if imported_recent > 0 else "CASHFLOW_IMPORT_MISSING",
+                    f"COVERAGE_{coverage_mode.upper()}",
+                ],
+            ),
+            _quality_row(
+                "reconciliation_queue",
+                "Cola de conciliación",
+                f"{int(reconciliation_summary.get('open_intervals') or 0)} abiertas",
+                reconciliation_kind,
+                str(reconciliation_summary.get("headline") or "Sin datos de conciliación."),
+                sources=reconciliation_sources,
+                codes=[
+                    f"RECONCILIATION_{str(reconciliation_summary.get('coverage_mode') or 'none').upper()}",
+                    f"OPEN_{int(reconciliation_summary.get('open_intervals') or 0)}",
+                ],
             ),
             _quality_row(
                 "evidence_freshness",
@@ -1387,6 +1520,81 @@ def cashflows_manual_delete(row_id: int):
         if not ok:
             return JSONResponse(status_code=404, content={"error": "not found"})
         return {"ok": True, "id": int(row_id)}
+    finally:
+        conn.close()
+
+
+@router.get("/reconciliation/latest")
+def reconciliation_latest(as_of: Optional[str] = Query(None, alias="as_of")):
+    try:
+        conn = dbmod.get_conn_rw()
+    except FileNotFoundError:
+        return {"summary": {}, "intervals": [], "proposals": []}
+    try:
+        return get_latest_reconciliation_payload(conn, as_of=as_of, ensure=True)
+    finally:
+        conn.close()
+
+
+@router.get("/reconciliation/open")
+def reconciliation_open(as_of: Optional[str] = Query(None, alias="as_of")):
+    try:
+        conn = dbmod.get_conn_rw()
+    except FileNotFoundError:
+        return {"run": {"summary": {}}, "rows": []}
+    try:
+        return get_open_reconciliation_payload(conn, as_of=as_of, ensure=True)
+    finally:
+        conn.close()
+
+
+@router.post("/reconciliation/apply")
+def reconciliation_apply(payload: Dict[str, Any] = Body(...)):
+    proposal_id = payload.get("proposal_id")
+    if proposal_id is None:
+        return JSONResponse(status_code=400, content={"error": "proposal_id is required"})
+    try:
+        conn = dbmod.get_conn_rw()
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": "DB not found"})
+    try:
+        return apply_reconciliation_proposal(conn, int(proposal_id), note=payload.get("note"))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    finally:
+        conn.close()
+
+
+@router.post("/reconciliation/dismiss")
+def reconciliation_dismiss(payload: Dict[str, Any] = Body(...)):
+    proposal_id = payload.get("proposal_id")
+    reason = str(payload.get("reason") or "").strip()
+    if proposal_id is None:
+        return JSONResponse(status_code=400, content={"error": "proposal_id is required"})
+    if not reason:
+        return JSONResponse(status_code=400, content={"error": "reason is required"})
+    try:
+        conn = dbmod.get_conn_rw()
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": "DB not found"})
+    try:
+        return dismiss_reconciliation_proposal(conn, int(proposal_id), reason=reason)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    finally:
+        conn.close()
+
+
+@router.get("/reconciliation/interval/{interval_id}")
+def reconciliation_interval(interval_id: int):
+    try:
+        conn = dbmod.get_conn_rw()
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": "DB not found"})
+    try:
+        return explain_reconciliation_interval(conn, int(interval_id))
+    except ValueError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
     finally:
         conn.close()
 

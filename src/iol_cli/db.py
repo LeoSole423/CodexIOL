@@ -256,6 +256,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             universe TEXT NOT NULL,
             budget_ars REAL NOT NULL,
             top_n INTEGER NOT NULL,
+            variant_id INTEGER,
+            score_version TEXT,
             status TEXT NOT NULL,
             error_message TEXT,
             config_json TEXT NOT NULL,
@@ -271,6 +273,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             run_id INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             candidate_type TEXT NOT NULL,
+            signal_side TEXT,
+            signal_family TEXT,
+            score_version TEXT,
             score_total REAL NOT NULL,
             score_risk REAL NOT NULL,
             score_value REAL NOT NULL,
@@ -289,7 +294,167 @@ def init_db(conn: sqlite3.Connection) -> None:
             decision_gate TEXT,
             candidate_status TEXT,
             evidence_summary_json TEXT,
+            liquidity_score REAL,
+            sector_bucket TEXT,
+            is_crypto_proxy INTEGER,
+            holding_context_json TEXT,
+            score_features_json TEXT,
             FOREIGN KEY(run_id) REFERENCES advisor_opportunity_runs(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advisor_briefings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at_utc TEXT NOT NULL,
+            as_of TEXT NOT NULL,
+            cadence TEXT NOT NULL,
+            status TEXT NOT NULL,
+            source_policy TEXT NOT NULL,
+            title TEXT,
+            summary_md TEXT NOT NULL,
+            recommendations_json TEXT NOT NULL,
+            watchlist_json TEXT NOT NULL,
+            quality_json TEXT NOT NULL,
+            market_notes_json TEXT NOT NULL,
+            links_json TEXT,
+            opportunity_run_id INTEGER,
+            advisor_log_id INTEGER,
+            FOREIGN KEY(opportunity_run_id) REFERENCES advisor_opportunity_runs(id),
+            FOREIGN KEY(advisor_log_id) REFERENCES advisor_logs(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advisor_model_variants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            promoted_from_variant_id INTEGER,
+            promoted_at_utc TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advisor_signal_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            run_id INTEGER NOT NULL,
+            variant_id INTEGER,
+            signal_side TEXT NOT NULL,
+            signal_family TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            as_of TEXT NOT NULL,
+            horizon INTEGER NOT NULL,
+            eval_status TEXT NOT NULL,
+            forward_return_pct REAL,
+            excess_return_pct REAL,
+            max_adverse_excursion_pct REAL,
+            max_favorable_excursion_pct REAL,
+            liquidity_penalty REAL,
+            hit INTEGER,
+            notes_json TEXT,
+            FOREIGN KEY(candidate_id) REFERENCES advisor_opportunity_candidates(id),
+            FOREIGN KEY(run_id) REFERENCES advisor_opportunity_runs(id),
+            FOREIGN KEY(variant_id) REFERENCES advisor_model_variants(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS advisor_run_regressions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            cadence TEXT NOT NULL,
+            variant_id INTEGER NOT NULL,
+            baseline_variant_id INTEGER NOT NULL,
+            window_days INTEGER NOT NULL,
+            scorecard_json TEXT NOT NULL,
+            gate_status TEXT NOT NULL,
+            regression_flags_json TEXT,
+            FOREIGN KEY(run_id) REFERENCES advisor_opportunity_runs(id),
+            FOREIGN KEY(variant_id) REFERENCES advisor_model_variants(id),
+            FOREIGN KEY(baseline_variant_id) REFERENCES advisor_model_variants(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at_utc TEXT NOT NULL,
+            as_of TEXT NOT NULL,
+            date_from TEXT NOT NULL,
+            date_to TEXT NOT NULL,
+            days INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            summary_json TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_intervals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            interval_key TEXT NOT NULL,
+            base_snapshot_date TEXT NOT NULL,
+            end_snapshot_date TEXT NOT NULL,
+            state TEXT NOT NULL,
+            issue_code TEXT,
+            confidence TEXT,
+            impact_on_inference TEXT NOT NULL,
+            analysis_json TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES reconciliation_runs(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            interval_id INTEGER NOT NULL,
+            interval_key TEXT NOT NULL,
+            issue_code TEXT NOT NULL,
+            resolution_type TEXT NOT NULL,
+            suggested_kind TEXT,
+            suggested_amount_ars REAL,
+            confidence TEXT NOT NULL,
+            confidence_score REAL NOT NULL,
+            reason TEXT NOT NULL,
+            source_basis TEXT NOT NULL,
+            impact_on_inference TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            applied_at_utc TEXT,
+            FOREIGN KEY(run_id) REFERENCES reconciliation_runs(id),
+            FOREIGN KEY(interval_id) REFERENCES reconciliation_intervals(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_resolutions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            proposal_id INTEGER NOT NULL,
+            interval_id INTEGER NOT NULL,
+            interval_key TEXT NOT NULL,
+            issue_code TEXT NOT NULL,
+            resolution_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            manual_cashflow_id INTEGER,
+            note TEXT,
+            created_at_utc TEXT NOT NULL,
+            FOREIGN KEY(proposal_id) REFERENCES reconciliation_proposals(id),
+            FOREIGN KEY(interval_id) REFERENCES reconciliation_intervals(id),
+            FOREIGN KEY(manual_cashflow_id) REFERENCES manual_cashflow_adjustments(id)
         )
         """
     )
@@ -338,7 +503,21 @@ def init_db(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_market_snapshots_symbol_date ON market_symbol_snapshots(symbol, snapshot_date)")
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_market_snapshots_day_symbol_source ON market_symbol_snapshots(snapshot_date, symbol, source)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_runs_asof ON advisor_opportunity_runs(as_of)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_runs_variant_asof ON advisor_opportunity_runs(variant_id, as_of)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_candidates_run_score ON advisor_opportunity_candidates(run_id, score_total DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_opp_candidates_signal ON advisor_opportunity_candidates(run_id, signal_side, signal_family, score_total DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_advisor_briefings_asof ON advisor_briefings(as_of, cadence, created_at_utc DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_advisor_briefings_status ON advisor_briefings(status, cadence)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_model_variants_status ON advisor_model_variants(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_signal_outcomes_variant_date ON advisor_signal_outcomes(variant_id, as_of, horizon)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_signal_outcomes_candidate_horizon ON advisor_signal_outcomes(candidate_id, horizon)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_run_regressions_variant_cadence ON advisor_run_regressions(variant_id, cadence, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_asof ON reconciliation_runs(as_of, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_intervals_run_end ON reconciliation_intervals(run_id, end_snapshot_date DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_intervals_key ON reconciliation_intervals(interval_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_proposals_open ON reconciliation_proposals(status, confidence_score DESC, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_proposals_interval ON reconciliation_proposals(interval_id, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_resolutions_interval ON reconciliation_resolutions(interval_key, issue_code, id DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_account_balances_date ON account_balances(snapshot_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_manual_cashflow_flow_date ON manual_cashflow_adjustments(flow_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_cash_movements_date ON account_cash_movements(movement_date)")
@@ -378,6 +557,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         "advisor_opportunity_runs",
         {
             "pipeline_warnings_json": "TEXT",
+            "variant_id": "INTEGER",
+            "score_version": "TEXT",
         },
     )
     ensure_columns(
@@ -390,6 +571,14 @@ def init_db(conn: sqlite3.Connection) -> None:
             "decision_gate": "TEXT",
             "candidate_status": "TEXT",
             "evidence_summary_json": "TEXT",
+            "liquidity_score": "REAL",
+            "sector_bucket": "TEXT",
+            "is_crypto_proxy": "INTEGER",
+            "signal_side": "TEXT",
+            "signal_family": "TEXT",
+            "score_version": "TEXT",
+            "holding_context_json": "TEXT",
+            "score_features_json": "TEXT",
         },
     )
     ensure_columns(

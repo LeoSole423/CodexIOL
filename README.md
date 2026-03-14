@@ -114,6 +114,14 @@ iol advisor opportunities report --run-id 1 --out reports/latest/Oportunidades.m
 
 iol advisor seguimiento --out reports/latest/Seguimiento.md
 
+iol advisor briefing list --cadence daily --limit 10
+
+iol advisor briefing latest --cadence weekly
+
+iol advisor autopilot run --cadence daily --out reports/latest/AdvisorDaily.md
+
+iol advisor autopilot run --cadence weekly --budget-ars 200000 --top 10 --out reports/latest/AdvisorWeekly.md --opportunity-report-out reports/latest/Oportunidades.md
+
 iol market quote --market bcba --symbol GGAL
 
 iol orders list --status pendientes
@@ -220,6 +228,9 @@ El asesor usa una arquitectura modular con un wrapper estable:
 - Contratos de salida/evidencia:
   - `prompts/contracts/output_schema.md`
   - `prompts/contracts/evidence_schema.md`
+- Prompts operativos para automations:
+  - `prompts/70_advisor_daily_automation.md`
+  - `prompts/80_advisor_weekly_automation.md`
 
 Flujo recomendado:
 1. Cargar `AsesorFinanciero.md`.
