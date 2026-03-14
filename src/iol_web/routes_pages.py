@@ -24,3 +24,8 @@ def history(request: Request):
 @router.get("/quality", response_class=HTMLResponse)
 def quality(request: Request):
     return templates.TemplateResponse("quality.html", {"request": request})
+
+
+@router.get("/advisor", response_class=HTMLResponse)
+def advisor(request: Request):
+    return templates.TemplateResponse("advisor.html", {"request": request})

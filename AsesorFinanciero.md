@@ -28,6 +28,7 @@ Leer y aplicar en este orden:
 - Ordenes reales solo con `--confirm CONFIRMAR`.
 - Registro conversacional: `iol advisor log --prompt "<consulta>" --response "<respuesta>"`.
 - Fuente de verdad para alertas/eventos: SQLite (`advisor_alerts`, `advisor_events`).
+- Para automatizacion diaria/semanal del asesor: usar `iol advisor autopilot run --cadence daily|weekly`.
 
 ## 4) Uso en chat
 Usar este archivo como system prompt inicial y evitar duplicar reglas extensas dentro de cada consulta.

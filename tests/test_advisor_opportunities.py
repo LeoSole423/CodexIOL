@@ -711,6 +711,166 @@ class TestAdvisorOpportunities(unittest.TestCase):
         watchlist = payload.get("watchlist") or []
         self.assertTrue(any(str(r.get("symbol") or "") == "AAPL" for r in watchlist))
 
+    def test_mode_both_includes_sell_signal_for_deteriorating_holding(self):
+        self._seed_portfolio(snapshot_date="2026-02-10")
+        conn = self._conn()
+        try:
+            for i in range(20):
+                day = f"2026-01-{12 + i:02d}"
+                price = 140.0 - (i * 3.0)
+                conn.execute(
+                    """
+                    INSERT INTO market_symbol_snapshots(
+                      snapshot_date,symbol,market,last_price,bid,ask,spread_pct,daily_var_pct,operations_count,volume_amount,source
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (day, "SPY", "bcba", price, price - 0.5, price + 0.5, 1.0, -1.0, 18.0, 120000.0, "quote"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with patch("iol_cli.cli.collect_symbol_evidence", return_value=([], [])):
+            out = self.runner.invoke(
+                app,
+                [
+                    "advisor",
+                    "opportunities",
+                    "run",
+                    "--mode",
+                    "both",
+                    "--variant",
+                    "active",
+                    "--as-of",
+                    "2026-02-10",
+                    "--budget-ars",
+                    "100000",
+                    "--top",
+                    "5",
+                    "--web-min-trusted-refs",
+                    "0",
+                ],
+                env=self.env,
+            )
+        self.assertEqual(out.exit_code, 0, msg=out.output)
+        payload = json.loads(out.output)
+        top = payload.get("top_operable") or []
+        self.assertTrue(any(str(r.get("symbol") or "") == "SPY" and str(r.get("signal_side") or "") == "sell" for r in top))
+
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT signal_side, signal_family, score_version, holding_context_json, score_features_json
+                FROM advisor_opportunity_candidates
+                WHERE symbol='SPY'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(str(row["signal_side"]), "sell")
+            self.assertIn(str(row["signal_family"]), ("trim", "exit"))
+            self.assertTrue(str(row["score_version"]))
+            self.assertIn("age_days", str(row["holding_context_json"] or ""))
+            self.assertIn("thesis_deterioration", str(row["score_features_json"] or ""))
+        finally:
+            conn.close()
+
+    def test_evaluate_and_scorecard_create_outcomes(self):
+        self._seed_portfolio(snapshot_date="2026-02-10")
+        conn = self._conn()
+        try:
+            for idx, (snap, spy, aapl) in enumerate(
+                [
+                    ("2026-02-10", 100.0, 100.0),
+                    ("2026-02-11", 98.0, 103.0),
+                    ("2026-02-15", 92.0, 108.0),
+                    ("2026-03-02", 85.0, 112.0),
+                ]
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO market_symbol_snapshots(
+                      snapshot_date,symbol,market,last_price,bid,ask,spread_pct,daily_var_pct,operations_count,volume_amount,source
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (snap, "SPY", "bcba", spy, spy - 0.5, spy + 0.5, 1.0, -0.5, 25.0, 140000.0, "quote"),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO market_symbol_snapshots(
+                      snapshot_date,symbol,market,last_price,bid,ask,spread_pct,daily_var_pct,operations_count,volume_amount,source
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (snap, "AAPL", "bcba", aapl, aapl - 0.5, aapl + 0.5, 1.0, 0.5, 25.0, 180000.0, "quote"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with patch("iol_cli.cli.collect_symbol_evidence", return_value=([], [])):
+            run = self.runner.invoke(
+                app,
+                [
+                    "advisor",
+                    "opportunities",
+                    "run",
+                    "--mode",
+                    "both",
+                    "--variant",
+                    "active",
+                    "--as-of",
+                    "2026-02-10",
+                    "--budget-ars",
+                    "100000",
+                    "--top",
+                    "5",
+                    "--web-min-trusted-refs",
+                    "0",
+                ],
+                env=self.env,
+            )
+        self.assertEqual(run.exit_code, 0, msg=run.output)
+
+        evaluated = self.runner.invoke(
+            app,
+            ["advisor", "opportunities", "evaluate", "--as-of", "2026-03-02"],
+            env=self.env,
+        )
+        self.assertEqual(evaluated.exit_code, 0, msg=evaluated.output)
+        eval_payload = json.loads(evaluated.output)
+        self.assertGreater(int(eval_payload.get("inserted") or 0), 0)
+
+        scorecard = self.runner.invoke(
+            app,
+            ["advisor", "opportunities", "scorecard", "--as-of", "2026-03-02", "--window-days", "90"],
+            env=self.env,
+        )
+        self.assertEqual(scorecard.exit_code, 0, msg=scorecard.output)
+        score_payload = json.loads(scorecard.output)
+        self.assertIn("active_scorecard", score_payload)
+        self.assertGreaterEqual(int((score_payload.get("active_scorecard") or {}).get("sample_count") or 0), 1)
+
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT signal_side, horizon, eval_status, forward_return_pct, excess_return_pct
+                FROM advisor_signal_outcomes
+                WHERE symbol='SPY'
+                ORDER BY id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(str(row["signal_side"]), "sell")
+            self.assertEqual(str(row["eval_status"]), "ok")
+            self.assertIsNotNone(row["forward_return_pct"])
+            self.assertIsNotNone(row["excess_return_pct"])
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

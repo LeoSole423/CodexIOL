@@ -590,6 +590,8 @@ def summarize_run_metrics(candidates: Sequence["OpportunityCandidate"]) -> Dict[
     watchlist = [c for c in rows if str(c.candidate_status) == "watchlist"]
     manual = [c for c in rows if str(c.candidate_status) == "manual_review"]
     rejected = [c for c in rows if str(c.candidate_status) == "rejected"]
+    buy_signals = [c for c in rows if str(c.signal_side) == "buy"]
+    sell_signals = [c for c in rows if str(c.signal_side) == "sell"]
     fresh_refs = 0
     freshest_days: List[int] = []
     for c in rows:
@@ -608,6 +610,8 @@ def summarize_run_metrics(candidates: Sequence["OpportunityCandidate"]) -> Dict[
         "watchlist_count": len(watchlist),
         "manual_review_count": len(manual),
         "rejected_count": len(rejected),
+        "buy_signal_count": len(buy_signals),
+        "sell_signal_count": len(sell_signals),
         "score_mean": mean_score,
         "score_stddev": stddev,
         "score_dispersion": (max(scores) - min(scores)) if scores else 0.0,
@@ -661,6 +665,9 @@ def allocate_with_caps(raw_weights: Dict[str, float], caps: Dict[str, float]) ->
 class OpportunityCandidate:
     symbol: str
     candidate_type: str
+    signal_side: str
+    signal_family: str
+    score_version: str
     score_total: float
     score_risk: float
     score_value: float
@@ -683,11 +690,16 @@ class OpportunityCandidate:
     liquidity_score: float
     sector_bucket: str
     is_crypto_proxy: int
+    holding_context_json: str
+    score_features_json: str
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "symbol": self.symbol,
             "candidate_type": self.candidate_type,
+            "signal_side": self.signal_side,
+            "signal_family": self.signal_family,
+            "score_version": self.score_version,
             "score_total": self.score_total,
             "score_risk": self.score_risk,
             "score_value": self.score_value,
@@ -710,6 +722,8 @@ class OpportunityCandidate:
             "liquidity_score": self.liquidity_score,
             "sector_bucket": self.sector_bucket,
             "is_crypto_proxy": self.is_crypto_proxy,
+            "holding_context_json": self.holding_context_json,
+            "score_features_json": self.score_features_json,
         }
 
 
@@ -723,6 +737,7 @@ def build_candidates(
     latest_metrics: Dict[str, Dict[str, Any]],
     series_by_symbol: Dict[str, List[Tuple[str, float]]],
     evidence_by_symbol: Dict[str, List[Dict[str, Any]]],
+    holdings_context_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None,
     min_trusted_refs: int = 0,
     apply_expert_overlay: bool = True,
     conflict_mode: str = "manual_review",
@@ -731,21 +746,40 @@ def build_candidates(
     min_operations: int = 0,
     liquidity_priority: bool = True,
     max_per_sector: int = 0,
+    weights: Optional[Dict[str, float]] = None,
+    thresholds: Optional[Dict[str, Any]] = None,
+    score_version: str = "baseline_v1",
 ) -> List[OpportunityCandidate]:
     mode_n = (mode or "").strip().lower()
+    weight_cfg = dict(weights or {"risk": 0.35, "value": 0.20, "momentum": 0.35, "catalyst": 0.10})
+    threshold_cfg = dict(thresholds or {})
+    trim_weight_pct = float(threshold_cfg.get("trim_weight_pct", 12.0) or 12.0)
+    exit_weight_pct = float(threshold_cfg.get("exit_weight_pct", 15.0) or 15.0)
+    sell_momentum_max = float(threshold_cfg.get("sell_momentum_max", 35.0) or 35.0)
+    exit_momentum_max = float(threshold_cfg.get("exit_momentum_max", 20.0) or 20.0)
+    concentration_pct_max = float(threshold_cfg.get("concentration_pct_max", 15.0) or 15.0)
+    drawdown_exclusion_pct = float(threshold_cfg.get("drawdown_exclusion_pct", -25.0) or -25.0)
+    rebuy_dip_threshold_pct = float(threshold_cfg.get("rebuy_dip_threshold_pct", -8.0) or -8.0)
+    liquidity_floor = float(threshold_cfg.get("liquidity_floor", 40.0) or 40.0)
+    sell_conflict_exit = bool(threshold_cfg.get("sell_conflict_exit", True))
     staged: List[Dict[str, Any]] = []
     for symbol, m in latest_metrics.items():
+        holding_ctx = dict((holdings_context_by_symbol or {}).get(symbol) or {})
         in_port = float(holdings_value_by_symbol.get(symbol, 0.0) or 0.0) > 0.0
-        candidate_type = None
+        families: List[Tuple[str, str]] = []
         if mode_n == "new":
             if not in_port:
-                candidate_type = "new"
+                families.append(("buy", "new"))
         elif mode_n == "rebuy":
             if in_port:
-                candidate_type = "rebuy"
+                families.append(("buy", "rebuy"))
         else:  # both
-            candidate_type = "rebuy" if in_port else "new"
-        if candidate_type is None:
+            if in_port:
+                families.append(("buy", "rebuy"))
+                families.append(("sell", "trim"))
+            else:
+                families.append(("buy", "new"))
+        if not families:
             continue
 
         s = series_by_symbol.get(symbol, [])
@@ -810,17 +844,13 @@ def build_candidates(
             elif liq_score < 55.0:
                 risk_penalty += 5.0
 
-        if bool(exclude_crypto_new) and candidate_type == "new" and is_crypto:
-            hard_ok = False
-            flags.append("CRYPTO_EXCLUDED")
-
-        if cur_w >= 15.0:
+        if cur_w >= concentration_pct_max:
             hard_ok = False
             flags.append("CONCENTRATION_MAX")
-        elif cur_w > 12.0:
+        elif cur_w > max(0.0, concentration_pct_max - 3.0):
             risk_penalty += 15.0
 
-        if dd is not None and dd < -25.0 and not bool(evs["has_recent_catalyst"]):
+        if dd is not None and dd < drawdown_exclusion_pct and not bool(evs["has_recent_catalyst"]):
             hard_ok = False
             flags.append("DRAWDOWN_EXTREME")
         elif dd is not None and dd < -20.0:
@@ -831,15 +861,6 @@ def build_candidates(
             risk_penalty += 10.0
         if int(min_trusted_refs) > 0 and trusted_refs_count < int(min_trusted_refs):
             flags.append("EVIDENCE_INSUFFICIENT")
-
-        # Rebuy rule = buy the dip + thesis valid + no unresolved conflict.
-        if candidate_type == "rebuy":
-            dip_ok = dd is not None and dd <= -8.0
-            thesis_ok = bool(evs["has_thesis"])
-            if not dip_ok or not thesis_ok:
-                continue
-
-        risk_score_raw = clamp(100.0 - risk_penalty, 0.0, 100.0)
 
         last_price = _safe_float(m.get("last_price"))
         entry_low = None
@@ -852,36 +873,134 @@ def build_candidates(
             entry_low = last_price * 0.99
             entry_high = last_price * 1.01
 
-        reason = (
-            f"{candidate_type} | dd20={dd:.2f}% "
-            if dd is not None
-            else f"{candidate_type} | dd20=NA "
+        gain_pct = float(holding_ctx.get("gain_pct") or 0.0)
+        holding_age_days = _safe_int(holding_ctx.get("age_days")) or 0
+        concentration_score = clamp(cur_w / max(1.0, concentration_pct_max) * 100.0, 0.0, 100.0)
+        evidence_quality_score = clamp(
+            trusted_refs_count * 20.0
+            + (15.0 if bool(evs.get("has_thesis")) else -10.0)
+            - (20.0 if bool(evs.get("unresolved_conflict")) else 0.0),
+            0.0,
+            100.0,
         )
-        staged.append(
-            {
-                "symbol": symbol,
-                "candidate_type": candidate_type,
-                "entry_low": entry_low,
-                "entry_high": entry_high,
-                "flags": list(flags),
-                "filters_passed": 1 if hard_ok else 0,
-                "current_weight_pct": cur_w,
-                "expert_signal_score": expert_score,
-                "trusted_refs_count": trusted_refs_count,
-                "consensus_state": consensus_state,
-                "decision_gate": decision_gate,
-                "evidence_summary_json": str(evs.get("evidence_summary_json") or "{}"),
-                "liquidity_score": float(liq_score),
-                "sector_bucket": sector_bucket,
-                "is_crypto_proxy": 1 if is_crypto else 0,
-                "score_risk_raw": float(risk_score_raw),
-                "score_value_raw": float(v_score_raw),
-                "score_momentum_raw": float(m_score_raw),
-                "score_catalyst_raw": float(c_final_raw),
-                "score_catalyst_base_raw": float(c_score_raw),
-                "dd": dd,
-            }
+        thesis_deterioration_score = clamp(
+            (100.0 - m_score_raw) * 0.55
+            + (25.0 if bool(evs.get("unresolved_conflict")) else 0.0)
+            + (15.0 if not bool(evs.get("has_recent_catalyst")) else 0.0)
+            + (10.0 if dd is not None and dd < -12.0 else 0.0),
+            0.0,
+            100.0,
         )
+
+        for signal_side, signal_family in families:
+            local_flags = list(flags)
+            local_hard_ok = hard_ok
+            current_entry_low = entry_low
+            current_entry_high = entry_high
+
+            if bool(exclude_crypto_new) and signal_side == "buy" and signal_family == "new" and is_crypto:
+                local_hard_ok = False
+                local_flags.append("CRYPTO_EXCLUDED")
+
+            if signal_side == "buy" and signal_family == "rebuy":
+                dip_ok = dd is not None and dd <= rebuy_dip_threshold_pct
+                thesis_ok = bool(evs["has_thesis"])
+                if not dip_ok or not thesis_ok:
+                    continue
+
+            sell_trigger = False
+            if signal_side == "sell":
+                if not in_port:
+                    continue
+                current_entry_low = None
+                current_entry_high = None
+                trim_trigger = bool(cur_w >= trim_weight_pct or m_score_raw <= sell_momentum_max or evidence_quality_score < 40.0)
+                exit_trigger = bool(
+                    cur_w >= exit_weight_pct
+                    or m_score_raw <= exit_momentum_max
+                    or (sell_conflict_exit and bool(evs.get("unresolved_conflict")))
+                    or (dd is not None and dd < -20.0)
+                    or liq_score < liquidity_floor
+                )
+                if exit_trigger:
+                    signal_family = "exit"
+                    sell_trigger = True
+                    local_flags.append("SELL_EXIT")
+                elif trim_trigger:
+                    signal_family = "trim"
+                    sell_trigger = True
+                    local_flags.append("SELL_TRIM")
+                if not sell_trigger:
+                    continue
+                local_hard_ok = True
+                if liq_score < max(10.0, liquidity_floor * 0.6):
+                    local_hard_ok = False
+                    local_flags.append("SELL_LIQUIDITY_BLOCK")
+
+            risk_score_raw = clamp(100.0 - risk_penalty, 0.0, 100.0)
+            score_value_raw = float(v_score_raw)
+            score_momentum_raw = float(m_score_raw)
+            score_catalyst_raw = float(c_final_raw)
+            if signal_side == "sell":
+                risk_score_raw = clamp(concentration_score * 0.4 + thesis_deterioration_score * 0.4 + (100.0 - liq_score) * 0.2, 0.0, 100.0)
+                score_value_raw = clamp(50.0 + gain_pct * 2.0 + concentration_score * 0.15, 0.0, 100.0)
+                score_momentum_raw = clamp(100.0 - m_score_raw, 0.0, 100.0)
+                score_catalyst_raw = clamp(thesis_deterioration_score, 0.0, 100.0)
+
+            staged.append(
+                {
+                    "symbol": symbol,
+                    "candidate_type": signal_family,
+                    "signal_side": signal_side,
+                    "signal_family": signal_family,
+                    "score_version": score_version,
+                    "entry_low": current_entry_low,
+                    "entry_high": current_entry_high,
+                    "flags": list(dict.fromkeys(local_flags)),
+                    "filters_passed": 1 if local_hard_ok else 0,
+                    "current_weight_pct": cur_w,
+                    "expert_signal_score": expert_score,
+                    "trusted_refs_count": trusted_refs_count,
+                    "consensus_state": consensus_state,
+                    "decision_gate": decision_gate,
+                    "evidence_summary_json": str(evs.get("evidence_summary_json") or "{}"),
+                    "liquidity_score": float(liq_score),
+                    "sector_bucket": sector_bucket,
+                    "is_crypto_proxy": 1 if is_crypto else 0,
+                    "score_risk_raw": float(risk_score_raw),
+                    "score_value_raw": float(score_value_raw),
+                    "score_momentum_raw": float(score_momentum_raw),
+                    "score_catalyst_raw": float(score_catalyst_raw),
+                    "score_catalyst_base_raw": float(c_score_raw),
+                    "score_features_json": json.dumps(
+                        {
+                            "risk": float(risk_score_raw),
+                            "value": float(score_value_raw),
+                            "momentum": float(score_momentum_raw),
+                            "catalyst": float(score_catalyst_raw),
+                            "liquidity": float(liq_score),
+                            "concentration": float(concentration_score),
+                            "evidence_quality": float(evidence_quality_score),
+                            "thesis_deterioration": float(thesis_deterioration_score),
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                    "holding_context_json": json.dumps(
+                        {
+                            "current_weight_pct": cur_w,
+                            "gain_pct": gain_pct,
+                            "gain_amount": float(holding_ctx.get("gain_amount") or 0.0),
+                            "age_days": int(holding_age_days),
+                            "quantity": float(holding_ctx.get("quantity") or 0.0),
+                            "concentration_pct": cur_w,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                    "dd": dd,
+                }
+            )
 
     if not staged:
         return []
@@ -897,7 +1016,12 @@ def build_candidates(
         v_score = _percentile_score(value_values, float(r["score_value_raw"]))
         m_score = _percentile_score(momentum_values, float(r["score_momentum_raw"]))
         c_final = _percentile_score(catalyst_values, float(r["score_catalyst_raw"]))
-        total = 0.35 * risk_score + 0.20 * v_score + 0.35 * m_score + 0.10 * c_final
+        total = (
+            float(weight_cfg.get("risk", 0.35)) * risk_score
+            + float(weight_cfg.get("value", 0.20)) * v_score
+            + float(weight_cfg.get("momentum", 0.35)) * m_score
+            + float(weight_cfg.get("catalyst", 0.10)) * c_final
+        )
 
         flags = list(r.get("flags") or [])
         candidate_status = "operable"
@@ -905,7 +1029,9 @@ def build_candidates(
             candidate_status = "rejected"
         elif str(r.get("decision_gate") or "").strip().lower() == "manual_review":
             candidate_status = "manual_review"
-        elif "EVIDENCE_INSUFFICIENT" in flags or str(r.get("consensus_state") or "") == "insufficient":
+        elif str(r.get("signal_side") or "buy") == "buy" and (
+            "EVIDENCE_INSUFFICIENT" in flags or str(r.get("consensus_state") or "") == "insufficient"
+        ):
             candidate_status = "watchlist"
 
         dd = r.get("dd")
@@ -921,7 +1047,7 @@ def build_candidates(
         )
         reason += (
             f" | refs={int(r.get('trusted_refs_count') or 0)} consensus={r.get('consensus_state')} "
-            f"gate={r.get('decision_gate')} status={candidate_status} liq={float(r.get('liquidity_score') or 0.0):.1f} "
+            f"gate={r.get('decision_gate')} status={candidate_status} side={r.get('signal_side')} liq={float(r.get('liquidity_score') or 0.0):.1f} "
             f"sector={r.get('sector_bucket')}"
         )
         if flags:
@@ -931,6 +1057,9 @@ def build_candidates(
             OpportunityCandidate(
                 symbol=str(r.get("symbol") or ""),
                 candidate_type=str(r.get("candidate_type") or "new"),
+                signal_side=str(r.get("signal_side") or "buy"),
+                signal_family=str(r.get("signal_family") or r.get("candidate_type") or "new"),
+                score_version=str(r.get("score_version") or score_version),
                 score_total=float(total),
                 score_risk=float(risk_score),
                 score_value=float(v_score),
@@ -953,6 +1082,8 @@ def build_candidates(
                 liquidity_score=float(r.get("liquidity_score") or 0.0),
                 sector_bucket=str(r.get("sector_bucket") or "unknown"),
                 is_crypto_proxy=int(r.get("is_crypto_proxy") or 0),
+                holding_context_json=str(r.get("holding_context_json") or "{}"),
+                score_features_json=str(r.get("score_features_json") or "{}"),
             )
         )
 
@@ -965,9 +1096,9 @@ def build_candidates(
         )
     )
 
-    operable = [c for c in out if c.candidate_status == "operable" and c.score_total >= 50.0]
+    operable = [c for c in out if c.candidate_status == "operable" and c.signal_side == "buy" and c.score_total >= 50.0]
     if not operable:
-        operable = [c for c in out if c.candidate_status == "operable"]
+        operable = [c for c in out if c.candidate_status == "operable" and c.signal_side == "buy"]
     selected: List[OpportunityCandidate] = []
     sector_cap = int(max_per_sector)
     sector_counts: Dict[str, int] = {}
@@ -988,7 +1119,33 @@ def build_candidates(
             selected.append(c)
             if len(selected) >= int(top_n):
                 break
+    selected_symbols = {str(c.symbol) for c in selected}
+    status_order = {
+        "operable_selected_buy": 0,
+        "operable_sell": 1,
+        "operable": 2,
+        "manual_review": 3,
+        "watchlist": 4,
+        "rejected": 5,
+    }
+
+    def _rank_bucket(candidate: OpportunityCandidate) -> int:
+        if candidate.candidate_status == "operable" and candidate.signal_side == "buy" and candidate.symbol in selected_symbols:
+            return status_order["operable_selected_buy"]
+        if candidate.candidate_status == "operable" and candidate.signal_side == "sell":
+            return status_order["operable_sell"]
+        return status_order.get(str(candidate.candidate_status or "watchlist"), 6)
+
     if not selected:
+        out.sort(
+            key=lambda c: (
+                _rank_bucket(c),
+                -float(c.score_total),
+                -(float(c.liquidity_score) if liquidity_priority else 0.0),
+                -float(c.trusted_refs_count),
+                str(c.symbol),
+            )
+        )
         return out
 
     # Sizing with caps.
@@ -1006,7 +1163,7 @@ def build_candidates(
         multipliers[c.symbol] = mult
 
         max_additional_portfolio_pct = max(0.0, 15.0 - c.current_weight_pct)
-        if c.candidate_type == "new":
+        if c.signal_side == "buy" and c.candidate_type == "new":
             max_additional_portfolio_pct = min(max_additional_portfolio_pct, 8.0)
         if budget_ars <= 0 or portfolio_total_ars <= 0:
             cap_w = 0.0
@@ -1024,6 +1181,16 @@ def build_candidates(
             continue
         c.suggested_weight_pct = float(w)
         c.suggested_amount_ars = float(budget_ars) * float(w) / 100.0
+
+    out.sort(
+        key=lambda c: (
+            _rank_bucket(c),
+            -float(c.score_total),
+            -(float(c.liquidity_score) if liquidity_priority else 0.0),
+            -float(c.trusted_refs_count),
+            str(c.symbol),
+        )
+    )
 
     return out
 

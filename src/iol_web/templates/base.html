@@ -25,6 +25,7 @@
       </div>
       <nav class="nav">
         <a href="/" class="nav-link{% if request.url.path == '/' %} active{% endif %}">Dashboard</a>
+        <a href="/advisor" class="nav-link{% if request.url.path == '/advisor' %} active{% endif %}">Asesor</a>
         <a href="/quality" class="nav-link{% if request.url.path == '/quality' %} active{% endif %}">Calidad</a>
         <a href="/assets" class="nav-link{% if request.url.path == '/assets' %} active{% endif %}">Activos</a>
         <a href="/history" class="nav-link{% if request.url.path == '/history' %} active{% endif %}">Historia</a>

@@ -18,6 +18,36 @@ from .storage import add_pending, get_pending, remove_pending
 from .batch import BatchError, plan_from_md, plan_template, run_batch
 from .advisor_context import build_advisor_context_from_db_path, render_advisor_context_md
 from .evidence_fetch import collect_symbol_evidence
+from iol_advisor.continuous import (
+    DEFAULT_WINDOW_DAYS,
+    active_variant,
+    build_variant_scorecard,
+    challenger_variant,
+    compare_scorecards,
+    ensure_default_model_variants,
+    evaluate_signal_outcomes,
+    insert_run_regression,
+    list_model_variants,
+    maybe_promote_challenger,
+    resolve_variant_selection,
+)
+from iol_advisor.service import (
+    DEFAULT_SOURCE_POLICY,
+    build_unified_context,
+    find_reusable_opportunity_run,
+    load_briefing_history_payload,
+    load_latest_briefing_payload,
+    load_latest_opportunity_payload,
+    persist_briefing_bundle,
+)
+from iol_reconciliation.service import (
+    apply_proposal as apply_reconciliation_proposal,
+    dismiss_proposal as dismiss_reconciliation_proposal,
+    ensure_latest_run as ensure_latest_reconciliation_run,
+    explain_interval as explain_reconciliation_interval,
+    get_open_payload as get_open_reconciliation_payload,
+    run_reconciliation,
+)
 from .opportunities import (
     build_candidates,
     latest_metrics_by_symbol,
@@ -898,6 +928,8 @@ def snapshot_backfill(
 
 cashflow_app = typer.Typer(help="Manual cashflow adjustments (for real return reconciliation)")
 app.add_typer(cashflow_app, name="cashflow")
+reconcile_app = typer.Typer(help="Movement reconciliation and inference resolution")
+app.add_typer(reconcile_app, name="reconcile")
 
 
 @cashflow_app.command("add")
@@ -1132,6 +1164,101 @@ def cashflow_import_movements(
     )
 
 
+@reconcile_app.command("run")
+def reconcile_run(
+    ctx: typer.Context,
+    as_of: Optional[str] = typer.Option(None, "--as-of", help="Optional YYYY-MM-DD"),
+    days: int = typer.Option(30, "--days", min=2, max=3650),
+    date_from: Optional[str] = typer.Option(None, "--from", help="YYYY-MM-DD"),
+    date_to: Optional[str] = typer.Option(None, "--to", help="YYYY-MM-DD"),
+    force: bool = typer.Option(False, "--force", help="Recompute even if an equivalent run already exists"),
+):
+    f = _parse_iso_date_optional(date_from, "--from")
+    t = _parse_iso_date_optional(date_to, "--to")
+    if f and t and f > t:
+        raise typer.BadParameter("--from must be <= --to")
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        payload = run_reconciliation(conn, as_of=as_of, days=int(days), date_from=f, date_to=t, force=bool(force))
+        _print_json(payload)
+    finally:
+        conn.close()
+
+
+@reconcile_app.command("list-open")
+def reconcile_list_open(
+    ctx: typer.Context,
+    as_of: Optional[str] = typer.Option(None, "--as-of", help="Optional YYYY-MM-DD"),
+):
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        payload = get_open_reconciliation_payload(conn, as_of=as_of, ensure=True)
+        _print_json(payload)
+    finally:
+        conn.close()
+
+
+@reconcile_app.command("apply")
+def reconcile_apply(
+    ctx: typer.Context,
+    proposal_id: int = typer.Option(..., "--proposal-id", min=1),
+    note: Optional[str] = typer.Option(None, "--note", help="Optional note to audit the decision"),
+):
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        payload = apply_reconciliation_proposal(conn, int(proposal_id), note=note)
+        _print_json(payload)
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+
+@reconcile_app.command("dismiss")
+def reconcile_dismiss(
+    ctx: typer.Context,
+    proposal_id: int = typer.Option(..., "--proposal-id", min=1),
+    reason: str = typer.Option(..., "--reason", help="Why the proposal should be ignored"),
+):
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        payload = dismiss_reconciliation_proposal(conn, int(proposal_id), reason=reason)
+        _print_json(payload)
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+
+@reconcile_app.command("explain")
+def reconcile_explain(
+    ctx: typer.Context,
+    interval_id: int = typer.Option(..., "--interval-id", min=1),
+):
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        ensure_latest_reconciliation_run(conn)
+        payload = explain_reconciliation_interval(conn, int(interval_id))
+        _print_json(payload)
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+
 data_app = typer.Typer(help="Local data access")
 app.add_typer(data_app, name="data")
 
@@ -1235,10 +1362,16 @@ advisor_alert_app = typer.Typer(help="Manual advisor alerts")
 advisor_event_app = typer.Typer(help="Manual advisor events")
 advisor_evidence_app = typer.Typer(help="Web evidence for symbols")
 advisor_opp_app = typer.Typer(help="Opportunity pipeline (ranking)")
+advisor_opp_variants_app = typer.Typer(help="Opportunity model variants")
+advisor_briefing_app = typer.Typer(help="Advisor briefings and autopilot runs")
+advisor_autopilot_app = typer.Typer(help="Automated advisor orchestration")
 advisor_app.add_typer(advisor_alert_app, name="alert")
 advisor_app.add_typer(advisor_event_app, name="event")
 advisor_app.add_typer(advisor_evidence_app, name="evidence")
 advisor_app.add_typer(advisor_opp_app, name="opportunities")
+advisor_opp_app.add_typer(advisor_opp_variants_app, name="variants")
+advisor_app.add_typer(advisor_briefing_app, name="briefing")
+advisor_app.add_typer(advisor_autopilot_app, name="autopilot")
 
 _ALERT_SEVERITIES = {"low", "medium", "high"}
 _ALERT_STATUSES = {"open", "closed", "all"}
@@ -1248,6 +1381,7 @@ _OPP_MODES = {"new", "rebuy", "both"}
 _OPP_UNIVERSES = {"bcba_cedears"}
 _SOURCE_POLICIES = {"strict_official_reuters"}
 _CONFLICT_MODES = {"manual_review"}
+_VARIANT_SELECTORS = {"active", "challenger", "both"}
 
 
 def _maybe_read_stdin(value: str) -> str:
@@ -1277,6 +1411,52 @@ def _load_holdings_map_from_context(ctx_payload: Dict[str, Any]) -> Dict[str, fl
         if not sym:
             continue
         out[sym] = float(r.get("total_value") or 0.0)
+    return out
+
+
+def _load_holdings_context_from_db(conn, as_of: str) -> Dict[str, Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT snapshot_date, symbol, quantity, last_price, ppc, total_value, gain_pct, gain_amount
+        FROM portfolio_assets
+        WHERE snapshot_date = (
+            SELECT MAX(snapshot_date) FROM portfolio_assets WHERE snapshot_date <= ?
+        )
+        """,
+        (str(as_of),),
+    ).fetchall()
+    first_seen_rows = conn.execute(
+        """
+        SELECT symbol, MIN(snapshot_date) AS first_seen
+        FROM portfolio_assets
+        WHERE snapshot_date <= ?
+          AND COALESCE(total_value, 0) > 0
+        GROUP BY symbol
+        """,
+        (str(as_of),),
+    ).fetchall()
+    first_seen = {str(r["symbol"] or ""): str(r["first_seen"] or "") for r in first_seen_rows}
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        symbol = str(row["symbol"] or "").strip().upper()
+        if not symbol:
+            continue
+        age_days = 0
+        try:
+            first = first_seen.get(symbol)
+            if first:
+                age_days = max(0, (date.fromisoformat(str(as_of)) - date.fromisoformat(first)).days)
+        except Exception:
+            age_days = 0
+        out[symbol] = {
+            "quantity": float(row["quantity"] or 0.0),
+            "last_price": float(row["last_price"] or 0.0),
+            "ppc": float(row["ppc"] or 0.0) if row["ppc"] is not None else None,
+            "total_value": float(row["total_value"] or 0.0),
+            "gain_pct": float(row["gain_pct"] or 0.0) if row["gain_pct"] is not None else 0.0,
+            "gain_amount": float(row["gain_amount"] or 0.0) if row["gain_amount"] is not None else 0.0,
+            "age_days": int(age_days),
+        }
     return out
 
 
@@ -1413,6 +1593,576 @@ def _store_evidence_rows(conn, rows: List[Dict[str, Any]]) -> int:
     return inserted
 
 
+def _snapshot_universe_impl(
+    cli_ctx: CLIContext,
+    *,
+    as_of: Optional[str],
+    universe: str,
+) -> Dict[str, Any]:
+    universe_v = _normalize_enum(universe, "--universe", _OPP_UNIVERSES)
+    db_path = resolve_db_path(cli_ctx.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        latest_snap = _latest_snapshot_date(conn)
+    finally:
+        conn.close()
+    as_of_v = parse_iso_date(as_of, default=latest_snap or date.today().isoformat())
+
+    ctx_payload = build_advisor_context_from_db_path(db_path=db_path, as_of=as_of_v, limit=200, history_days=3650)
+    holdings_map = _load_holdings_map_from_context(ctx_payload)
+    symbols = set(holdings_map.keys())
+
+    client = _get_client(cli_ctx)
+    panel_data: List[Dict[str, Any]] = []
+    if universe_v == "bcba_cedears":
+        try:
+            panel_payload = client.get_panel_quotes("Acciones", "CEDEARs", normalize_country("argentina"))
+            panel_data = panel_rows(panel_payload)
+        except Exception:
+            panel_data = []
+
+    rows_to_upsert: List[Dict[str, Any]] = []
+    for r in panel_data:
+        pr = snapshot_row_from_panel(as_of_v, r, market="bcba")
+        if pr is None:
+            continue
+        rows_to_upsert.append(pr)
+        symbols.add(str(pr["symbol"]))
+
+    quote_errors: List[Dict[str, Any]] = []
+    for sym in sorted(symbols):
+        try:
+            quote = client.get_quote(normalize_market("bcba"), sym)
+            rows_to_upsert.append(snapshot_row_from_quote(as_of_v, sym, quote, market="bcba"))
+        except Exception as exc:
+            quote_errors.append({"symbol": sym, "error": str(exc)})
+
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        for r in rows_to_upsert:
+            conn.execute(
+                """
+                INSERT INTO market_symbol_snapshots (
+                    snapshot_date, symbol, market, last_price, bid, ask, spread_pct,
+                    daily_var_pct, operations_count, volume_amount, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date, symbol, source) DO UPDATE SET
+                    market=excluded.market,
+                    last_price=excluded.last_price,
+                    bid=excluded.bid,
+                    ask=excluded.ask,
+                    spread_pct=excluded.spread_pct,
+                    daily_var_pct=excluded.daily_var_pct,
+                    operations_count=excluded.operations_count,
+                    volume_amount=excluded.volume_amount
+                """,
+                (
+                    r["snapshot_date"],
+                    r["symbol"],
+                    r["market"],
+                    r["last_price"],
+                    r["bid"],
+                    r["ask"],
+                    r["spread_pct"],
+                    r["daily_var_pct"],
+                    r["operations_count"],
+                    r["volume_amount"],
+                    r["source"],
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "as_of": as_of_v,
+        "universe": universe_v,
+        "rows_upserted": len(rows_to_upsert),
+        "symbols_considered": len(symbols),
+        "panel_rows": len(panel_data),
+        "quote_errors": quote_errors,
+    }
+
+
+def _run_opportunity_pipeline_impl(
+    cli_ctx: CLIContext,
+    *,
+    budget_ars: float,
+    mode: str,
+    as_of: Optional[str],
+    top: int,
+    universe: str,
+    fetch_evidence: bool,
+    evidence_max_symbols: int,
+    evidence_per_source_limit: int,
+    evidence_news: bool,
+    evidence_sec: bool,
+    evidence_timeout_sec: int,
+    web_link: bool,
+    web_top_k: int,
+    web_source_policy: str,
+    web_lookback_days: int,
+    web_min_trusted_refs: int,
+    web_conflict_mode: str,
+    web_reuters: bool,
+    web_official: bool,
+    exclude_crypto_new: bool,
+    min_volume_amount: float,
+    min_operations: int,
+    liquidity_priority: bool,
+    diversify_sectors: bool,
+    max_per_sector: int,
+    variant: str = "active",
+    cadence: Optional[str] = None,
+    reuse_existing: bool = False,
+) -> Dict[str, Any]:
+    if float(budget_ars) <= 0:
+        raise typer.BadParameter("--budget-ars must be > 0")
+    mode_v = _normalize_enum(mode, "--mode", _OPP_MODES)
+    universe_v = _normalize_enum(universe, "--universe", _OPP_UNIVERSES)
+    web_source_policy_v = _normalize_enum(web_source_policy, "--web-source-policy", _SOURCE_POLICIES)
+    web_conflict_mode_v = _normalize_enum(web_conflict_mode, "--web-conflict-mode", _CONFLICT_MODES)
+
+    db_path = resolve_db_path(cli_ctx.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        ensure_default_model_variants(conn)
+        latest_snap = _latest_snapshot_date(conn)
+        as_of_v = parse_iso_date(as_of, default=latest_snap or date.today().isoformat())
+        if variant in _VARIANT_SELECTORS and variant == "both":
+            selected = resolve_variant_selection(conn, "both")
+            if not selected:
+                raise typer.BadParameter("--variant both requires active/challenger variants")
+            results: List[Dict[str, Any]] = []
+            for row in selected:
+                results.append(
+                    _run_opportunity_pipeline_impl(
+                        cli_ctx,
+                        budget_ars=float(budget_ars),
+                        mode=mode_v,
+                        as_of=as_of_v,
+                        top=int(top),
+                        universe=universe_v,
+                        fetch_evidence=bool(fetch_evidence),
+                        evidence_max_symbols=int(evidence_max_symbols),
+                        evidence_per_source_limit=int(evidence_per_source_limit),
+                        evidence_news=bool(evidence_news),
+                        evidence_sec=bool(evidence_sec),
+                        evidence_timeout_sec=int(evidence_timeout_sec),
+                        web_link=bool(web_link),
+                        web_top_k=int(web_top_k),
+                        web_source_policy=web_source_policy_v,
+                        web_lookback_days=int(web_lookback_days),
+                        web_min_trusted_refs=int(web_min_trusted_refs),
+                        web_conflict_mode=web_conflict_mode_v,
+                        web_reuters=bool(web_reuters),
+                        web_official=bool(web_official),
+                        exclude_crypto_new=bool(exclude_crypto_new),
+                        min_volume_amount=float(min_volume_amount),
+                        min_operations=int(min_operations),
+                        liquidity_priority=bool(liquidity_priority),
+                        diversify_sectors=bool(diversify_sectors),
+                        max_per_sector=int(max_per_sector),
+                        variant=str(row.id),
+                        cadence=cadence,
+                        reuse_existing=bool(reuse_existing),
+                    )
+                )
+            current_active = active_variant(conn)
+            active_row = None
+            if current_active is not None:
+                for res in results:
+                    if int(res.get("variant_id") or 0) == int(current_active.id):
+                        active_row = res
+                        break
+            if active_row is None:
+                active_row = results[0]
+            return {
+                "variant": "both",
+                "variant_runs": results,
+                "active_variant_id": active_row.get("variant_id"),
+                "run_id": active_row.get("run_id"),
+                "as_of": as_of_v,
+                "mode": mode_v,
+                "universe": universe_v,
+                "budget_ars": float(budget_ars),
+                "top_n": int(top),
+                "pipeline_warnings": list(active_row.get("pipeline_warnings") or []),
+                "run_metrics": dict(active_row.get("run_metrics") or {}),
+                "candidates_total": int(active_row.get("candidates_total") or 0),
+                "top_operable": list(active_row.get("top_operable") or []),
+                "watchlist": list(active_row.get("watchlist") or []),
+                "manual_review": list(active_row.get("manual_review") or []),
+                "reused": bool(all(bool(r.get("reused")) for r in results)),
+            }
+        selected = resolve_variant_selection(conn, variant)
+        if len(selected) != 1:
+            raise typer.BadParameter("--variant must be active|challenger|both or a valid variant id")
+        variant_row = selected[0]
+        variant_cfg = dict(variant_row.config or {})
+        score_version = str(variant_cfg.get("score_version") or variant_row.name)
+        if reuse_existing:
+            existing = find_reusable_opportunity_run(
+                conn,
+                as_of=as_of_v,
+                mode=mode_v,
+                universe=universe_v,
+                budget_ars=float(budget_ars),
+                top_n=int(top),
+                variant_id=int(variant_row.id),
+            )
+            if existing:
+                return {
+                    "run_id": int(existing["id"]),
+                    "variant_id": int(variant_row.id),
+                    "variant_name": variant_row.name,
+                    "score_version": score_version,
+                    "as_of": as_of_v,
+                    "mode": mode_v,
+                    "universe": universe_v,
+                    "budget_ars": float(budget_ars),
+                    "top_n": int(top),
+                    "evidence_fetch": {
+                        "enabled": False,
+                        "symbols": [],
+                        "fetched_rows": 0,
+                        "inserted": 0,
+                        "errors": [],
+                        "source_policy": web_source_policy_v,
+                    },
+                    "pipeline_warnings": list(existing.get("pipeline_warnings") or []),
+                    "run_metrics": dict(existing.get("run_metrics") or {}),
+                    "candidates_total": len(existing.get("candidates") or []),
+                    "top_operable": list(existing.get("top_operable") or []),
+                    "watchlist": list(existing.get("watchlist") or []),
+                    "manual_review": [
+                        c for c in (existing.get("candidates") or [])
+                        if str(c.get("candidate_status") or "").strip().lower() == "manual_review"
+                    ][: int(top)],
+                    "reused": True,
+                }
+    finally:
+        conn.close()
+
+    cfg = {
+        "weights": dict(variant_cfg.get("weights") or {"risk": 0.35, "value": 0.20, "momentum": 0.35, "catalyst": 0.10}),
+        "thresholds": {
+            "spread_pct_max": 2.5,
+            "concentration_pct_max": 15.0,
+            "new_asset_initial_cap_pct": 8.0,
+            "drawdown_exclusion_pct": -25.0,
+            "rebuy_dip_threshold_pct": -8.0,
+            "exclude_crypto_new": bool(exclude_crypto_new),
+            "min_volume_amount": float(min_volume_amount),
+            "min_operations": int(min_operations),
+            "liquidity_priority": bool(liquidity_priority),
+            "diversify_sectors": bool(diversify_sectors),
+            "max_per_sector": int(max_per_sector) if bool(diversify_sectors) else 0,
+            "trim_weight_pct": float(((variant_cfg.get("thresholds") or {}).get("trim_weight_pct") or 12.0)),
+            "exit_weight_pct": float(((variant_cfg.get("thresholds") or {}).get("exit_weight_pct") or 15.0)),
+            "sell_momentum_max": float(((variant_cfg.get("thresholds") or {}).get("sell_momentum_max") or 35.0)),
+            "exit_momentum_max": float(((variant_cfg.get("thresholds") or {}).get("exit_momentum_max") or 20.0)),
+            "sell_conflict_exit": bool((variant_cfg.get("thresholds") or {}).get("sell_conflict_exit", True)),
+            "liquidity_floor": float(((variant_cfg.get("thresholds") or {}).get("liquidity_floor") or 40.0)),
+        },
+        "variant": variant_row.to_dict(),
+        "web_link": {
+            "enabled": bool(web_link),
+            "top_k": int(web_top_k),
+            "source_policy": web_source_policy_v,
+            "lookback_days": int(web_lookback_days),
+            "min_trusted_refs": int(web_min_trusted_refs),
+            "conflict_mode": web_conflict_mode_v,
+            "reuters": bool(web_reuters),
+            "official": bool(web_official),
+        },
+    }
+
+    now = _utc_now_iso()
+    run_id = None
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO advisor_opportunity_runs (
+                created_at_utc, as_of, mode, universe, budget_ars, top_n, variant_id, score_version, status, error_message, config_json, pipeline_warnings_json, run_metrics_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now,
+                as_of_v,
+                mode_v,
+                universe_v,
+                float(budget_ars),
+                int(top),
+                int(variant_row.id),
+                score_version,
+                "running",
+                None,
+                json.dumps(cfg, ensure_ascii=True),
+                None,
+                None,
+            ),
+        )
+        run_id = int(cur.lastrowid)
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        ctx_payload = build_advisor_context_from_db_path(db_path=db_path, as_of=as_of_v, limit=500, history_days=3650)
+        portfolio_total = float(((ctx_payload or {}).get("snapshot") or {}).get("total_value_ars") or 0.0)
+        holdings_map = _load_holdings_map_from_context(ctx_payload)
+
+        conn = connect(db_path)
+        init_db(conn)
+        try:
+            market_rows = _load_market_snapshot_rows(conn, as_of_v)
+            evidence_map = _load_evidence_rows_grouped(conn, as_of_v, lookback_days=int(web_lookback_days))
+            holdings_context = _load_holdings_context_from_db(conn, as_of_v)
+        finally:
+            conn.close()
+
+        latest_metrics = latest_metrics_by_symbol(market_rows, as_of_v)
+        if not latest_metrics:
+            raise RuntimeError("NO_MARKET_SNAPSHOTS: run 'iol advisor opportunities snapshot-universe' first")
+
+        series_by_symbol = price_series_by_symbol(market_rows, as_of_v)
+        prelim_candidates = build_candidates(
+            as_of=as_of_v,
+            mode=mode_v,
+            budget_ars=float(budget_ars),
+            top_n=int(top),
+            portfolio_total_ars=portfolio_total,
+            holdings_value_by_symbol=holdings_map,
+            latest_metrics=latest_metrics,
+            series_by_symbol=series_by_symbol,
+            evidence_by_symbol=evidence_map,
+            holdings_context_by_symbol=holdings_context,
+            min_trusted_refs=0,
+            apply_expert_overlay=False,
+            conflict_mode=web_conflict_mode_v,
+            exclude_crypto_new=bool(exclude_crypto_new),
+            min_volume_amount=float(min_volume_amount),
+            min_operations=int(min_operations),
+            liquidity_priority=bool(liquidity_priority),
+            max_per_sector=0,
+            weights=dict(cfg.get("weights") or {}),
+            thresholds=dict(cfg.get("thresholds") or {}),
+            score_version=score_version,
+        )
+
+        pipeline_warnings: List[str] = []
+        web_link_enabled = bool(web_link and fetch_evidence)
+        evidence_fetch_summary: Dict[str, Any] = {
+            "enabled": bool(web_link_enabled),
+            "symbols": [],
+            "fetched_rows": 0,
+            "inserted": 0,
+            "errors": [],
+            "source_policy": web_source_policy_v,
+        }
+        if web_link_enabled:
+            auto_symbols = _pick_symbols_for_web_link(
+                holdings_map=holdings_map,
+                prelim_candidates=[c.to_dict() for c in prelim_candidates],
+                top_k=int(web_top_k),
+            )
+            auto_symbols = auto_symbols[: int(evidence_max_symbols)]
+            evidence_fetch_summary["symbols"] = auto_symbols
+            collected: List[Dict[str, Any]] = []
+            fetch_errors: List[Dict[str, Any]] = []
+            for sym in auto_symbols:
+                rows, errs = collect_symbol_evidence(
+                    symbol=sym,
+                    per_source_limit=int(evidence_per_source_limit),
+                    include_news=bool(evidence_news),
+                    include_sec=bool(evidence_sec),
+                    timeout_sec=int(evidence_timeout_sec),
+                    source_policy=web_source_policy_v,
+                    include_reuters=bool(web_reuters),
+                    include_official=bool(web_official),
+                    run_stage="rerank",
+                )
+                collected.extend(rows)
+                for e in errs:
+                    fetch_errors.append({"symbol": sym, "error": e})
+
+            conn = connect(db_path)
+            init_db(conn)
+            try:
+                inserted_rows = _store_evidence_rows(conn, collected)
+                conn.commit()
+            finally:
+                conn.close()
+            evidence_fetch_summary["fetched_rows"] = len(collected)
+            evidence_fetch_summary["inserted"] = int(inserted_rows)
+            evidence_fetch_summary["errors"] = fetch_errors
+            if fetch_errors:
+                pipeline_warnings.append("WEB_FETCH_PARTIAL_ERRORS")
+
+            conn = connect(db_path)
+            init_db(conn)
+            try:
+                evidence_map = _load_evidence_rows_grouped(conn, as_of_v, lookback_days=int(web_lookback_days))
+            finally:
+                conn.close()
+
+        has_recent_evidence = any(bool(v) for v in evidence_map.values())
+        apply_web_overlay = bool(
+            web_link_enabled
+            and (int(evidence_fetch_summary.get("inserted") or 0) > 0 or has_recent_evidence)
+        )
+        min_refs_final = int(web_min_trusted_refs) if apply_web_overlay else 0
+        if web_link_enabled and not apply_web_overlay:
+            pipeline_warnings.append("WEB_FETCH_EMPTY_FALLBACK_TO_QUANT")
+
+        rerank_symbols = set(_pick_symbols_for_web_link(
+            holdings_map=holdings_map,
+            prelim_candidates=[c.to_dict() for c in prelim_candidates],
+            top_k=int(web_top_k),
+        ))
+        latest_metrics_final = {sym: row for sym, row in latest_metrics.items() if sym in rerank_symbols}
+        series_by_symbol_final = {sym: row for sym, row in series_by_symbol.items() if sym in rerank_symbols}
+        evidence_map_final = {sym: evidence_map.get(sym, []) for sym in rerank_symbols}
+
+        final_candidates = build_candidates(
+            as_of=as_of_v,
+            mode=mode_v,
+            budget_ars=float(budget_ars),
+            top_n=int(top),
+            portfolio_total_ars=portfolio_total,
+            holdings_value_by_symbol=holdings_map,
+            latest_metrics=latest_metrics_final,
+            series_by_symbol=series_by_symbol_final,
+            evidence_by_symbol=evidence_map_final,
+            holdings_context_by_symbol=holdings_context,
+            min_trusted_refs=min_refs_final,
+            apply_expert_overlay=apply_web_overlay,
+            conflict_mode=web_conflict_mode_v,
+            exclude_crypto_new=bool(exclude_crypto_new),
+            min_volume_amount=float(min_volume_amount),
+            min_operations=int(min_operations),
+            liquidity_priority=bool(liquidity_priority),
+            max_per_sector=int(max_per_sector) if bool(diversify_sectors) else 0,
+            weights=dict(cfg.get("weights") or {}),
+            thresholds=dict(cfg.get("thresholds") or {}),
+            score_version=score_version,
+        )
+        final_symbols = {str(c.symbol).strip().upper() for c in final_candidates}
+        prelim_non_operable = [
+            c
+            for c in prelim_candidates
+            if str(c.symbol).strip().upper() not in final_symbols and str(c.candidate_status) != "operable"
+        ]
+        candidates = list(final_candidates) + prelim_non_operable
+        run_metrics = summarize_run_metrics(candidates)
+
+        conn = connect(db_path)
+        init_db(conn)
+        try:
+            conn.execute("DELETE FROM advisor_opportunity_candidates WHERE run_id = ?", (int(run_id),))
+            for c in candidates:
+                d = c.to_dict()
+                conn.execute(
+                    """
+                    INSERT INTO advisor_opportunity_candidates (
+                        run_id, symbol, candidate_type, signal_side, signal_family, score_version, score_total, score_risk, score_value, score_momentum,
+                        score_catalyst, entry_low, entry_high, suggested_weight_pct, suggested_amount_ars,
+                        reason_summary, risk_flags_json, filters_passed, expert_signal_score,
+                        trusted_refs_count, consensus_state, decision_gate, candidate_status, evidence_summary_json, liquidity_score, sector_bucket, is_crypto_proxy,
+                        holding_context_json, score_features_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(run_id),
+                        d["symbol"],
+                        d["candidate_type"],
+                        d.get("signal_side"),
+                        d.get("signal_family"),
+                        d.get("score_version"),
+                        float(d["score_total"]),
+                        float(d["score_risk"]),
+                        float(d["score_value"]),
+                        float(d["score_momentum"]),
+                        float(d["score_catalyst"]),
+                        d["entry_low"],
+                        d["entry_high"],
+                        d["suggested_weight_pct"],
+                        d["suggested_amount_ars"],
+                        d["reason_summary"],
+                        d["risk_flags_json"],
+                        int(d["filters_passed"]),
+                        float(d.get("expert_signal_score") or 0.0),
+                        int(d.get("trusted_refs_count") or 0),
+                        str(d.get("consensus_state") or "insufficient"),
+                        str(d.get("decision_gate") or "auto"),
+                        str(d.get("candidate_status") or "watchlist"),
+                        str(d.get("evidence_summary_json") or "{}"),
+                        float(d.get("liquidity_score") or 0.0),
+                        str(d.get("sector_bucket") or "unknown"),
+                        int(d.get("is_crypto_proxy") or 0),
+                        str(d.get("holding_context_json") or "{}"),
+                        str(d.get("score_features_json") or "{}"),
+                    ),
+                )
+            warnings_json = json.dumps(pipeline_warnings, ensure_ascii=True) if pipeline_warnings else None
+            conn.execute(
+                "UPDATE advisor_opportunity_runs SET status='ok', error_message=NULL, pipeline_warnings_json=?, run_metrics_json=? WHERE id = ?",
+                (warnings_json, json.dumps(run_metrics, ensure_ascii=True, sort_keys=True), int(run_id)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        operable_rows = [c.to_dict() for c in candidates if str(c.candidate_status) == "operable"][: int(top)]
+        manual_rows = [
+            c.to_dict()
+            for c in candidates
+            if str(c.candidate_status).strip().lower() == "manual_review"
+        ][: int(top)]
+        watchlist_rows = [
+            c.to_dict()
+            for c in candidates
+            if str(c.candidate_status).strip().lower() == "watchlist"
+        ][: int(top)]
+        return {
+            "run_id": int(run_id),
+            "variant_id": int(variant_row.id),
+            "variant_name": variant_row.name,
+            "score_version": score_version,
+            "as_of": as_of_v,
+            "mode": mode_v,
+            "universe": universe_v,
+            "budget_ars": float(budget_ars),
+            "top_n": int(top),
+            "evidence_fetch": evidence_fetch_summary,
+            "pipeline_warnings": pipeline_warnings,
+            "run_metrics": run_metrics,
+            "candidates_total": len(candidates),
+            "top_operable": operable_rows,
+            "watchlist": watchlist_rows,
+            "manual_review": manual_rows,
+            "reused": False,
+        }
+    except Exception as exc:
+        conn = connect(db_path)
+        init_db(conn)
+        try:
+            conn.execute(
+                "UPDATE advisor_opportunity_runs SET status='error', error_message=?, pipeline_warnings_json=?, run_metrics_json=? WHERE id = ?",
+                (str(exc), json.dumps(["RUN_ERROR"], ensure_ascii=True), None, int(run_id)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        raise
+
+
 @advisor_app.command("context")
 def advisor_context(
     ctx: typer.Context,
@@ -1427,7 +2177,7 @@ def advisor_context(
 ):
     """Build a JSON context pack from the local SQLite DB for portfolio analysis (no API calls)."""
     db_path = resolve_db_path(ctx.obj.config.db_path)
-    payload = build_advisor_context_from_db_path(
+    payload = build_unified_context(
         db_path=db_path,
         as_of=as_of,
         limit=int(limit),
@@ -2017,93 +2767,7 @@ def advisor_opportunities_snapshot_universe(
     as_of: Optional[str] = typer.Option(None, "--as-of", help="Optional YYYY-MM-DD"),
     universe: str = typer.Option("bcba_cedears", "--universe", help="bcba_cedears"),
 ):
-    universe_v = _normalize_enum(universe, "--universe", _OPP_UNIVERSES)
-    db_path = resolve_db_path(ctx.obj.config.db_path)
-    conn = connect(db_path)
-    init_db(conn)
-    try:
-        latest_snap = _latest_snapshot_date(conn)
-    finally:
-        conn.close()
-    as_of_v = parse_iso_date(as_of, default=latest_snap or date.today().isoformat())
-
-    ctx_payload = build_advisor_context_from_db_path(db_path=db_path, as_of=as_of_v, limit=200, history_days=3650)
-    holdings_map = _load_holdings_map_from_context(ctx_payload)
-    symbols = set(holdings_map.keys())
-
-    client = _get_client(ctx.obj)
-    panel_data: List[Dict[str, Any]] = []
-    if universe_v == "bcba_cedears":
-        try:
-            panel_payload = client.get_panel_quotes("Acciones", "CEDEARs", normalize_country("argentina"))
-            panel_data = panel_rows(panel_payload)
-        except Exception:
-            panel_data = []
-
-    rows_to_upsert: List[Dict[str, Any]] = []
-    for r in panel_data:
-        pr = snapshot_row_from_panel(as_of_v, r, market="bcba")
-        if pr is None:
-            continue
-        rows_to_upsert.append(pr)
-        symbols.add(str(pr["symbol"]))
-
-    quote_errors: List[Dict[str, Any]] = []
-    for sym in sorted(symbols):
-        try:
-            quote = client.get_quote(normalize_market("bcba"), sym)
-            rows_to_upsert.append(snapshot_row_from_quote(as_of_v, sym, quote, market="bcba"))
-        except Exception as exc:
-            quote_errors.append({"symbol": sym, "error": str(exc)})
-
-    conn = connect(db_path)
-    init_db(conn)
-    try:
-        for r in rows_to_upsert:
-            conn.execute(
-                """
-                INSERT INTO market_symbol_snapshots (
-                    snapshot_date, symbol, market, last_price, bid, ask, spread_pct,
-                    daily_var_pct, operations_count, volume_amount, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(snapshot_date, symbol, source) DO UPDATE SET
-                    market=excluded.market,
-                    last_price=excluded.last_price,
-                    bid=excluded.bid,
-                    ask=excluded.ask,
-                    spread_pct=excluded.spread_pct,
-                    daily_var_pct=excluded.daily_var_pct,
-                    operations_count=excluded.operations_count,
-                    volume_amount=excluded.volume_amount
-                """,
-                (
-                    r["snapshot_date"],
-                    r["symbol"],
-                    r["market"],
-                    r["last_price"],
-                    r["bid"],
-                    r["ask"],
-                    r["spread_pct"],
-                    r["daily_var_pct"],
-                    r["operations_count"],
-                    r["volume_amount"],
-                    r["source"],
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-    _print_json(
-        {
-            "as_of": as_of_v,
-            "universe": universe_v,
-            "rows_upserted": len(rows_to_upsert),
-            "symbols_considered": len(symbols),
-            "panel_rows": len(panel_data),
-            "quote_errors": quote_errors,
-        }
-    )
+    _print_json(_snapshot_universe_impl(ctx.obj, as_of=as_of, universe=universe))
 
 
 @advisor_opp_app.command("run")
@@ -2111,6 +2775,7 @@ def advisor_opportunities_run(
     ctx: typer.Context,
     budget_ars: float = typer.Option(..., "--budget-ars"),
     mode: str = typer.Option("both", "--mode", help="new|rebuy|both"),
+    variant: str = typer.Option("active", "--variant", help="active|challenger|both"),
     as_of: Optional[str] = typer.Option(None, "--as-of", help="Optional YYYY-MM-DD"),
     top: int = typer.Option(10, "--top", min=1, max=100),
     universe: str = typer.Option("bcba_cedears", "--universe", help="bcba_cedears"),
@@ -2135,311 +2800,38 @@ def advisor_opportunities_run(
     diversify_sectors: bool = typer.Option(True, "--diversify-sectors/--no-diversify-sectors"),
     max_per_sector: int = typer.Option(2, "--max-per-sector", min=1, max=20),
 ):
-    if float(budget_ars) <= 0:
-        raise typer.BadParameter("--budget-ars must be > 0")
-    mode_v = _normalize_enum(mode, "--mode", _OPP_MODES)
-    universe_v = _normalize_enum(universe, "--universe", _OPP_UNIVERSES)
-    web_source_policy_v = _normalize_enum(web_source_policy, "--web-source-policy", _SOURCE_POLICIES)
-    web_conflict_mode_v = _normalize_enum(web_conflict_mode, "--web-conflict-mode", _CONFLICT_MODES)
-
-    db_path = resolve_db_path(ctx.obj.config.db_path)
-    conn = connect(db_path)
-    init_db(conn)
     try:
-        latest_snap = _latest_snapshot_date(conn)
-    finally:
-        conn.close()
-    as_of_v = parse_iso_date(as_of, default=latest_snap or date.today().isoformat())
-
-    cfg = {
-        "weights": {"risk": 0.35, "value": 0.20, "momentum": 0.35, "catalyst": 0.10},
-        "thresholds": {
-            "spread_pct_max": 2.5,
-            "concentration_pct_max": 15.0,
-            "new_asset_initial_cap_pct": 8.0,
-            "drawdown_exclusion_pct": -25.0,
-            "rebuy_dip_threshold_pct": -8.0,
-            "exclude_crypto_new": bool(exclude_crypto_new),
-            "min_volume_amount": float(min_volume_amount),
-            "min_operations": int(min_operations),
-            "liquidity_priority": bool(liquidity_priority),
-            "diversify_sectors": bool(diversify_sectors),
-            "max_per_sector": int(max_per_sector) if bool(diversify_sectors) else 0,
-        },
-        "web_link": {
-            "enabled": bool(web_link),
-            "top_k": int(web_top_k),
-            "source_policy": web_source_policy_v,
-            "lookback_days": int(web_lookback_days),
-            "min_trusted_refs": int(web_min_trusted_refs),
-            "conflict_mode": web_conflict_mode_v,
-            "reuters": bool(web_reuters),
-            "official": bool(web_official),
-        },
-    }
-
-    now = _utc_now_iso()
-    run_id = None
-    conn = connect(db_path)
-    init_db(conn)
-    try:
-        cur = conn.execute(
-            """
-            INSERT INTO advisor_opportunity_runs (
-                created_at_utc, as_of, mode, universe, budget_ars, top_n, status, error_message, config_json, pipeline_warnings_json, run_metrics_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                now,
-                as_of_v,
-                mode_v,
-                universe_v,
-                float(budget_ars),
-                int(top),
-                "running",
-                None,
-                json.dumps(cfg, ensure_ascii=True),
-                None,
-                None,
-            ),
-        )
-        run_id = int(cur.lastrowid)
-        conn.commit()
-    finally:
-        conn.close()
-
-    try:
-        ctx_payload = build_advisor_context_from_db_path(db_path=db_path, as_of=as_of_v, limit=500, history_days=3650)
-        portfolio_total = float(((ctx_payload or {}).get("snapshot") or {}).get("total_value_ars") or 0.0)
-        holdings_map = _load_holdings_map_from_context(ctx_payload)
-
-        conn = connect(db_path)
-        init_db(conn)
-        try:
-            market_rows = _load_market_snapshot_rows(conn, as_of_v)
-            evidence_map = _load_evidence_rows_grouped(conn, as_of_v, lookback_days=int(web_lookback_days))
-        finally:
-            conn.close()
-
-        latest_metrics = latest_metrics_by_symbol(market_rows, as_of_v)
-        if not latest_metrics:
-            raise RuntimeError("NO_MARKET_SNAPSHOTS: run 'iol advisor opportunities snapshot-universe' first")
-
-        series_by_symbol = price_series_by_symbol(market_rows, as_of_v)
-        prelim_candidates = build_candidates(
-            as_of=as_of_v,
-            mode=mode_v,
+        payload = _run_opportunity_pipeline_impl(
+            ctx.obj,
             budget_ars=float(budget_ars),
-            top_n=int(top),
-            portfolio_total_ars=portfolio_total,
-            holdings_value_by_symbol=holdings_map,
-            latest_metrics=latest_metrics,
-            series_by_symbol=series_by_symbol,
-            evidence_by_symbol=evidence_map,
-            min_trusted_refs=0,
-            apply_expert_overlay=False,
-            conflict_mode=web_conflict_mode_v,
+            mode=mode,
+            as_of=as_of,
+            top=int(top),
+            universe=universe,
+            fetch_evidence=bool(fetch_evidence),
+            evidence_max_symbols=int(evidence_max_symbols),
+            evidence_per_source_limit=int(evidence_per_source_limit),
+            evidence_news=bool(evidence_news),
+            evidence_sec=bool(evidence_sec),
+            evidence_timeout_sec=int(evidence_timeout_sec),
+            web_link=bool(web_link),
+            web_top_k=int(web_top_k),
+            web_source_policy=web_source_policy,
+            web_lookback_days=int(web_lookback_days),
+            web_min_trusted_refs=int(web_min_trusted_refs),
+            web_conflict_mode=web_conflict_mode,
+            web_reuters=bool(web_reuters),
+            web_official=bool(web_official),
             exclude_crypto_new=bool(exclude_crypto_new),
             min_volume_amount=float(min_volume_amount),
             min_operations=int(min_operations),
             liquidity_priority=bool(liquidity_priority),
-            max_per_sector=0,
+            diversify_sectors=bool(diversify_sectors),
+            max_per_sector=int(max_per_sector),
+            variant=variant,
         )
-
-        pipeline_warnings: List[str] = []
-        web_link_enabled = bool(web_link and fetch_evidence)
-        evidence_fetch_summary: Dict[str, Any] = {
-            "enabled": bool(web_link_enabled),
-            "symbols": [],
-            "fetched_rows": 0,
-            "inserted": 0,
-            "errors": [],
-            "source_policy": web_source_policy_v,
-        }
-        if web_link_enabled:
-            auto_symbols = _pick_symbols_for_web_link(
-                holdings_map=holdings_map,
-                prelim_candidates=[c.to_dict() for c in prelim_candidates],
-                top_k=int(web_top_k),
-            )
-            auto_symbols = auto_symbols[: int(evidence_max_symbols)]
-            evidence_fetch_summary["symbols"] = auto_symbols
-            collected: List[Dict[str, Any]] = []
-            fetch_errors: List[Dict[str, Any]] = []
-            for sym in auto_symbols:
-                rows, errs = collect_symbol_evidence(
-                    symbol=sym,
-                    per_source_limit=int(evidence_per_source_limit),
-                    include_news=bool(evidence_news),
-                    include_sec=bool(evidence_sec),
-                    timeout_sec=int(evidence_timeout_sec),
-                    source_policy=web_source_policy_v,
-                    include_reuters=bool(web_reuters),
-                    include_official=bool(web_official),
-                    run_stage="rerank",
-                )
-                collected.extend(rows)
-                for e in errs:
-                    fetch_errors.append({"symbol": sym, "error": e})
-
-            conn = connect(db_path)
-            init_db(conn)
-            try:
-                inserted_rows = _store_evidence_rows(conn, collected)
-                conn.commit()
-            finally:
-                conn.close()
-            evidence_fetch_summary["fetched_rows"] = len(collected)
-            evidence_fetch_summary["inserted"] = int(inserted_rows)
-            evidence_fetch_summary["errors"] = fetch_errors
-            if fetch_errors:
-                pipeline_warnings.append("WEB_FETCH_PARTIAL_ERRORS")
-
-            conn = connect(db_path)
-            init_db(conn)
-            try:
-                evidence_map = _load_evidence_rows_grouped(conn, as_of_v, lookback_days=int(web_lookback_days))
-            finally:
-                conn.close()
-
-        has_recent_evidence = any(bool(v) for v in evidence_map.values())
-        apply_web_overlay = bool(
-            web_link_enabled
-            and (int(evidence_fetch_summary.get("inserted") or 0) > 0 or has_recent_evidence)
-        )
-        min_refs_final = int(web_min_trusted_refs) if apply_web_overlay else 0
-        if web_link_enabled and not apply_web_overlay:
-            pipeline_warnings.append("WEB_FETCH_EMPTY_FALLBACK_TO_QUANT")
-
-        rerank_symbols = set(_pick_symbols_for_web_link(
-            holdings_map=holdings_map,
-            prelim_candidates=[c.to_dict() for c in prelim_candidates],
-            top_k=int(web_top_k),
-        ))
-        latest_metrics_final = {sym: row for sym, row in latest_metrics.items() if sym in rerank_symbols}
-        series_by_symbol_final = {sym: row for sym, row in series_by_symbol.items() if sym in rerank_symbols}
-        evidence_map_final = {sym: evidence_map.get(sym, []) for sym in rerank_symbols}
-
-        final_candidates = build_candidates(
-            as_of=as_of_v,
-            mode=mode_v,
-            budget_ars=float(budget_ars),
-            top_n=int(top),
-            portfolio_total_ars=portfolio_total,
-            holdings_value_by_symbol=holdings_map,
-            latest_metrics=latest_metrics_final,
-            series_by_symbol=series_by_symbol_final,
-            evidence_by_symbol=evidence_map_final,
-            min_trusted_refs=min_refs_final,
-            apply_expert_overlay=apply_web_overlay,
-            conflict_mode=web_conflict_mode_v,
-            exclude_crypto_new=bool(exclude_crypto_new),
-            min_volume_amount=float(min_volume_amount),
-            min_operations=int(min_operations),
-            liquidity_priority=bool(liquidity_priority),
-            max_per_sector=int(max_per_sector) if bool(diversify_sectors) else 0,
-        )
-        final_symbols = {str(c.symbol).strip().upper() for c in final_candidates}
-        prelim_non_operable = [
-            c
-            for c in prelim_candidates
-            if str(c.symbol).strip().upper() not in final_symbols and str(c.candidate_status) != "operable"
-        ]
-        candidates = list(final_candidates) + prelim_non_operable
-        run_metrics = summarize_run_metrics(candidates)
-
-        conn = connect(db_path)
-        init_db(conn)
-        try:
-            conn.execute("DELETE FROM advisor_opportunity_candidates WHERE run_id = ?", (int(run_id),))
-            for c in candidates:
-                d = c.to_dict()
-                conn.execute(
-                    """
-                    INSERT INTO advisor_opportunity_candidates (
-                        run_id, symbol, candidate_type, score_total, score_risk, score_value, score_momentum,
-                        score_catalyst, entry_low, entry_high, suggested_weight_pct, suggested_amount_ars,
-                        reason_summary, risk_flags_json, filters_passed, expert_signal_score,
-                        trusted_refs_count, consensus_state, decision_gate, candidate_status, evidence_summary_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        int(run_id),
-                        d["symbol"],
-                        d["candidate_type"],
-                        float(d["score_total"]),
-                        float(d["score_risk"]),
-                        float(d["score_value"]),
-                        float(d["score_momentum"]),
-                        float(d["score_catalyst"]),
-                        d["entry_low"],
-                        d["entry_high"],
-                        d["suggested_weight_pct"],
-                        d["suggested_amount_ars"],
-                        d["reason_summary"],
-                        d["risk_flags_json"],
-                        int(d["filters_passed"]),
-                        float(d.get("expert_signal_score") or 0.0),
-                        int(d.get("trusted_refs_count") or 0),
-                        str(d.get("consensus_state") or "insufficient"),
-                        str(d.get("decision_gate") or "auto"),
-                        str(d.get("candidate_status") or "watchlist"),
-                        str(d.get("evidence_summary_json") or "{}"),
-                    ),
-                )
-            warnings_json = json.dumps(pipeline_warnings, ensure_ascii=True) if pipeline_warnings else None
-            conn.execute(
-                "UPDATE advisor_opportunity_runs SET status='ok', error_message=NULL, pipeline_warnings_json=?, run_metrics_json=? WHERE id = ?",
-                (warnings_json, json.dumps(run_metrics, ensure_ascii=True, sort_keys=True), int(run_id)),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        weighted_rows = [
-            c.to_dict()
-            for c in candidates
-            if str(c.candidate_status) == "operable" and c.suggested_weight_pct is not None
-        ]
-        top_rows = weighted_rows[: int(top)] if weighted_rows else [c.to_dict() for c in candidates if str(c.candidate_status) == "operable"][: int(top)]
-        manual_rows = [
-            c.to_dict()
-            for c in candidates
-            if str(c.candidate_status).strip().lower() == "manual_review"
-        ][: int(top)]
-        watchlist_rows = [
-            c.to_dict()
-            for c in candidates
-            if str(c.candidate_status).strip().lower() == "watchlist"
-        ][: int(top)]
-        _print_json(
-            {
-                "run_id": int(run_id),
-                "as_of": as_of_v,
-                "mode": mode_v,
-                "universe": universe_v,
-                "budget_ars": float(budget_ars),
-                "top_n": int(top),
-                "evidence_fetch": evidence_fetch_summary,
-                "pipeline_warnings": pipeline_warnings,
-                "run_metrics": run_metrics,
-                "candidates_total": len(candidates),
-                "top_operable": top_rows,
-                "watchlist": watchlist_rows,
-                "manual_review": manual_rows,
-            }
-        )
+        _print_json(payload)
     except Exception as exc:
-        conn = connect(db_path)
-        init_db(conn)
-        try:
-            conn.execute(
-                "UPDATE advisor_opportunity_runs SET status='error', error_message=?, pipeline_warnings_json=?, run_metrics_json=? WHERE id = ?",
-                (str(exc), json.dumps(["RUN_ERROR"], ensure_ascii=True), None, int(run_id)),
-            )
-            conn.commit()
-        finally:
-            conn.close()
         console.print(f"Error: {exc}")
         raise typer.Exit(code=1)
 
@@ -2527,6 +2919,314 @@ def advisor_opportunities_list_runs(
         _print_json([dict(r) for r in rows])
     finally:
         conn.close()
+
+
+@advisor_opp_variants_app.command("list")
+def advisor_opportunities_variants_list(
+    ctx: typer.Context,
+):
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        rows = [row.to_dict() for row in list_model_variants(conn)]
+        _print_json(rows)
+    finally:
+        conn.close()
+
+
+@advisor_opp_app.command("evaluate")
+def advisor_opportunities_evaluate(
+    ctx: typer.Context,
+    as_of: Optional[str] = typer.Option(None, "--as-of", help="Optional YYYY-MM-DD"),
+):
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        payload = evaluate_signal_outcomes(conn, as_of=as_of)
+        _print_json(payload)
+    finally:
+        conn.close()
+
+
+@advisor_opp_app.command("scorecard")
+def advisor_opportunities_scorecard(
+    ctx: typer.Context,
+    as_of: Optional[str] = typer.Option(None, "--as-of", help="Optional YYYY-MM-DD"),
+    window_days: int = typer.Option(DEFAULT_WINDOW_DAYS, "--window-days", min=7, max=3650),
+):
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        active_row = active_variant(conn)
+        challenger_row = challenger_variant(conn)
+        active_score = build_variant_scorecard(conn, variant_id=int(active_row.id), as_of=as_of, window_days=int(window_days)) if active_row else {}
+        challenger_score = build_variant_scorecard(conn, variant_id=int(challenger_row.id), as_of=as_of, window_days=int(window_days)) if challenger_row else {}
+        compare = compare_scorecards(active_score, challenger_score)
+        _print_json(
+            {
+                "as_of": as_of,
+                "window_days": int(window_days),
+                "active_variant": active_row.to_dict() if active_row else None,
+                "challenger_variant": challenger_row.to_dict() if challenger_row else None,
+                "active_scorecard": active_score,
+                "challenger_scorecard": challenger_score,
+                "comparison": compare,
+            }
+        )
+    finally:
+        conn.close()
+
+
+@advisor_briefing_app.command("list")
+def advisor_briefing_list(
+    ctx: typer.Context,
+    cadence: Optional[str] = typer.Option(None, "--cadence", help="daily|weekly"),
+    limit: int = typer.Option(20, "--limit", min=1, max=200),
+):
+    cadence_v = cadence.strip().lower() if cadence and cadence.strip() else None
+    if cadence_v is not None and cadence_v not in ("daily", "weekly"):
+        raise typer.BadParameter("--cadence must be daily|weekly")
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    rows = load_briefing_history_payload(db_path, cadence_v, int(limit))
+    _print_json(rows)
+
+
+@advisor_briefing_app.command("latest")
+def advisor_briefing_latest(
+    ctx: typer.Context,
+    cadence: str = typer.Option("daily", "--cadence", help="daily|weekly"),
+):
+    cadence_v = cadence.strip().lower()
+    if cadence_v not in ("daily", "weekly"):
+        raise typer.BadParameter("--cadence must be daily|weekly")
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    payload = load_latest_briefing_payload(db_path, cadence_v)
+    _print_json(payload or {})
+
+
+@advisor_autopilot_app.command("run")
+def advisor_autopilot_run(
+    ctx: typer.Context,
+    cadence: str = typer.Option(..., "--cadence", help="daily|weekly"),
+    as_of: Optional[str] = typer.Option(None, "--as-of", help="Optional YYYY-MM-DD"),
+    budget_ars: float = typer.Option(100000.0, "--budget-ars"),
+    top: int = typer.Option(10, "--top", min=1, max=100),
+    mode: str = typer.Option("both", "--mode", help="new|rebuy|both"),
+    universe: str = typer.Option("bcba_cedears", "--universe", help="bcba_cedears"),
+    source_policy: str = typer.Option(DEFAULT_SOURCE_POLICY, "--source-policy", help="strict_official_reuters"),
+    out: Optional[str] = typer.Option(None, "--out", help="Optional markdown output file"),
+    opportunity_report_out: Optional[str] = typer.Option(None, "--opportunity-report-out", help="Optional weekly opportunities markdown"),
+    force: bool = typer.Option(False, "--force", help="Persist a new briefing even if same cadence+as_of already exists"),
+):
+    cadence_v = cadence.strip().lower()
+    if cadence_v not in ("daily", "weekly"):
+        raise typer.BadParameter("--cadence must be daily|weekly")
+    source_policy_v = _normalize_enum(source_policy, "--source-policy", _SOURCE_POLICIES)
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        ensure_default_model_variants(conn)
+        eval_summary = evaluate_signal_outcomes(conn, as_of=as_of)
+        active_before = active_variant(conn)
+        challenger_before = challenger_variant(conn)
+        active_score_before = build_variant_scorecard(conn, variant_id=int(active_before.id), as_of=as_of, window_days=DEFAULT_WINDOW_DAYS) if active_before else {}
+        challenger_score_before = build_variant_scorecard(conn, variant_id=int(challenger_before.id), as_of=as_of, window_days=DEFAULT_WINDOW_DAYS) if challenger_before else {}
+        comparison_before = compare_scorecards(active_score_before, challenger_score_before)
+    finally:
+        conn.close()
+
+    latest_run = None
+    run_payload: Dict[str, Any] = {}
+    if cadence_v == "weekly":
+        _snapshot_universe_impl(ctx.obj, as_of=as_of, universe=universe)
+        run_payload = _run_opportunity_pipeline_impl(
+            ctx.obj,
+            budget_ars=float(budget_ars),
+            mode=mode,
+            as_of=as_of,
+            top=int(top),
+            universe=universe,
+            fetch_evidence=True,
+            evidence_max_symbols=15,
+            evidence_per_source_limit=2,
+            evidence_news=True,
+            evidence_sec=True,
+            evidence_timeout_sec=10,
+            web_link=True,
+            web_top_k=15,
+            web_source_policy=source_policy_v,
+            web_lookback_days=120,
+            web_min_trusted_refs=2,
+            web_conflict_mode="manual_review",
+            web_reuters=True,
+            web_official=True,
+            exclude_crypto_new=True,
+            min_volume_amount=50000.0,
+            min_operations=5,
+            liquidity_priority=True,
+            diversify_sectors=True,
+            max_per_sector=2,
+            variant="both",
+            cadence=cadence_v,
+            reuse_existing=True,
+        )
+        if opportunity_report_out and run_payload:
+            active_rows = list(run_payload.get("variant_runs") or [])
+            active_report = next((row for row in active_rows if int(row.get("variant_id") or 0) == int(run_payload.get("active_variant_id") or 0)), None) or run_payload
+            conn = connect(db_path)
+            init_db(conn)
+            try:
+                latest_run = load_latest_opportunity_payload(db_path) or active_report
+            finally:
+                conn.close()
+            md = report_markdown(latest_run, latest_run.get("candidates") or [])
+            with open(opportunity_report_out, "w", encoding="utf-8") as f:
+                f.write(md)
+    else:
+        run_payload = _run_opportunity_pipeline_impl(
+            ctx.obj,
+            budget_ars=float(budget_ars),
+            mode=mode,
+            as_of=as_of,
+            top=int(top),
+            universe=universe,
+            fetch_evidence=True,
+            evidence_max_symbols=15,
+            evidence_per_source_limit=2,
+            evidence_news=True,
+            evidence_sec=True,
+            evidence_timeout_sec=10,
+            web_link=True,
+            web_top_k=15,
+            web_source_policy=source_policy_v,
+            web_lookback_days=120,
+            web_min_trusted_refs=2,
+            web_conflict_mode="manual_review",
+            web_reuters=True,
+            web_official=True,
+            exclude_crypto_new=True,
+            min_volume_amount=50000.0,
+            min_operations=5,
+            liquidity_priority=True,
+            diversify_sectors=True,
+            max_per_sector=2,
+            variant="both",
+            cadence=cadence_v,
+            reuse_existing=True,
+        )
+
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        ensure_default_model_variants(conn)
+        active_current = active_variant(conn)
+        challenger_current = challenger_variant(conn)
+        active_score_after = build_variant_scorecard(conn, variant_id=int(active_current.id), as_of=as_of, window_days=DEFAULT_WINDOW_DAYS) if active_current else {}
+        challenger_score_after = build_variant_scorecard(conn, variant_id=int(challenger_current.id), as_of=as_of, window_days=DEFAULT_WINDOW_DAYS) if challenger_current else {}
+        comparison_after = compare_scorecards(active_score_after, challenger_score_after)
+        promotion = {"promoted": False, "reason": "not_weekly", "flags": []}
+        if cadence_v == "weekly" and active_before and challenger_before and active_score_after and challenger_score_after:
+            promotion = maybe_promote_challenger(
+                conn,
+                active_variant_id=int(active_before.id),
+                challenger_variant_id=int(challenger_before.id),
+                active_scorecard=active_score_after,
+                challenger_scorecard=challenger_score_after,
+            )
+            if promotion.get("promoted"):
+                active_current = active_variant(conn)
+                challenger_current = challenger_variant(conn)
+                active_score_after = build_variant_scorecard(conn, variant_id=int(active_current.id), as_of=as_of, window_days=DEFAULT_WINDOW_DAYS) if active_current else {}
+                challenger_score_after = build_variant_scorecard(conn, variant_id=int(challenger_current.id), as_of=as_of, window_days=DEFAULT_WINDOW_DAYS) if challenger_current else {}
+                comparison_after = compare_scorecards(active_score_after, challenger_score_after)
+                comparison_after["regression_flags"] = list(dict.fromkeys(list(comparison_after.get("regression_flags") or []) + list(promotion.get("flags") or [])))
+
+        for row in (run_payload.get("variant_runs") or []):
+            variant_id = int(row.get("variant_id") or 0)
+            scorecard = active_score_after if active_current and variant_id == int(active_current.id) else challenger_score_after
+            gate_status = comparison_after.get("gate_status") if active_current and variant_id == int(active_current.id) else str((scorecard or {}).get("status") or "ok")
+            regression_flags = comparison_after.get("regression_flags") if active_current and variant_id == int(active_current.id) else list(promotion.get("flags") or [])
+            baseline_id = int(active_before.id if active_before else variant_id)
+            if row.get("run_id"):
+                insert_run_regression(
+                    conn,
+                    run_id=int(row["run_id"]),
+                    cadence=cadence_v,
+                    variant_id=variant_id,
+                    baseline_variant_id=baseline_id,
+                    window_days=DEFAULT_WINDOW_DAYS,
+                    scorecard=dict(scorecard or {}),
+                    gate_status=str(gate_status or "ok"),
+                    regression_flags=list(regression_flags or []),
+                )
+
+        active_runs = list(run_payload.get("variant_runs") or [])
+        latest_run = next((row for row in active_runs if active_current and int(row.get("variant_id") or 0) == int(active_current.id)), None)
+        if latest_run is None:
+            latest_run = load_latest_opportunity_payload(db_path)
+        regression_payload = {
+            "gate_status": comparison_after.get("gate_status"),
+            "regression_flags": list(comparison_after.get("regression_flags") or []),
+            "scorecard": dict(active_score_after or {}),
+            "comparison": comparison_after,
+            "promotion": promotion,
+        }
+        active_variant_payload = active_current.to_dict() if active_current else None
+    finally:
+        conn.close()
+
+    context = build_unified_context(
+        db_path,
+        as_of=as_of,
+        limit=10,
+        history_days=365,
+        include_cash=True,
+        include_orders=False,
+    )
+
+    if cadence_v == "daily" and latest_run:
+        try:
+            snapshot_date = str(((context or {}).get("snapshot") or {}).get("snapshot_date") or "")
+            if snapshot_date and latest_run.get("as_of"):
+                age_days = (date.fromisoformat(snapshot_date) - date.fromisoformat(str(latest_run.get("as_of")))).days
+                if age_days > 7:
+                    latest_run = None
+        except Exception:
+            pass
+
+    bundle = persist_briefing_bundle(
+        db_path=db_path,
+        cadence=cadence_v,
+        env=ctx.obj.env,
+        base_url=ctx.obj.base_url,
+        context=context,
+        latest_run=latest_run,
+        regression=regression_payload,
+        active_variant=active_variant_payload,
+        source_policy=source_policy_v,
+        force=bool(force),
+    )
+    briefing = bundle.briefing
+    if out and briefing:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(str(briefing.get("summary_md") or ""))
+    _print_json(
+        {
+            "briefing": briefing,
+            "reused": bool(bundle.reused),
+            "weekly_run_id": (latest_run or {}).get("id"),
+            "evaluation": eval_summary,
+            "comparison_before": comparison_before,
+            "comparison_after": regression_payload,
+            "active_variant": active_variant_payload,
+            "out": out,
+            "opportunity_report_out": opportunity_report_out,
+        }
+    )
 
 
 @advisor_app.command("seguimiento")
@@ -2642,8 +3342,15 @@ def data_export(
         "advisor_events",
         "advisor_evidence",
         "market_symbol_snapshots",
+        "advisor_model_variants",
         "advisor_opportunity_runs",
         "advisor_opportunity_candidates",
+        "advisor_signal_outcomes",
+        "advisor_run_regressions",
+        "reconciliation_runs",
+        "reconciliation_intervals",
+        "reconciliation_proposals",
+        "reconciliation_resolutions",
         "batch_runs",
         "batch_ops",
     ):
