@@ -1,34 +1,11 @@
 services:
-  iol:
-    build: .
-    container_name: iol-cli
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - TZ=America/Argentina/Buenos_Aires
-    volumes:
-      - ./:/app
-    working_dir: /app
-    command: ["tail", "-f", "/dev/null"]
-  scheduler:
-    build: .
-    container_name: iol-scheduler
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - TZ=America/Argentina/Buenos_Aires
-    volumes:
-      - ./:/app
-    working_dir: /app
-    command: ["sh", "/app/scripts/scheduler_entrypoint.sh"]
   web:
     build: .
     container_name: iol-web
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - TZ=America/Argentina/Buenos_Aires
     volumes:
