@@ -5,7 +5,12 @@ import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from iol_web import db as webdb
+from iol_shared import portfolio_db as shared_db
+from iol_shared.reconciliation_utils import (
+    aggregate_imported_movements,
+    implied_fx_ars_per_usd,
+    snapshot_cash_components,
+)
 
 
 RESOLUTION_TYPES = {"import", "manual_adjustment", "ignore_internal", "review_orders"}
@@ -124,120 +129,19 @@ def _latest_snapshot_date(conn: sqlite3.Connection) -> Optional[str]:
     return str(row["snapshot_date"]) if row and row["snapshot_date"] else None
 
 
-def _snapshot_cash_ars(snap: Optional[webdb.Snapshot]) -> Optional[float]:
-    if not snap:
-        return None
-    if snap.cash_total_ars is not None:
-        try:
-            return float(snap.cash_total_ars)
-        except Exception:
-            return None
-    if snap.cash_disponible_ars is not None:
-        try:
-            return float(snap.cash_disponible_ars)
-        except Exception:
-            return None
-    return None
-
-
-def _snapshot_cash_components(snap: Optional[webdb.Snapshot]) -> Dict[str, Optional[float]]:
-    if not snap:
-        return {"cash_total_ars": None, "cash_ars": None, "cash_usd": None}
-    cash_total = _snapshot_cash_ars(snap)
-    cash_ars = None
-    cash_usd = None
-    try:
-        if snap.cash_disponible_ars is not None:
-            cash_ars = float(snap.cash_disponible_ars)
-    except Exception:
-        cash_ars = None
-    try:
-        if snap.cash_disponible_usd is not None:
-            cash_usd = float(snap.cash_disponible_usd)
-    except Exception:
-        cash_usd = None
-    return {"cash_total_ars": cash_total, "cash_ars": cash_ars, "cash_usd": cash_usd}
-
-
-def _implied_fx_ars_per_usd(
-    cash_total_ars: Optional[float],
-    cash_ars: Optional[float],
-    cash_usd: Optional[float],
-) -> Optional[float]:
-    try:
-        if cash_total_ars is None or cash_ars is None or cash_usd is None:
-            return None
-        usd = float(cash_usd)
-        if abs(usd) <= 1e-9:
-            return None
-        return (float(cash_total_ars) - float(cash_ars)) / usd
-    except Exception:
-        return None
-
-
-def _norm_currency(v: Any) -> str:
-    s = str(v or "").strip().upper()
-    if s in ("ARS", "PESO_ARGENTINO", "PESO ARGENTINO", "PESOS", "$", "AR$"):
-        return "ARS"
-    if s in ("USD", "US$", "U$S", "DOLAR", "DOLAR_ESTADOUNIDENSE", "DOLAR ESTADOUNIDENSE"):
-        return "USD"
-    if not s:
-        return "ARS"
-    return s
-
-
-def _norm_movement_kind(v: Any) -> str:
-    return str(v or "").strip().lower() or "correction_unknown"
-
-
-def _movement_amount_to_ars(
-    movement: Dict[str, Any],
-    fx_end_ars_per_usd: Optional[float],
-    warnings: List[str],
-) -> Optional[float]:
-    try:
-        amount_f = float(movement.get("amount"))
-    except Exception:
-        warnings.append("MOVEMENTS_AMOUNT_INVALID")
-        return None
-    ccy = _norm_currency(movement.get("currency"))
-    if ccy == "ARS":
-        return amount_f
-    if ccy == "USD":
-        if fx_end_ars_per_usd is None:
-            warnings.append("MOVEMENTS_USD_NO_FX")
-            return None
-        return amount_f * float(fx_end_ars_per_usd)
-    warnings.append("MOVEMENTS_CURRENCY_UNSUPPORTED")
-    return None
-
-
 def _aggregate_imported_movements(
     conn: sqlite3.Connection,
     base_date_exclusive: str,
     end_date_inclusive: str,
     fx_end_ars_per_usd: Optional[float],
 ) -> Dict[str, Any]:
-    rows = webdb.list_account_cash_movements(conn, base_date_exclusive, end_date_inclusive)
-    imported_external = 0.0
-    imported_internal = 0.0
-    imported_count = 0
-    warnings: List[str] = []
-    for mv in rows:
-        kind = _norm_movement_kind(mv.get("kind"))
-        amt_ars = _movement_amount_to_ars(mv, fx_end_ars_per_usd, warnings)
-        if amt_ars is None:
-            continue
-        imported_count += 1
-        if kind in ("external_deposit", "external_withdraw"):
-            imported_external += float(amt_ars)
-        else:
-            imported_internal += float(amt_ars)
+    rows = shared_db.list_account_cash_movements(conn, base_date_exclusive, end_date_inclusive)
+    aggregated = aggregate_imported_movements(rows, fx_end_ars_per_usd)
     return {
-        "rows_count": int(imported_count),
-        "imported_external_ars": float(imported_external),
-        "imported_internal_ars": float(imported_internal),
-        "warnings": list(dict.fromkeys(warnings)),
+        "rows_count": int(aggregated.get("rows_count") or 0),
+        "imported_external_ars": float(aggregated.get("imported_external_ars") or 0.0),
+        "imported_internal_ars": float(aggregated.get("imported_internal_ars") or 0.0),
+        "warnings": list(aggregated.get("warnings") or []),
     }
 
 
@@ -432,13 +336,13 @@ def _proposal_for_interval(interval: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
 def _build_interval(
     conn: sqlite3.Connection,
-    base_snap: webdb.Snapshot,
-    end_snap: webdb.Snapshot,
+    base_snap: shared_db.Snapshot,
+    end_snap: shared_db.Snapshot,
     resolution_map: Dict[Tuple[str, str], Dict[str, Any]],
 ) -> Dict[str, Any]:
     warnings: List[str] = []
-    base_cash = _snapshot_cash_components(base_snap)
-    end_cash = _snapshot_cash_components(end_snap)
+    base_cash = snapshot_cash_components(base_snap)
+    end_cash = snapshot_cash_components(end_snap)
     cash_total_base = base_cash.get("cash_total_ars")
     cash_total_end = end_cash.get("cash_total_ars")
     if cash_total_base is None or cash_total_end is None:
@@ -454,8 +358,8 @@ def _build_interval(
     cash_ars_delta = None if cash_ars_base is None or cash_ars_end is None else float(cash_ars_end) - float(cash_ars_base)
     cash_usd_delta = None if cash_usd_base is None or cash_usd_end is None else float(cash_usd_end) - float(cash_usd_base)
 
-    fx_base = _implied_fx_ars_per_usd(cash_total_base, cash_ars_base, cash_usd_base)
-    fx_end = _implied_fx_ars_per_usd(cash_total_end, cash_ars_end, cash_usd_end)
+    fx_base = implied_fx_ars_per_usd(cash_total_base, cash_ars_base, cash_usd_base)
+    fx_end = implied_fx_ars_per_usd(cash_total_end, cash_ars_end, cash_usd_end)
     if fx_base is not None and fx_end is not None and cash_usd_base is not None:
         fx_revaluation_ars = float(cash_usd_base) * (float(fx_end) - float(fx_base))
     else:
@@ -463,7 +367,7 @@ def _build_interval(
 
     dt_from = f"{base_snap.snapshot_date}T23:59:59"
     dt_to = f"{end_snap.snapshot_date}T23:59:59"
-    amounts, stats = webdb.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
+    amounts, stats = shared_db.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
     if stats.get("unclassified", 0) > 0 or stats.get("amount_missing", 0) > 0:
         warnings.append("ORDERS_INCOMPLETE")
 
@@ -483,7 +387,7 @@ def _build_interval(
     external_adjusted = external_raw - float(fx_revaluation_ars) - imported_internal - order_fee_internal_ars
     external_final = imported_external if abs(imported_external) > 1e-9 else external_adjusted
 
-    manual_adjustment_ars = float(webdb.manual_cashflow_sum(conn, base_snap.snapshot_date, end_snap.snapshot_date) or 0.0)
+    manual_adjustment_ars = float(shared_db.manual_cashflow_sum(conn, base_snap.snapshot_date, end_snap.snapshot_date) or 0.0)
     residual_after_manual = float(external_final) - float(manual_adjustment_ars)
     traded_gross = abs(buy_amount) + abs(sell_amount) + abs(income_amount) + abs(fee_amount)
     residual_ratio = (abs(external_final) / traded_gross) if traded_gross > 0 else None
@@ -888,8 +792,8 @@ def run_reconciliation(
     resolution_map = _reconciliation_resolution_map(conn)
     intervals: List[Dict[str, Any]] = []
     for idx in range(1, len(snap_dates)):
-        base_snap = webdb.snapshot_on_or_before(conn, snap_dates[idx - 1])
-        end_snap = webdb.snapshot_on_or_before(conn, snap_dates[idx])
+        base_snap = shared_db.snapshot_on_or_before(conn, snap_dates[idx - 1])
+        end_snap = shared_db.snapshot_on_or_before(conn, snap_dates[idx])
         if not base_snap or not end_snap or base_snap.snapshot_date == end_snap.snapshot_date:
             continue
         intervals.append(_build_interval(conn, base_snap, end_snap, resolution_map))
@@ -1025,7 +929,7 @@ def apply_proposal(conn: sqlite3.Connection, proposal_id: int, *, note: Optional
         amount = float(row["suggested_amount_ars"] or 0.0)
         if amount <= 0:
             raise ValueError("manual adjustment proposal has invalid amount")
-        cashflow = webdb.add_manual_cashflow_adjustment(
+        cashflow = shared_db.add_manual_cashflow_adjustment(
             conn,
             snapshot_date or _latest_snapshot_date(conn) or date.today().isoformat(),
             str(row["suggested_kind"] or "correction"),

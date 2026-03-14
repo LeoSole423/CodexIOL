@@ -1,42 +1,25 @@
-import os
-import sqlite3
-import tempfile
 import unittest
 
 from iol_web import db as webdb
 from iol_web.metrics import compute_daily_return_from_assets, compute_return, target_date
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_conn():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL,
-          currency TEXT,
-          titles_value REAL,
-          cash_disponible_ars REAL,
-          cash_disponible_usd REAL
-        )
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn: sqlite3.Connection, path: str) -> None:
-    conn.close()
-    if path and os.path.exists(path):
-        os.unlink(path)
+TEST_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL,
+  currency TEXT,
+  titles_value REAL,
+  cash_disponible_ars REAL,
+  cash_disponible_usd REAL
+);
+"""
 
 
 class TestWebMetrics(unittest.TestCase):
     def test_snapshot_selection_and_returns(self):
-        conn, path = _mk_conn()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             rows = [
                 ("2026-01-02", 100.0),
@@ -63,7 +46,7 @@ class TestWebMetrics(unittest.TestCase):
             self.assertAlmostEqual(block.delta, 90.0)
             self.assertAlmostEqual(block.pct, (200.0 - 110.0) / 110.0 * 100.0)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_pct_none_when_base_zero(self):
         latest = webdb.Snapshot(snapshot_date="2026-02-06", total_value=10.0)
@@ -75,10 +58,10 @@ class TestWebMetrics(unittest.TestCase):
     def test_daily_return_from_assets_fallback(self):
         latest = webdb.Snapshot(snapshot_date="2026-02-06", total_value=1000.0, titles_value=500.0)
         assets = [
-            {"symbol": "AAA", "total_value": 200.0, "daily_var_pct": 10.0},   # +20
-            {"symbol": "BBB", "total_value": 300.0, "daily_var_pct": -2.0},   # -6
-            {"symbol": "CCC", "total_value": 0.0, "daily_var_pct": 5.0},      # 0
-            {"symbol": "DDD", "total_value": 10.0, "daily_var_pct": None},    # ignored
+            {"symbol": "AAA", "total_value": 200.0, "daily_var_pct": 10.0},
+            {"symbol": "BBB", "total_value": 300.0, "daily_var_pct": -2.0},
+            {"symbol": "CCC", "total_value": 0.0, "daily_var_pct": 5.0},
+            {"symbol": "DDD", "total_value": 10.0, "daily_var_pct": None},
         ]
         block = compute_daily_return_from_assets(latest, assets)
         self.assertEqual(block.from_date, "2026-02-06")

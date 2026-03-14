@@ -1,37 +1,13 @@
 import json
-import os
-import sqlite3
-import tempfile
 import unittest
 
-from iol_cli.db import connect, init_db
 from iol_web.routes_api import advisor_history, advisor_latest, advisor_opportunities_latest
+from tests_support import InitDbTestCase
 
 
-class TestWebAdvisorApi(unittest.TestCase):
-    def setUp(self):
-        self._prev_db = os.environ.get("IOL_DB_PATH")
-        self.tmp = tempfile.TemporaryDirectory()
-        self.db_path = os.path.join(self.tmp.name, "advisor_web.db")
-        conn = connect(self.db_path)
-        init_db(conn)
-        conn.close()
-        os.environ["IOL_DB_PATH"] = self.db_path
-
-    def tearDown(self):
-        if self._prev_db is None:
-            os.environ.pop("IOL_DB_PATH", None)
-        else:
-            os.environ["IOL_DB_PATH"] = self._prev_db
-        self.tmp.cleanup()
-
-    def _conn(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
+class TestWebAdvisorApi(InitDbTestCase):
     def test_advisor_endpoints_return_latest_briefing_and_run(self):
-        conn = self._conn()
+        conn = self.connect()
         try:
             conn.execute(
                 """

@@ -1,71 +1,54 @@
-import os
-import sqlite3
-import tempfile
 import unittest
 
 from iol_cli.advisor_context import build_advisor_context, compute_return
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_conn():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL,
-          currency TEXT,
-          retrieved_at TEXT,
-          minutes_from_close INTEGER,
-          source TEXT,
-          titles_value REAL,
-          cash_disponible_ars REAL,
-          cash_disponible_usd REAL
-        );
-        CREATE TABLE portfolio_assets (
-          snapshot_date TEXT,
-          symbol TEXT,
-          description TEXT,
-          market TEXT,
-          type TEXT,
-          currency TEXT,
-          plazo TEXT,
-          quantity REAL,
-          last_price REAL,
-          ppc REAL,
-          total_value REAL,
-          daily_var_pct REAL,
-          daily_var_points REAL,
-          gain_pct REAL,
-          gain_amount REAL,
-          committed REAL,
-          PRIMARY KEY (snapshot_date, symbol)
-        );
-        CREATE TABLE orders (
-          order_number INTEGER PRIMARY KEY,
-          status TEXT,
-          symbol TEXT,
-          market TEXT,
-          side TEXT,
-          quantity REAL,
-          price REAL,
-          plazo TEXT,
-          order_type TEXT,
-          created_at TEXT,
-          updated_at TEXT
-        );
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn: sqlite3.Connection, path: str) -> None:
-    conn.close()
-    if path and os.path.exists(path):
-        os.unlink(path)
+TEST_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL,
+  currency TEXT,
+  retrieved_at TEXT,
+  minutes_from_close INTEGER,
+  source TEXT,
+  titles_value REAL,
+  cash_disponible_ars REAL,
+  cash_disponible_usd REAL
+);
+CREATE TABLE portfolio_assets (
+  snapshot_date TEXT,
+  symbol TEXT,
+  description TEXT,
+  market TEXT,
+  type TEXT,
+  currency TEXT,
+  plazo TEXT,
+  quantity REAL,
+  last_price REAL,
+  ppc REAL,
+  total_value REAL,
+  daily_var_pct REAL,
+  daily_var_points REAL,
+  gain_pct REAL,
+  gain_amount REAL,
+  committed REAL,
+  PRIMARY KEY (snapshot_date, symbol)
+);
+CREATE TABLE orders (
+  order_number INTEGER PRIMARY KEY,
+  status TEXT,
+  symbol TEXT,
+  market TEXT,
+  side TEXT,
+  quantity REAL,
+  price REAL,
+  plazo TEXT,
+  order_type TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+"""
 
 
 class TestAdvisorContext(unittest.TestCase):
@@ -78,7 +61,7 @@ class TestAdvisorContext(unittest.TestCase):
         self.assertIsNone(d["pct"])
 
     def test_as_of_snapshot_selection(self):
-        conn, path = _mk_conn()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 "INSERT INTO portfolio_snapshots(snapshot_date,total_value,currency) VALUES(?,?,?)",
@@ -104,10 +87,10 @@ class TestAdvisorContext(unittest.TestCase):
             self.assertEqual(ctx["as_of"], "2026-01-05")
             self.assertEqual(ctx["snapshot"]["total_value_ars"], 110.0)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_movers_daily_uses_daily_var_pct(self):
-        conn, path = _mk_conn()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 "INSERT INTO portfolio_snapshots(snapshot_date,total_value,currency) VALUES(?,?,?)",
@@ -135,10 +118,10 @@ class TestAdvisorContext(unittest.TestCase):
             self.assertEqual(losers[0]["symbol"], "BBB")
             self.assertAlmostEqual(losers[0]["delta_value"], -10.0)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_movers_weekly_union_adds_missing_symbols(self):
-        conn, path = _mk_conn()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 "INSERT INTO portfolio_snapshots(snapshot_date,total_value,currency) VALUES(?,?,?)",
@@ -162,9 +145,8 @@ class TestAdvisorContext(unittest.TestCase):
             self.assertIn("AAA", syms)
             self.assertIn("BBB", syms)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
 
 if __name__ == "__main__":
     unittest.main()
-

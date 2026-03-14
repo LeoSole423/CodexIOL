@@ -1,65 +1,44 @@
-import os
-import sqlite3
-import tempfile
 import unittest
 
 from iol_web import db as webdb
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL,
-          currency TEXT,
-          titles_value REAL,
-          cash_disponible_ars REAL,
-          cash_disponible_usd REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE portfolio_assets (
-          snapshot_date TEXT,
-          symbol TEXT,
-          description TEXT,
-          market TEXT,
-          type TEXT,
-          currency TEXT,
-          plazo TEXT,
-          quantity REAL,
-          last_price REAL,
-          ppc REAL,
-          total_value REAL,
-          daily_var_pct REAL,
-          daily_var_points REAL,
-          gain_pct REAL,
-          gain_amount REAL,
-          committed REAL,
-          raw_json TEXT,
-          PRIMARY KEY (snapshot_date, symbol)
-        )
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn, path):
-    conn.close()
-    if os.path.exists(path):
-        os.unlink(path)
+TEST_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL,
+  currency TEXT,
+  titles_value REAL,
+  cash_disponible_ars REAL,
+  cash_disponible_usd REAL
+);
+CREATE TABLE portfolio_assets (
+  snapshot_date TEXT,
+  symbol TEXT,
+  description TEXT,
+  market TEXT,
+  type TEXT,
+  currency TEXT,
+  plazo TEXT,
+  quantity REAL,
+  last_price REAL,
+  ppc REAL,
+  total_value REAL,
+  daily_var_pct REAL,
+  daily_var_points REAL,
+  gain_pct REAL,
+  gain_amount REAL,
+  committed REAL,
+  raw_json TEXT,
+  PRIMARY KEY (snapshot_date, symbol)
+);
+"""
 
 
 class TestWebMoversPeriod(unittest.TestCase):
     def test_assets_delta_between_snapshots(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 "INSERT INTO portfolio_snapshots(snapshot_date,total_value) VALUES(?,?)",
@@ -95,7 +74,7 @@ class TestWebMoversPeriod(unittest.TestCase):
             self.assertAlmostEqual(delta("BBB"), -50.0)
             self.assertAlmostEqual(delta("CCC"), 10.0)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
 
 if __name__ == "__main__":

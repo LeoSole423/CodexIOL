@@ -1,47 +1,30 @@
-import os
-import sqlite3
-import tempfile
 import unittest
 
 from iol_web.db import orders_flow_summary
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE orders (
-          order_number INTEGER PRIMARY KEY,
-          status TEXT,
-          symbol TEXT,
-          side TEXT,
-          side_norm TEXT,
-          quantity REAL,
-          price REAL,
-          operated_amount REAL,
-          currency TEXT,
-          created_at TEXT,
-          updated_at TEXT,
-          operated_at TEXT
-        )
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn, path):
-    conn.close()
-    if os.path.exists(path):
-        os.unlink(path)
+TEST_SCHEMA = """
+CREATE TABLE orders (
+  order_number INTEGER PRIMARY KEY,
+  status TEXT,
+  symbol TEXT,
+  side TEXT,
+  side_norm TEXT,
+  quantity REAL,
+  price REAL,
+  operated_amount REAL,
+  currency TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  operated_at TEXT
+);
+"""
 
 
 class TestOrdersFlowSummary(unittest.TestCase):
     def test_flow_summary_includes_income(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             rows = [
                 (1, "terminada", "AAA", "Compra", "buy", None, None, 100.0, None, "2026-02-10T10:00:00", None, None),
@@ -81,10 +64,10 @@ class TestOrdersFlowSummary(unittest.TestCase):
             self.assertEqual(stats["income_missing_deduped"], 0)
             self.assertEqual(stats["ignored"], 0)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_dedupes_missing_income_duplicate_and_counts_fee(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             rows = [
                 (1, "terminada", "SPY US$", "Pago de Dividendos", None, None, None, 0.34, None, "2026-02-03T17:35:24.820", None, None),
@@ -113,7 +96,7 @@ class TestOrdersFlowSummary(unittest.TestCase):
             self.assertEqual(stats["income_missing_deduped"], 1)
             self.assertEqual(stats["fee_classified"], 1)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
 
 if __name__ == "__main__":

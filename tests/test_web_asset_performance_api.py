@@ -1,89 +1,13 @@
-﻿import os
-import sqlite3
-import tempfile
 import unittest
 
 from fastapi.responses import JSONResponse
 
 from iol_web.routes_api import assets_performance
+from tests_support import WebDbTestCase, SCHEMA_SNAPSHOTS, SCHEMA_ASSETS, SCHEMA_ORDERS
 
 
-def _mk_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE portfolio_assets (
-          snapshot_date TEXT,
-          symbol TEXT,
-          description TEXT,
-          market TEXT,
-          type TEXT,
-          currency TEXT,
-          plazo TEXT,
-          quantity REAL,
-          last_price REAL,
-          ppc REAL,
-          total_value REAL,
-          daily_var_pct REAL,
-          daily_var_points REAL,
-          gain_pct REAL,
-          gain_amount REAL,
-          committed REAL,
-          PRIMARY KEY (snapshot_date, symbol)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE orders (
-          order_number INTEGER PRIMARY KEY,
-          status TEXT,
-          symbol TEXT,
-          side TEXT,
-          side_norm TEXT,
-          quantity REAL,
-          price REAL,
-          operated_amount REAL,
-          currency TEXT,
-          created_at TEXT,
-          updated_at TEXT,
-          operated_at TEXT
-        )
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn, path):
-    conn.close()
-    if os.path.exists(path):
-        os.unlink(path)
-
-
-class TestAssetPerformanceApi(unittest.TestCase):
-    def setUp(self):
-        self.conn, self.path = _mk_db()
-        self.prev_env = os.environ.get("IOL_DB_PATH")
-        os.environ["IOL_DB_PATH"] = self.path
-
-    def tearDown(self):
-        if self.prev_env is None:
-            os.environ.pop("IOL_DB_PATH", None)
-        else:
-            os.environ["IOL_DB_PATH"] = self.prev_env
-        _cleanup(self.conn, self.path)
+class TestAssetPerformanceApi(WebDbTestCase):
+    schema_sql = SCHEMA_SNAPSHOTS + SCHEMA_ASSETS + SCHEMA_ORDERS
 
     def _seed_two_snapshots(self):
         self.conn.executemany(
@@ -145,8 +69,6 @@ class TestAssetPerformanceApi(unittest.TestCase):
 
     def test_weekly_excludes_orders_on_base_snapshot_day(self):
         self._seed_two_snapshots()
-        # Weekly base is 2026-02-06 (latest=2026-02-13). This sell happened before end-of-day base snapshot
-        # and must not be counted in period cashflows.
         self.conn.execute(
             """
             INSERT INTO orders(order_number,status,symbol,side,side_norm,quantity,price,operated_amount,currency,created_at,updated_at,operated_at)

@@ -1,94 +1,144 @@
 import json
 import os
 import sqlite3
-import tempfile
 import unittest
 from unittest.mock import patch
 
 from iol_web.inflation_ar import InflationFetchResult
 from iol_web.routes_api import quality
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL,
-          cash_total_ars REAL,
-          cash_disponible_ars REAL,
-          retrieved_at TEXT
-        );
-        CREATE TABLE orders (
-          order_number INTEGER PRIMARY KEY,
-          status TEXT,
-          symbol TEXT,
-          side TEXT,
-          side_norm TEXT,
-          quantity REAL,
-          price REAL,
-          operated_amount REAL,
-          currency TEXT,
-          created_at TEXT,
-          updated_at TEXT,
-          operated_at TEXT
-        );
-        CREATE TABLE account_cash_movements (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          movement_id TEXT,
-          occurred_at TEXT,
-          movement_date TEXT NOT NULL,
-          currency TEXT NOT NULL,
-          amount REAL NOT NULL,
-          kind TEXT NOT NULL,
-          description TEXT,
-          source TEXT,
-          raw_json TEXT,
-          created_at TEXT NOT NULL
-        );
-        CREATE TABLE advisor_evidence (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          created_at TEXT NOT NULL,
-          symbol TEXT NOT NULL,
-          query TEXT NOT NULL,
-          source_name TEXT NOT NULL,
-          source_url TEXT NOT NULL,
-          published_date TEXT,
-          retrieved_at_utc TEXT NOT NULL,
-          claim TEXT NOT NULL,
-          confidence TEXT NOT NULL,
-          date_confidence TEXT NOT NULL,
-          notes TEXT,
-          conflict_key TEXT
-        );
-        CREATE TABLE advisor_opportunity_runs (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          created_at_utc TEXT NOT NULL,
-          as_of TEXT NOT NULL,
-          mode TEXT NOT NULL,
-          universe TEXT NOT NULL,
-          budget_ars REAL NOT NULL,
-          top_n INTEGER NOT NULL,
-          status TEXT NOT NULL,
-          error_message TEXT,
-          config_json TEXT NOT NULL,
-          pipeline_warnings_json TEXT,
-          run_metrics_json TEXT
-        );
-        """
-    )
-    conn.commit()
-    return conn, path
+TEST_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL,
+  cash_total_ars REAL,
+  cash_disponible_ars REAL,
+  retrieved_at TEXT
+);
+CREATE TABLE orders (
+  order_number INTEGER PRIMARY KEY,
+  status TEXT,
+  symbol TEXT,
+  side TEXT,
+  side_norm TEXT,
+  quantity REAL,
+  price REAL,
+  operated_amount REAL,
+  currency TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  operated_at TEXT
+);
+CREATE TABLE account_cash_movements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  movement_id TEXT,
+  occurred_at TEXT,
+  movement_date TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  amount REAL NOT NULL,
+  kind TEXT NOT NULL,
+  description TEXT,
+  source TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE advisor_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  query TEXT NOT NULL,
+  source_name TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  published_date TEXT,
+  retrieved_at_utc TEXT NOT NULL,
+  claim TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  date_confidence TEXT NOT NULL,
+  notes TEXT,
+  conflict_key TEXT
+);
+CREATE TABLE advisor_opportunity_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at_utc TEXT NOT NULL,
+  as_of TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  universe TEXT NOT NULL,
+  budget_ars REAL NOT NULL,
+  top_n INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  error_message TEXT,
+  config_json TEXT NOT NULL,
+  pipeline_warnings_json TEXT,
+  run_metrics_json TEXT
+);
+"""
 
-
-def _cleanup(conn, path):
-    conn.close()
-    if os.path.exists(path):
-        os.unlink(path)
+LEGACY_RUNS_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL,
+  cash_total_ars REAL,
+  cash_disponible_ars REAL,
+  retrieved_at TEXT
+);
+CREATE TABLE orders (
+  order_number INTEGER PRIMARY KEY,
+  status TEXT,
+  symbol TEXT,
+  side TEXT,
+  side_norm TEXT,
+  quantity REAL,
+  price REAL,
+  operated_amount REAL,
+  currency TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  operated_at TEXT
+);
+CREATE TABLE account_cash_movements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  movement_id TEXT,
+  occurred_at TEXT,
+  movement_date TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  amount REAL NOT NULL,
+  kind TEXT NOT NULL,
+  description TEXT,
+  source TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE advisor_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  query TEXT NOT NULL,
+  source_name TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  published_date TEXT,
+  retrieved_at_utc TEXT NOT NULL,
+  claim TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  date_confidence TEXT NOT NULL,
+  notes TEXT,
+  conflict_key TEXT
+);
+CREATE TABLE advisor_opportunity_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at_utc TEXT NOT NULL,
+  as_of TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  universe TEXT NOT NULL,
+  budget_ars REAL NOT NULL,
+  top_n INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  error_message TEXT,
+  config_json TEXT NOT NULL,
+  pipeline_warnings_json TEXT
+);
+"""
 
 
 class TestWebQualityApi(unittest.TestCase):
@@ -102,7 +152,7 @@ class TestWebQualityApi(unittest.TestCase):
             os.environ["IOL_DB_PATH"] = self._prev_db
 
     def test_quality_surfaces_cashflow_imports_and_scoring_health(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 """
@@ -182,80 +232,11 @@ class TestWebQualityApi(unittest.TestCase):
             self.assertEqual(rows["scoring_health"]["kind"], "ok")
             self.assertIn("evidence_freshness", rows)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_quality_tolerates_legacy_runs_table_without_run_metrics_json(self):
-        fd, path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
+        conn, path = create_temp_sqlite_db(LEGACY_RUNS_SCHEMA)
         try:
-            conn.executescript(
-                """
-                CREATE TABLE portfolio_snapshots (
-                  snapshot_date TEXT PRIMARY KEY,
-                  total_value REAL,
-                  cash_total_ars REAL,
-                  cash_disponible_ars REAL,
-                  retrieved_at TEXT
-                );
-                CREATE TABLE orders (
-                  order_number INTEGER PRIMARY KEY,
-                  status TEXT,
-                  symbol TEXT,
-                  side TEXT,
-                  side_norm TEXT,
-                  quantity REAL,
-                  price REAL,
-                  operated_amount REAL,
-                  currency TEXT,
-                  created_at TEXT,
-                  updated_at TEXT,
-                  operated_at TEXT
-                );
-                CREATE TABLE account_cash_movements (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  movement_id TEXT,
-                  occurred_at TEXT,
-                  movement_date TEXT NOT NULL,
-                  currency TEXT NOT NULL,
-                  amount REAL NOT NULL,
-                  kind TEXT NOT NULL,
-                  description TEXT,
-                  source TEXT,
-                  raw_json TEXT,
-                  created_at TEXT NOT NULL
-                );
-                CREATE TABLE advisor_evidence (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  created_at TEXT NOT NULL,
-                  symbol TEXT NOT NULL,
-                  query TEXT NOT NULL,
-                  source_name TEXT NOT NULL,
-                  source_url TEXT NOT NULL,
-                  published_date TEXT,
-                  retrieved_at_utc TEXT NOT NULL,
-                  claim TEXT NOT NULL,
-                  confidence TEXT NOT NULL,
-                  date_confidence TEXT NOT NULL,
-                  notes TEXT,
-                  conflict_key TEXT
-                );
-                CREATE TABLE advisor_opportunity_runs (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  created_at_utc TEXT NOT NULL,
-                  as_of TEXT NOT NULL,
-                  mode TEXT NOT NULL,
-                  universe TEXT NOT NULL,
-                  budget_ars REAL NOT NULL,
-                  top_n INTEGER NOT NULL,
-                  status TEXT NOT NULL,
-                  error_message TEXT,
-                  config_json TEXT NOT NULL,
-                  pipeline_warnings_json TEXT
-                );
-                """
-            )
             conn.executemany(
                 """
                 INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars,retrieved_at)
@@ -301,7 +282,7 @@ class TestWebQualityApi(unittest.TestCase):
             self.assertIn("scoring_health", rows)
             self.assertIn(rows["scoring_health"]["kind"], {"warn", "info"})
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
 
 if __name__ == "__main__":
