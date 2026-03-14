@@ -1,106 +1,74 @@
 import os
-import sqlite3
-import tempfile
 import unittest
 
 from iol_web.routes_api import cashflows_manual, cashflows_manual_add, cashflows_manual_delete, returns
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL,
-          currency TEXT,
-          titles_value REAL,
-          cash_total_ars REAL,
-          cash_disponible_ars REAL,
-          retrieved_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE orders (
-          order_number INTEGER PRIMARY KEY,
-          status TEXT,
-          symbol TEXT,
-          side TEXT,
-          side_norm TEXT,
-          quantity REAL,
-          price REAL,
-          operated_amount REAL,
-          currency TEXT,
-          created_at TEXT,
-          updated_at TEXT,
-          operated_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE manual_cashflow_adjustments (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          flow_date TEXT NOT NULL,
-          kind TEXT NOT NULL,
-          amount_ars REAL NOT NULL,
-          note TEXT,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE portfolio_assets (
-          snapshot_date TEXT NOT NULL,
-          symbol TEXT,
-          description TEXT,
-          market TEXT,
-          type TEXT,
-          currency TEXT,
-          plazo TEXT,
-          quantity REAL,
-          last_price REAL,
-          ppc REAL,
-          total_value REAL,
-          daily_var_pct REAL,
-          daily_var_points REAL,
-          gain_pct REAL,
-          gain_amount REAL,
-          committed REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE account_cash_movements (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          movement_id TEXT,
-          occurred_at TEXT,
-          movement_date TEXT NOT NULL,
-          currency TEXT NOT NULL,
-          amount REAL NOT NULL,
-          kind TEXT NOT NULL,
-          description TEXT,
-          source TEXT,
-          raw_json TEXT,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn, path):
-    conn.close()
-    if os.path.exists(path):
-        os.unlink(path)
+TEST_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL,
+  currency TEXT,
+  titles_value REAL,
+  cash_total_ars REAL,
+  cash_disponible_ars REAL,
+  retrieved_at TEXT
+);
+CREATE TABLE orders (
+  order_number INTEGER PRIMARY KEY,
+  status TEXT,
+  symbol TEXT,
+  side TEXT,
+  side_norm TEXT,
+  quantity REAL,
+  price REAL,
+  operated_amount REAL,
+  currency TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  operated_at TEXT
+);
+CREATE TABLE manual_cashflow_adjustments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  flow_date TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  amount_ars REAL NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE portfolio_assets (
+  snapshot_date TEXT NOT NULL,
+  symbol TEXT,
+  description TEXT,
+  market TEXT,
+  type TEXT,
+  currency TEXT,
+  plazo TEXT,
+  quantity REAL,
+  last_price REAL,
+  ppc REAL,
+  total_value REAL,
+  daily_var_pct REAL,
+  daily_var_points REAL,
+  gain_pct REAL,
+  gain_amount REAL,
+  committed REAL
+);
+CREATE TABLE account_cash_movements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  movement_id TEXT,
+  occurred_at TEXT,
+  movement_date TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  amount REAL NOT NULL,
+  kind TEXT NOT NULL,
+  description TEXT,
+  source TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL
+);
+"""
 
 
 class TestWebReturnsReal(unittest.TestCase):
@@ -114,7 +82,7 @@ class TestWebReturnsReal(unittest.TestCase):
             os.environ["IOL_DB_PATH"] = self._prev_db
 
     def test_returns_adjusts_external_deposit(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 """
@@ -142,10 +110,10 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertEqual((daily.get("orders_coverage") or {}).get("status"), "none")
             self.assertEqual((daily.get("movements_coverage") or {}).get("status"), "none")
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_returns_internal_buy_is_not_external_flow(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 """
@@ -174,10 +142,10 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertAlmostEqual(daily["real_pct"], 0.0)
             self.assertEqual(daily.get("flow_confidence"), "medium")
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_returns_manual_adjustment_is_added(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 """
@@ -205,10 +173,10 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertAlmostEqual(daily["real_delta"], -10.0)
             self.assertAlmostEqual(daily["real_pct"], -10.0)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_returns_with_imported_cashflow_is_high_confidence(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 """
@@ -248,10 +216,10 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertEqual((daily.get("movements_coverage") or {}).get("rows_count"), 1)
             self.assertEqual((daily.get("movements_coverage") or {}).get("status"), "imported")
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_returns_calendar_bases_and_inception_alias(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 """
@@ -284,10 +252,10 @@ class TestWebReturnsReal(unittest.TestCase):
             for k in ("from", "to", "delta", "pct", "real_delta", "real_pct", "flow_total_ars"):
                 self.assertEqual(yearly.get(k), ytd.get(k))
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_returns_partial_progress_when_only_one_snapshot(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.execute(
                 """
@@ -311,10 +279,10 @@ class TestWebReturnsReal(unittest.TestCase):
             self.assertEqual(out["ytd"]["from"], out["yearly"]["from"])
             self.assertEqual(out["ytd"]["to"], out["yearly"]["to"])
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_manual_cashflow_endpoints(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.commit()
             os.environ["IOL_DB_PATH"] = path
@@ -339,7 +307,7 @@ class TestWebReturnsReal(unittest.TestCase):
             rows5 = cashflows_manual(None, None)
             self.assertEqual(len(rows5), 1)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
 
 if __name__ == "__main__":

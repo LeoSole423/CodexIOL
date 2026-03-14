@@ -368,19 +368,6 @@
     }
   }
 
-  function advisorStatusInfo(status) {
-    const s = String(status || "").toLowerCase();
-    if (s === "actionable") return { label: "Accionable", className: "badge badge-ok" };
-    if (s === "ok") return { label: "OK", className: "badge badge-ok" };
-    if (s === "conditional") return { label: "Condicional", className: "badge badge-warn" };
-    if (s === "warn") return { label: "Revisar", className: "badge badge-warn" };
-    if (s === "watchlist") return { label: "Watchlist", className: "badge badge-watchlist" };
-    if (s === "blocked") return { label: "Bloqueado", className: "badge badge-blocked" };
-    if (s === "info") return { label: "Seguimiento", className: "badge badge-info" };
-    if (s === "error") return { label: "Error", className: "badge badge-error" };
-    return { label: "-", className: "badge" };
-  }
-
   function fmtDateShort(value) {
     if (!value) return "-";
     const src = String(value);
@@ -508,260 +495,6 @@
     };
   }
 
-  function renderAdvisorHero(daily, weekly, latestRun) {
-    const briefing = daily || weekly;
-    const info = advisorStatusInfo(briefing && briefing.status);
-    const headlineEl = el("advisorHeroHeadline");
-    const sublineEl = el("advisorHeroSubline");
-    const statusEl = el("advisorHeroStatus");
-    const kpisEl = el("advisorHeroKpis");
-    if (!headlineEl || !sublineEl || !statusEl || !kpisEl) return;
-    if (!briefing) {
-      statusEl.className = "badge";
-      statusEl.textContent = "-";
-      headlineEl.textContent = "Todavía no hay briefings publicados";
-      sublineEl.textContent = "Generá un briefing diario o semanal para poblar esta vista.";
-      kpisEl.innerHTML = advisorMetricTile("Estado", "Sin datos");
-      return;
-    }
-
-    const counts = advisorGroupCounts(briefing.recommendations, briefing.watchlist);
-    const notes = briefing.market_notes || {};
-    const vsInflation = notes.monthly_vs_inflation_pct == null ? notes.real_vs_inflation_pct : notes.monthly_vs_inflation_pct;
-    const warningLabels = advisorWarningLabels(briefing);
-    let headline = "Sin ideas accionables por ahora";
-    if (counts.actionable) headline = `${counts.actionable} ideas listas para validar`;
-    else if (counts.conditional) headline = `${counts.conditional} ideas necesitan confirmación`;
-    else if (counts.watchlist) headline = `${counts.watchlist} activos siguen en watchlist`;
-    const subtitleBits = [
-      `Corte ${fmtDateShort(briefing.as_of)}`,
-      advisorPolicyLabel(briefing.source_policy),
-    ];
-    if (warningLabels.length) subtitleBits.push(`Alertas: ${warningLabels.join(", ")}`);
-
-    statusEl.className = info.className;
-    statusEl.textContent = info.label;
-    headlineEl.textContent = headline;
-    sublineEl.textContent = subtitleBits.join(" | ");
-
-    const kpis = [
-      advisorMetricTile("Valor total", notes.total_value_ars == null ? "-" : fmtARS.format(notes.total_value_ars)),
-      advisorMetricTile("Retorno día", fmtPct(notes.daily_real_pct), signClass(notes.daily_real_pct)),
-      advisorMetricTile("Retorno mes", fmtPct(notes.monthly_real_pct), signClass(notes.monthly_real_pct)),
-      advisorMetricTile("Vs IPC", fmtPct(vsInflation), signClass(vsInflation)),
-      advisorMetricTile("Operables weekly", latestRun && latestRun.run_metrics ? String(latestRun.run_metrics.operable_count || 0) : String(notes.latest_weekly_run_operable || 0)),
-      advisorMetricTile("Caja total", notes.cash_total_ars == null ? "-" : fmtARS.format(notes.cash_total_ars)),
-    ];
-    kpisEl.innerHTML = kpis.join("");
-  }
-
-  function renderAdvisorRadar(daily, weekly, latestRun) {
-    const statusEl = el("advisorRadarStatus");
-    const metaEl = el("advisorRadarMeta");
-    const root = el("advisorRadarList");
-    if (!statusEl || !metaEl || !root) return;
-    const briefing = daily || weekly;
-    const runInfo = advisorStatusInfo((latestRun && latestRun.status) || (briefing && briefing.status));
-    statusEl.className = runInfo.className;
-    statusEl.textContent = runInfo.label;
-
-    if (!briefing && !latestRun) {
-      metaEl.textContent = "Sin run profundo ni briefing disponible.";
-      root.innerHTML = `<div class="hint">Todavía no hay señales publicadas para esta jornada.</div>`;
-      return;
-    }
-
-    const counts = advisorGroupCounts(briefing && briefing.recommendations, briefing && briefing.watchlist);
-    const metrics = (latestRun && latestRun.run_metrics) || {};
-    const nextStep = advisorPrimaryNextStep(briefing) || "Esperar próximo deep run o revisar cobertura de cashflows.";
-    metaEl.textContent = latestRun
-      ? `Run ${latestRun.id} del ${fmtDateShort(latestRun.as_of)} | actualizado ${relativeTime(latestRun.created_at_utc) || fmtDateTimeShort(latestRun.created_at_utc)}`
-      : `Briefing ${briefing && briefing.cadence ? briefing.cadence : "disponible"} | actualizado ${fmtDateTimeShort((briefing || {}).created_at_utc)}`;
-
-    const rows = [
-      {
-        label: "Distribución de ideas",
-        value: `${counts.actionable} accionables · ${counts.conditional} condicionales`,
-        detail: `${counts.watchlist} en watchlist${counts.blocked ? ` · ${counts.blocked} bloqueadas` : ""}`,
-      },
-      {
-        label: "Deep run",
-        value: latestRun ? `${metrics.operable_count || 0} operables` : "Sin run semanal",
-        detail: latestRun ? `${metrics.candidate_count || 0} candidatos evaluados · ${metrics.watchlist_count || 0} watchlist` : "El asesor puede operar solo con el último briefing disponible.",
-      },
-      {
-        label: "Evidencia fresca",
-        value: latestRun ? `${fmtNum.format((metrics.fresh_evidence_ratio || 0) * 100)}%` : "Sin ratio",
-        detail: latestRun ? `${metrics.fresh_trusted_refs_total || 0} refs confiables · dispersión ${fmtNum.format(metrics.score_dispersion || 0)}` : "La frescura se completará en el próximo deep run.",
-      },
-      {
-        label: "Próximo paso sugerido",
-        value: nextStep,
-        detail: advisorBriefingCopy(briefing),
-      },
-    ];
-    root.innerHTML = rows.map((row) => `
-      <div class="advisor-radar-item">
-        <div>
-          <div class="advisor-radar-label">${escHtml(row.label)}</div>
-          <div class="advisor-radar-value">${escHtml(row.value)}</div>
-        </div>
-        <div class="advisor-radar-detail">${escHtml(row.detail)}</div>
-      </div>
-    `).join("");
-  }
-
-  function renderAdvisorSummary(targetId, briefing) {
-    const root = el(targetId);
-    if (!root) return;
-    if (!briefing) {
-      root.innerHTML = `<div class="hint">Sin briefing generado.</div>`;
-      return;
-    }
-    const notes = briefing.market_notes || {};
-    const vsInflation = notes.monthly_vs_inflation_pct == null ? notes.real_vs_inflation_pct : notes.monthly_vs_inflation_pct;
-    const info = advisorStatusInfo(briefing.status);
-    const metrics = [
-      advisorMetricTile("Día real", fmtPct(notes.daily_real_pct), signClass(notes.daily_real_pct)),
-      advisorMetricTile("Semana real", fmtPct(notes.weekly_real_pct), signClass(notes.weekly_real_pct)),
-      advisorMetricTile("Mes real", fmtPct(notes.monthly_real_pct), signClass(notes.monthly_real_pct)),
-      advisorMetricTile("Vs IPC", fmtPct(vsInflation), signClass(vsInflation)),
-    ];
-    const warningLabels = advisorWarningLabels(briefing);
-    const nextStep = advisorPrimaryNextStep(briefing);
-    const footerBits = [
-      `Publicado ${fmtDateTimeShort(briefing.created_at_utc)}`,
-      advisorPolicyLabel(briefing.source_policy),
-    ];
-    if (briefing.advisor_log_id != null) footerBits.push(`log ${briefing.advisor_log_id}`);
-    if (briefing.opportunity_run_id != null) footerBits.push(`run ${briefing.opportunity_run_id}`);
-
-    root.innerHTML = `
-      <div class="advisor-summary-panel">
-        <div class="advisor-summary-top">
-          <div>
-            <div class="advisor-summary-title">Corte ${escHtml(fmtDateShort(briefing.as_of))}</div>
-            <div class="advisor-summary-copy">${escHtml(advisorBriefingCopy(briefing))}</div>
-          </div>
-          <span class="${info.className}">${info.label}</span>
-        </div>
-        <div class="kpi-insights advisor-summary-metrics">${metrics.join("")}</div>
-        ${warningLabels.length ? `<div class="advisor-pill-row">${warningLabels.map((label) => `<span class="quality-code">${escHtml(label)}</span>`).join("")}</div>` : ""}
-        ${nextStep ? `<div class="advisor-summary-next"><strong>Próximo foco:</strong> ${escHtml(nextStep)}</div>` : ""}
-        <div class="advisor-summary-foot">${footerBits.map((part) => `<span>${escHtml(part)}</span>`).join("")}</div>
-      </div>
-    `;
-  }
-
-  function renderAdvisorItems(targetId, rows, emptyMsg) {
-    const root = el(targetId);
-    if (!root) return;
-    const list = rows || [];
-    if (!list.length) {
-      root.innerHTML = `<div class="hint">${emptyMsg}</div>`;
-      return;
-    }
-    root.innerHTML = list.map((row) => {
-      const info = advisorStatusInfo(row.status);
-      const reason = advisorReasonView(row);
-      const flags = (row.quality_flags || []).map((f) => `<span class="quality-code">${escHtml(f)}</span>`).join("");
-      const meta = [];
-      if (row.symbol) meta.push(`<span class="quality-code">${escHtml(row.symbol)}</span>`);
-      if (row.evidence_count != null) meta.push(`<span class="quality-code">refs ${escHtml(row.evidence_count)}</span>`);
-      if (row.score_total != null) meta.push(`<span class="quality-code">score ${escHtml(fmtNum.format(row.score_total))}</span>`);
-      if (row.entry_low != null && row.entry_high != null) meta.push(`<span class="quality-code">entrada ${escHtml(fmtARS.format(row.entry_low))} - ${escHtml(fmtARS.format(row.entry_high))}</span>`);
-      if (row.suggested_amount_ars != null) meta.push(`<span class="quality-code">monto ${escHtml(fmtARS.format(row.suggested_amount_ars))}</span>`);
-      const reasonChips = (reason.chips || []).map((chip) => `<span class="quality-code">${escHtml(chip)}</span>`).join("");
-      return `
-        <div class="advisor-item">
-          <div class="advisor-item-head">
-            <div>
-              <div class="advisor-item-title">${escHtml(row.title || "-")}</div>
-              <div class="quality-code-row">${meta.join("")}</div>
-            </div>
-            <span class="${info.className}">${info.label}</span>
-          </div>
-          <div class="advisor-item-body">${escHtml(reason.body || "-")}</div>
-          ${reasonChips ? `<div class="quality-code-row">${reasonChips}</div>` : ""}
-          <div class="advisor-item-next"><strong>Próximo paso:</strong> ${escHtml(row.next_step || "-")}</div>
-          ${flags ? `<div class="quality-code-row">${flags}</div>` : ""}
-        </div>
-      `;
-    }).join("");
-  }
-
-  function renderAdvisorQuality(briefing) {
-    const root = el("advisorQuality");
-    if (!root) return;
-    const quality = (briefing && briefing.quality) ? briefing.quality : {};
-    const rows = quality.rows || [];
-    if (!rows.length) {
-      root.innerHTML = `<div class="hint">Sin señales de calidad disponibles.</div>`;
-      return;
-    }
-    root.innerHTML = rows.map((row) => {
-      const info = advisorStatusInfo(row.kind);
-      const sources = (row.sources || []).map((src) => `<span class="quality-code">${escHtml(src)}</span>`).join("");
-      return `
-        <div class="advisor-quality-row">
-          <div>
-            <div class="advisor-item-title">${escHtml(row.label || "-")}</div>
-            <div class="muted">${escHtml(row.detail || "-")}</div>
-            ${sources ? `<div class="quality-code-row">${sources}</div>` : ""}
-          </div>
-          <span class="${info.className}">${escHtml(row.value || info.label)}</span>
-        </div>
-      `;
-    }).join("");
-  }
-
-  function renderAdvisorLinks(briefing, latestRun) {
-    const root = el("advisorLinks");
-    if (!root) return;
-    if (!briefing) {
-      root.innerHTML = "";
-      return;
-    }
-    const links = ((briefing.links || {}).latest_reports) || {};
-    const items = [];
-    if (links.analysis) items.push(`<span class="quality-code">Análisis: ${escHtml(links.analysis)}</span>`);
-    if (links.macro) items.push(`<span class="quality-code">Macro: ${escHtml(links.macro)}</span>`);
-    if (links.opportunities) items.push(`<span class="quality-code">Oportunidades: ${escHtml(links.opportunities)}</span>`);
-    if (links.followup) items.push(`<span class="quality-code">Seguimiento: ${escHtml(links.followup)}</span>`);
-    if (latestRun && latestRun.id != null) items.push(`<span class="quality-code">Run ${escHtml(latestRun.id)}</span>`);
-    root.innerHTML = items.length ? `<div class="advisor-pill-row">${items.join("")}</div>` : "";
-  }
-
-  function renderAdvisorHistory(rows) {
-    const root = el("advisorHistory");
-    if (!root) return;
-    const list = rows || [];
-    if (!list.length) {
-      root.innerHTML = `<div class="hint">Sin historial de briefings.</div>`;
-      return;
-    }
-    const head = `
-      <th>Fecha</th>
-      <th>Cadencia</th>
-      <th>Estado</th>
-      <th>Run</th>
-      <th>Log</th>
-    `;
-    const body = list.map((row) => {
-      const status = advisorStatusInfo(row.status);
-      return `
-        <tr>
-          <td>${escHtml(fmtDateShort(row.as_of || "-"))}</td>
-          <td>${escHtml(humanizeEnum(row.cadence || "-"))}</td>
-          <td><span class="${status.className}">${escHtml(status.label)}</span></td>
-          <td class="num">${row.opportunity_run_id == null ? "-" : escHtml(row.opportunity_run_id)}</td>
-          <td class="num">${row.advisor_log_id == null ? "-" : escHtml(row.advisor_log_id)}</td>
-        </tr>
-      `;
-    }).join("");
-    root.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-  }
-
   async function loadAdvisorTeaser() {
     const root = el("advisorTeaser");
     if (!root) return;
@@ -788,50 +521,6 @@
     } catch (_) {
       root.innerHTML = `<div class="hint">No se pudo cargar el briefing diario.</div>`;
     }
-  }
-
-  async function loadAdvisorPage() {
-    const [dailyOut, weeklyOut, historyOut, runOut] = await Promise.all([
-      fetchJSON("/api/advisor/latest?cadence=daily").catch(() => ({ briefing: null })),
-      fetchJSON("/api/advisor/latest?cadence=weekly").catch(() => ({ briefing: null })),
-      fetchJSON("/api/advisor/history?limit=30").catch(() => ({ rows: [] })),
-      fetchJSON("/api/advisor/opportunities/latest").catch(() => ({ run: null })),
-    ]);
-    const daily = dailyOut && dailyOut.briefing;
-    const weekly = weeklyOut && weeklyOut.briefing;
-    const latestRun = runOut && runOut.run;
-    const active = daily || weekly;
-
-    const dailyInfo = advisorStatusInfo(daily && daily.status);
-    const weeklyInfo = advisorStatusInfo(weekly && weekly.status);
-    if (el("advisorDailyStatus")) {
-      el("advisorDailyStatus").className = dailyInfo.className;
-      el("advisorDailyStatus").textContent = dailyInfo.label;
-    }
-    if (el("advisorWeeklyStatus")) {
-      el("advisorWeeklyStatus").className = weeklyInfo.className;
-      el("advisorWeeklyStatus").textContent = weeklyInfo.label;
-    }
-    if (el("advisorDailyMeta")) {
-      el("advisorDailyMeta").textContent = daily
-        ? `Publicado ${fmtDateTimeShort(daily.created_at_utc)} | fuente ${advisorPolicyLabel(daily.source_policy)}`
-        : "Sin briefing diario.";
-    }
-    if (el("advisorWeeklyMeta")) {
-      const runId = weekly && weekly.opportunity_run_id != null ? ` | run ${weekly.opportunity_run_id}` : "";
-      el("advisorWeeklyMeta").textContent = weekly
-        ? `Publicado ${fmtDateTimeShort(weekly.created_at_utc)} | as_of ${weekly.as_of}${runId}`
-        : "Sin briefing semanal.";
-    }
-    renderAdvisorHero(daily, weekly, latestRun);
-    renderAdvisorRadar(daily, weekly, latestRun);
-    renderAdvisorSummary("advisorDailySummary", daily);
-    renderAdvisorSummary("advisorWeeklySummary", weekly);
-    renderAdvisorItems("advisorRecommendations", (active && active.recommendations) || [], "Sin recomendaciones activas.");
-    renderAdvisorItems("advisorWatchlist", (active && active.watchlist) || [], "Sin watchlist pendiente.");
-    renderAdvisorQuality(active);
-    renderAdvisorLinks(active, latestRun);
-    renderAdvisorHistory((historyOut && historyOut.rows) || []);
   }
 
   function advisorStatusInfo(status) {
@@ -3141,15 +2830,6 @@
     try {
       const v1 = (localStorage.getItem("assetPeriod") || "").trim().toLowerCase();
       if (["daily", "weekly", "monthly", "yearly", "accumulated"].includes(v1)) return v1;
-      const legacy = (localStorage.getItem("moversPeriod") || "").trim().toLowerCase();
-      if (legacy) {
-        const mapped = (legacy === "ytd") ? "accumulated" : legacy;
-        if (["daily", "weekly", "monthly", "yearly", "accumulated"].includes(mapped)) {
-          localStorage.setItem("assetPeriod", mapped);
-          localStorage.removeItem("moversPeriod");
-          return mapped;
-        }
-      }
     } catch (_) { }
     return "daily";
   }
@@ -3294,12 +2974,6 @@
     try {
       const current = parseInt(localStorage.getItem("assetMonth") || "", 10);
       if (current >= 1 && current <= 12) return current;
-      const legacy = parseInt(localStorage.getItem("moversMonth") || "", 10);
-      if (legacy >= 1 && legacy <= 12) {
-        localStorage.setItem("assetMonth", String(legacy));
-        localStorage.removeItem("moversMonth");
-        return legacy;
-      }
     } catch (_) { }
     return (defaultMonth >= 1 && defaultMonth <= 12) ? defaultMonth : 1;
   }
@@ -3313,14 +2987,6 @@
     try {
       const current = parseInt(localStorage.getItem("assetYear") || "", 10);
       if (!isNaN(current)) y = current;
-      else {
-        const legacy = parseInt(localStorage.getItem("moversYear") || "", 10);
-        if (!isNaN(legacy)) {
-          y = legacy;
-          localStorage.setItem("assetYear", String(legacy));
-          localStorage.removeItem("moversYear");
-        }
-      }
     } catch (_) { }
     if (Array.isArray(years) && years.length) {
       if (years.includes(y)) return y;

@@ -1,40 +1,24 @@
 import os
-import sqlite3
-import tempfile
 import unittest
 from unittest.mock import patch
 
 from iol_web import db as webdb
 from iol_web.inflation_ar import InflationFetchResult
 from iol_web.routes_api import compare_inflation
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL
-        )
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn, path):
-    conn.close()
-    if os.path.exists(path):
-        os.unlink(path)
+TEST_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL
+)
+"""
 
 
 class TestInflationCompare(unittest.TestCase):
     def test_monthly_first_last_series(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 "INSERT INTO portfolio_snapshots(snapshot_date,total_value) VALUES(?,?)",
@@ -55,7 +39,7 @@ class TestInflationCompare(unittest.TestCase):
             self.assertAlmostEqual(rows[0]["first_value"], 100.0)
             self.assertAlmostEqual(rows[0]["last_value"], 110.0)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
 
     def test_inflation_pct_by_month_decimal(self):
         res = InflationFetchResult(
@@ -77,7 +61,7 @@ class TestInflationCompare(unittest.TestCase):
         self.assertAlmostEqual(real, 1.81818, places=4)
 
     def test_compare_inflation_projects_last_month(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             # Two months of snapshots: Jan and Feb (current). Feb inflation will be missing in the mocked series.
             conn.executemany(
@@ -115,7 +99,7 @@ class TestInflationCompare(unittest.TestCase):
             self.assertTrue(feb.get("inflation_projected"))
             self.assertAlmostEqual(feb.get("inflation_pct"), 10.0, places=6)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
             if os.environ.get("IOL_DB_PATH") == path:
                 del os.environ["IOL_DB_PATH"]
 

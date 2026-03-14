@@ -1,59 +1,39 @@
 import os
-import sqlite3
-import tempfile
 import unittest
 
 from fastapi.responses import JSONResponse
 
 from iol_web.routes_api import snapshots
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL,
-          cash_total_ars REAL,
-          cash_disponible_ars REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE orders (
-          order_number INTEGER PRIMARY KEY,
-          status TEXT,
-          symbol TEXT,
-          side TEXT,
-          side_norm TEXT,
-          quantity REAL,
-          price REAL,
-          operated_amount REAL,
-          currency TEXT,
-          created_at TEXT,
-          updated_at TEXT,
-          operated_at TEXT
-        )
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn, path):
-    conn.close()
-    if os.path.exists(path):
-        os.unlink(path)
+TEST_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL,
+  cash_total_ars REAL,
+  cash_disponible_ars REAL
+);
+CREATE TABLE orders (
+  order_number INTEGER PRIMARY KEY,
+  status TEXT,
+  symbol TEXT,
+  side TEXT,
+  side_norm TEXT,
+  quantity REAL,
+  price REAL,
+  operated_amount REAL,
+  currency TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  operated_at TEXT
+);
+"""
 
 
 class TestWebSnapshotsApi(unittest.TestCase):
     def setUp(self):
-        self.conn, self.path = _mk_db()
+        self.conn, self.path = create_temp_sqlite_db(TEST_SCHEMA)
         self.prev_env = os.environ.get("IOL_DB_PATH")
         os.environ["IOL_DB_PATH"] = self.path
 
@@ -62,7 +42,7 @@ class TestWebSnapshotsApi(unittest.TestCase):
             os.environ.pop("IOL_DB_PATH", None)
         else:
             os.environ["IOL_DB_PATH"] = self.prev_env
-        _cleanup(self.conn, self.path)
+        cleanup_temp_sqlite_db(self.conn, self.path)
 
     def test_raw_mode_unchanged(self):
         self.conn.executemany(
@@ -84,8 +64,8 @@ class TestWebSnapshotsApi(unittest.TestCase):
             "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_disponible_ars) VALUES(?,?,?)",
             [
                 ("2026-02-10", 1000.0, 100.0),
-                ("2026-02-11", 1500.0, 600.0),  # +500 (deposit inferred)
-                ("2026-02-12", 1600.0, 600.0),  # +100 market
+                ("2026-02-11", 1500.0, 600.0),
+                ("2026-02-12", 1600.0, 600.0),
             ],
         )
         self.conn.commit()
@@ -106,9 +86,7 @@ class TestWebSnapshotsApi(unittest.TestCase):
             "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars) VALUES(?,?,?,?)",
             [
                 ("2026-02-22", 1000.0, 100.0, 100.0),
-                # External deposit +500 and buy +498 in the same day.
                 ("2026-02-23", 1500.0, 102.0, 600.0),
-                # Next day available cash settles -500 with no new orders.
                 ("2026-02-24", 1510.0, 102.0, 100.0),
             ],
         )
@@ -135,9 +113,7 @@ class TestWebSnapshotsApi(unittest.TestCase):
             "INSERT INTO portfolio_snapshots(snapshot_date,total_value,cash_total_ars,cash_disponible_ars) VALUES(?,?,?,?)",
             [
                 ("2026-02-22", 1000.0, 100.0, 100.0),
-                # Day 1: deposit + buy reported together.
                 ("2026-02-23", 1490.0, 600.0, 600.0),
-                # Day 2: cash liquidation carryover.
                 ("2026-02-24", 1500.0, 100.0, 100.0),
             ],
         )

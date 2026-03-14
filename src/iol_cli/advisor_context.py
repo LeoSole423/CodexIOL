@@ -1,26 +1,31 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from iol_shared.metrics import compute_return as shared_compute_return
+from iol_shared.metrics import target_date as shared_target_date
+from iol_shared.movers import build_union_movers as shared_build_union_movers
+from iol_shared.portfolio_db import (
+    allocation as shared_allocation,
+    assets_for_snapshot as shared_assets_for_snapshot,
+    connect_ro as shared_connect_ro,
+    earliest_snapshot as shared_earliest_snapshot,
+    first_snapshot_in_range as shared_first_snapshot_in_range,
+    first_snapshot_of_year as shared_first_snapshot_of_year,
+    last_snapshot_in_range as shared_last_snapshot_in_range,
+    latest_snapshot as shared_latest_snapshot,
+    snapshot_before as shared_snapshot_before,
+    snapshot_on_or_before as shared_snapshot_on_or_before,
+    snapshots_series as shared_snapshots_series,
+)
 
 
 def _connect_ro(db_path: str) -> sqlite3.Connection:
-    """
-    Open SQLite in read-only mode so `iol advisor context` can't mutate the DB.
-    This also avoids creating an empty DB if the path doesn't exist.
-    """
-    p = Path(db_path)
-    if not p.exists():
-        raise FileNotFoundError(db_path)
-    uri_path = p.resolve().as_posix()
-    conn = sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return shared_connect_ro(db_path)
 
 
 def _parse_iso_date(v: Optional[str]) -> Optional[str]:
@@ -71,203 +76,61 @@ def _pick_meta(base: Dict[str, Any] | None, end: Dict[str, Any] | None, key: str
     return None
 
 
-def _row_to_snapshot_dict(row: sqlite3.Row) -> Dict[str, Any]:
-    keys = set(row.keys())
+def _snapshot_to_dict(snapshot: Any) -> Optional[Dict[str, Any]]:
+    if snapshot is None:
+        return None
     return {
-        "snapshot_date": str(row["snapshot_date"]),
-        "total_value": float(row["total_value"] or 0.0) if "total_value" in keys else 0.0,
-        "currency": row["currency"] if "currency" in keys else None,
-        "titles_value": float(row["titles_value"]) if ("titles_value" in keys and row["titles_value"] is not None) else None,
-        "cash_disponible_ars": float(row["cash_disponible_ars"])
-        if ("cash_disponible_ars" in keys and row["cash_disponible_ars"] is not None)
-        else None,
-        "cash_disponible_usd": float(row["cash_disponible_usd"])
-        if ("cash_disponible_usd" in keys and row["cash_disponible_usd"] is not None)
-        else None,
-        "retrieved_at": row["retrieved_at"] if "retrieved_at" in keys else None,
-        "minutes_from_close": int(row["minutes_from_close"]) if ("minutes_from_close" in keys and row["minutes_from_close"] is not None) else None,
-        "source": row["source"] if "source" in keys else None,
+        "snapshot_date": str(snapshot.snapshot_date),
+        "total_value": float(snapshot.total_value or 0.0),
+        "currency": snapshot.currency,
+        "titles_value": snapshot.titles_value,
+        "cash_disponible_ars": snapshot.cash_disponible_ars,
+        "cash_disponible_usd": snapshot.cash_disponible_usd,
+        "retrieved_at": snapshot.retrieved_at,
+        "minutes_from_close": snapshot.minutes_from_close,
+        "source": snapshot.source,
     }
 
 
 def latest_snapshot(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
-    row = conn.execute(
-        """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd,
-               retrieved_at, minutes_from_close, source
-        FROM portfolio_snapshots
-        ORDER BY snapshot_date DESC
-        LIMIT 1
-        """
-    ).fetchone()
-    return _row_to_snapshot_dict(row) if row else None
+    return _snapshot_to_dict(shared_latest_snapshot(conn))
 
 
 def earliest_snapshot(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
-    row = conn.execute(
-        """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd,
-               retrieved_at, minutes_from_close, source
-        FROM portfolio_snapshots
-        ORDER BY snapshot_date ASC
-        LIMIT 1
-        """
-    ).fetchone()
-    return _row_to_snapshot_dict(row) if row else None
+    return _snapshot_to_dict(shared_earliest_snapshot(conn))
 
 
 def snapshot_before(conn: sqlite3.Connection, before_date: str) -> Optional[Dict[str, Any]]:
-    row = conn.execute(
-        """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd,
-               retrieved_at, minutes_from_close, source
-        FROM portfolio_snapshots
-        WHERE snapshot_date < ?
-        ORDER BY snapshot_date DESC
-        LIMIT 1
-        """,
-        (before_date,),
-    ).fetchone()
-    return _row_to_snapshot_dict(row) if row else None
+    return _snapshot_to_dict(shared_snapshot_before(conn, before_date))
 
 
 def snapshot_on_or_before(conn: sqlite3.Connection, target_date: str) -> Optional[Dict[str, Any]]:
-    row = conn.execute(
-        """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd,
-               retrieved_at, minutes_from_close, source
-        FROM portfolio_snapshots
-        WHERE snapshot_date <= ?
-        ORDER BY snapshot_date DESC
-        LIMIT 1
-        """,
-        (target_date,),
-    ).fetchone()
-    return _row_to_snapshot_dict(row) if row else None
+    return _snapshot_to_dict(shared_snapshot_on_or_before(conn, target_date))
 
 
 def first_snapshot_of_year(conn: sqlite3.Connection, year: int, latest_date: str) -> Optional[Dict[str, Any]]:
-    start = date(int(year), 1, 1).isoformat()
-    row = conn.execute(
-        """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd,
-               retrieved_at, minutes_from_close, source
-        FROM portfolio_snapshots
-        WHERE snapshot_date >= ? AND snapshot_date <= ?
-        ORDER BY snapshot_date ASC
-        LIMIT 1
-        """,
-        (start, latest_date),
-    ).fetchone()
-    return _row_to_snapshot_dict(row) if row else None
+    return _snapshot_to_dict(shared_first_snapshot_of_year(conn, year, latest_date))
 
 
 def first_snapshot_in_range(conn: sqlite3.Connection, start_date: str, end_date: str) -> Optional[Dict[str, Any]]:
-    row = conn.execute(
-        """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd,
-               retrieved_at, minutes_from_close, source
-        FROM portfolio_snapshots
-        WHERE snapshot_date >= ? AND snapshot_date <= ?
-        ORDER BY snapshot_date ASC
-        LIMIT 1
-        """,
-        (start_date, end_date),
-    ).fetchone()
-    return _row_to_snapshot_dict(row) if row else None
+    return _snapshot_to_dict(shared_first_snapshot_in_range(conn, start_date, end_date))
 
 
 def last_snapshot_in_range(conn: sqlite3.Connection, start_date: str, end_date: str) -> Optional[Dict[str, Any]]:
-    row = conn.execute(
-        """
-        SELECT snapshot_date, total_value, currency, titles_value, cash_disponible_ars, cash_disponible_usd,
-               retrieved_at, minutes_from_close, source
-        FROM portfolio_snapshots
-        WHERE snapshot_date >= ? AND snapshot_date <= ?
-        ORDER BY snapshot_date DESC
-        LIMIT 1
-        """,
-        (start_date, end_date),
-    ).fetchone()
-    return _row_to_snapshot_dict(row) if row else None
+    return _snapshot_to_dict(shared_last_snapshot_in_range(conn, start_date, end_date))
 
 
 def snapshots_series(conn: sqlite3.Connection, date_from: Optional[str], date_to: Optional[str]) -> List[Dict[str, Any]]:
-    rows = conn.execute(
-        """
-        SELECT snapshot_date, total_value
-        FROM portfolio_snapshots
-        WHERE (? IS NULL OR snapshot_date >= ?)
-          AND (? IS NULL OR snapshot_date <= ?)
-        ORDER BY snapshot_date ASC
-        """,
-        (date_from, date_from, date_to, date_to),
-    ).fetchall()
-    return [{"date": str(r["snapshot_date"]), "total_value_ars": float(r["total_value"] or 0.0)} for r in rows]
+    return [{"date": d, "total_value_ars": total} for d, total in shared_snapshots_series(conn, date_from, date_to)]
 
 
 def assets_for_snapshot(conn: sqlite3.Connection, snapshot_date: str) -> List[Dict[str, Any]]:
-    rows = conn.execute(
-        """
-        SELECT
-            symbol, description, market, type, currency, plazo,
-            quantity, last_price, ppc, total_value,
-            daily_var_pct, daily_var_points, gain_pct, gain_amount, committed
-        FROM portfolio_assets
-        WHERE snapshot_date = ?
-        """,
-        (snapshot_date,),
-    ).fetchall()
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        out.append(
-            {
-                "symbol": r["symbol"],
-                "description": r["description"],
-                "market": r["market"],
-                "type": r["type"],
-                "currency": r["currency"],
-                "plazo": r["plazo"],
-                "quantity": float(r["quantity"] or 0.0),
-                "last_price": float(r["last_price"] or 0.0),
-                "ppc": float(r["ppc"] or 0.0) if r["ppc"] is not None else None,
-                "total_value": float(r["total_value"] or 0.0),
-                "daily_var_pct": float(r["daily_var_pct"] or 0.0) if r["daily_var_pct"] is not None else None,
-                "daily_var_points": float(r["daily_var_points"] or 0.0) if r["daily_var_points"] is not None else None,
-                "gain_pct": float(r["gain_pct"] or 0.0) if r["gain_pct"] is not None else None,
-                "gain_amount": float(r["gain_amount"] or 0.0) if r["gain_amount"] is not None else None,
-                "committed": float(r["committed"] or 0.0) if r["committed"] is not None else None,
-            }
-        )
-    return out
+    return shared_assets_for_snapshot(conn, snapshot_date)
 
 
 def allocation(conn: sqlite3.Connection, snapshot_date: str, group_by: str) -> List[Dict[str, Any]]:
-    allowed = {"symbol", "type", "market", "currency"}
-    group_by = (group_by or "").strip().lower()
-    if group_by not in allowed:
-        raise ValueError(f"invalid group_by: {group_by}")
-    rows = conn.execute(
-        f"""
-        SELECT {group_by} AS k, SUM(total_value) AS v
-        FROM portfolio_assets
-        WHERE snapshot_date = ?
-        GROUP BY {group_by}
-        """,
-        (snapshot_date,),
-    ).fetchall()
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        key = r["k"] if r["k"] is not None and str(r["k"]).strip() else "unknown"
-        out.append({"key": str(key), "value": float(r["v"] or 0.0)})
-    out.sort(key=lambda kv: float(kv["value"] or 0.0), reverse=True)
-    return out
-
-
-def _pct_change(base: float, quote: float) -> Optional[float]:
-    if base == 0:
-        return None
-    return (quote - base) / base * 100.0
+    rows = shared_allocation(conn, snapshot_date, (group_by or "").strip().lower())
+    return [{"key": key, "value": value} for key, value in rows]
 
 
 @dataclass(frozen=True)
@@ -282,58 +145,35 @@ class ReturnBlock:
 
 
 def compute_return(latest: Optional[Dict[str, Any]], base: Optional[Dict[str, Any]]) -> ReturnBlock:
-    if not latest or not base:
-        return ReturnBlock(
-            from_date=base.get("snapshot_date") if base else None,
-            to_date=latest.get("snapshot_date") if latest else None,
-            delta_ars=None,
-            pct=None,
-        )
-    base_v = float(base.get("total_value") or 0.0)
-    latest_v = float(latest.get("total_value") or 0.0)
+    latest_ns = _dict_snapshot(latest)
+    base_ns = _dict_snapshot(base)
+    shared = shared_compute_return(latest_ns, base_ns)
     return ReturnBlock(
-        from_date=str(base.get("snapshot_date")),
-        to_date=str(latest.get("snapshot_date")),
-        delta_ars=latest_v - base_v,
-        pct=_pct_change(base_v, latest_v),
+        from_date=shared.from_date,
+        to_date=shared.to_date,
+        delta_ars=shared.delta,
+        pct=shared.pct,
     )
 
 
 def target_date(latest_date: str, days: int) -> str:
-    d = date.fromisoformat(latest_date)
-    return (d - timedelta(days=int(days))).isoformat()
+    return shared_target_date(latest_date, int(days))
 
 
 def build_union_movers(base_assets: List[Dict[str, Any]], end_assets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    base_by = {a.get("symbol"): a for a in (base_assets or []) if a.get("symbol")}
-    end_by = {a.get("symbol"): a for a in (end_assets or []) if a.get("symbol")}
-    symbols = set(base_by.keys()) | set(end_by.keys())
+    return shared_build_union_movers(base_assets, end_assets)
 
-    out: List[Dict[str, Any]] = []
-    for sym in symbols:
-        b = base_by.get(sym)
-        e = end_by.get(sym)
 
-        base_total = float((b or {}).get("total_value") or 0.0)
-        end_total = float((e or {}).get("total_value") or 0.0)
-        delta = end_total - base_total
-        pct = None if base_total == 0 else (delta / base_total * 100.0)
+def _dict_snapshot(v: Optional[Dict[str, Any]]) -> Any:
+    if not v:
+        return None
 
-        out.append(
-            {
-                "symbol": sym,
-                "description": _pick_meta(b, e, "description") or sym,
-                "market": _pick_meta(b, e, "market"),
-                "type": _pick_meta(b, e, "type"),
-                "currency": _pick_meta(b, e, "currency"),
-                "plazo": _pick_meta(b, e, "plazo"),
-                "total_value": end_total,
-                "base_total_value": base_total,
-                "delta_value": delta,
-                "delta_pct": pct,
-            }
-        )
-    return out
+    class _SnapshotView:
+        snapshot_date = str(v.get("snapshot_date"))
+        total_value = float(v.get("total_value") or 0.0)
+        titles_value = v.get("titles_value")
+
+    return _SnapshotView()
 
 
 def _daily_movers_from_latest_assets(assets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

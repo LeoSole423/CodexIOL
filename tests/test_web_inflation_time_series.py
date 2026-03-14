@@ -1,35 +1,19 @@
 import os
-import sqlite3
-import tempfile
 import unittest
 from unittest.mock import patch
 
 from iol_web.inflation_ar import InflationFetchResult
 from iol_web.inflation_compare import compounded_inflation_pct, inflation_factor_for_date
 from iol_web.routes_api import compare_inflation_annual, compare_inflation_series
+from tests_support import cleanup_temp_sqlite_db, create_temp_sqlite_db
 
 
-def _mk_db():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE portfolio_snapshots (
-          snapshot_date TEXT PRIMARY KEY,
-          total_value REAL
-        );
-        """
-    )
-    conn.commit()
-    return conn, path
-
-
-def _cleanup(conn, path):
-    conn.close()
-    if os.path.exists(path):
-        os.unlink(path)
+TEST_SCHEMA = """
+CREATE TABLE portfolio_snapshots (
+  snapshot_date TEXT PRIMARY KEY,
+  total_value REAL
+);
+"""
 
 
 class TestInflationCompareHelpers(unittest.TestCase):
@@ -49,7 +33,7 @@ class TestInflationCompareHelpers(unittest.TestCase):
 
 class TestInflationSeriesAndAnnual(unittest.TestCase):
     def test_series_base100(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 "INSERT INTO portfolio_snapshots(snapshot_date,total_value) VALUES(?,?)",
@@ -85,12 +69,12 @@ class TestInflationSeriesAndAnnual(unittest.TestCase):
             self.assertAlmostEqual(out["inflation_index"][1], 110.0, places=6)
             self.assertAlmostEqual(out["inflation_index"][2], 121.0, places=6)
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
             if os.environ.get("IOL_DB_PATH") == path:
                 del os.environ["IOL_DB_PATH"]
 
     def test_annual_includes_ytd(self):
-        conn, path = _mk_db()
+        conn, path = create_temp_sqlite_db(TEST_SCHEMA)
         try:
             conn.executemany(
                 "INSERT INTO portfolio_snapshots(snapshot_date,total_value) VALUES(?,?)",
@@ -120,7 +104,7 @@ class TestInflationSeriesAndAnnual(unittest.TestCase):
             rows = out["rows"]
             self.assertTrue(any(r["label"].startswith("YTD") for r in rows))
         finally:
-            _cleanup(conn, path)
+            cleanup_temp_sqlite_db(conn, path)
             if os.environ.get("IOL_DB_PATH") == path:
                 del os.environ["IOL_DB_PATH"]
 
