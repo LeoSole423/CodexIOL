@@ -45,17 +45,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_startup_task
 ```
 
 ## Web dashboard (portfolio)
-Levantar la web app (lee snapshots desde `data/iol_history.db`):
+Levantar la web app (Next.js + API backend, lee snapshots desde `data/iol_history.db`):
 
 ```
-docker compose up -d --build web
+docker compose up -d --build web frontend
 ```
 
 Abrir:
 
 ```
-http://localhost:8000/
+http://localhost:3000/
 ```
+
+> El API REST (FastAPI) corre en `http://localhost:8000/api/` y es consumido internamente por el frontend Next.js vía proxy.
 
 Ejecutar comandos:
 

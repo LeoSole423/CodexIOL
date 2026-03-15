@@ -9,7 +9,7 @@ Estado inicial de la limpieza estructural.
 - `src/iol_web/movers.py` y `src/iol_cli/advisor_context.py` repetían unión de movers por símbolo.
 
 ## Legacy
-- Frontend mantenía migración automática desde `moversPeriod`, `moversMonth` y `moversYear` hacia claves nuevas `asset*`.
+- ~~Frontend Jinja2 (`src/iol_web/templates/`, `src/iol_web/static/`, `routes_pages.py`, `templates.py`) eliminado — reemplazado por Next.js en `frontend/`.~~ ✅ Completado (2026-03-15)
 - Backend conservaba tolerancia a esquemas viejos en órdenes/runs; se mantiene donde todavía protege bases existentes.
 
 ## Monolitos
