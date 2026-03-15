@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from .api_advisor import advisor_history, advisor_latest, advisor_opportunities_latest, router as advisor_router
+from .api_engines import router as engines_router
+from .api_simulation import router as simulation_router
 from .api_cashflows import build_cashflows_router
 from .api_inflation import build_inflation_router
 from .api_portfolio import allocation, assets_performance, latest, movers, router as portfolio_router
@@ -59,3 +61,5 @@ quality_router, quality = build_quality_router(
     snapshot_data_freshness_fn=snapshot_data_freshness,
 )
 router.include_router(quality_router)
+router.include_router(engines_router)
+router.include_router(simulation_router)

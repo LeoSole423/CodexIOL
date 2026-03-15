@@ -10,8 +10,10 @@ Objetivo: enrutar cada consulta al prompt especializado correcto, manteniendo se
 5. Guardar interacciones relevantes con `iol advisor log`.
 
 ## Routing por intencion
+- Regimen de mercado, señales de motores, macro computada: `prompts/32_regime_engine.md`.
+- Smart money, 13F, posicionamiento institucional: `prompts/37_smart_money.md`.
 - Analisis de portafolio, riesgos, recomendaciones: `prompts/20_portfolio_analysis.md`.
-- Macro, noticias, tasas, inflacion, fuentes externas: `prompts/30_macro_sources.md`.
+- Macro via fuentes externas (investigacion profunda): `prompts/30_macro_sources.md`.
 - Consenso de referentes confiables para oportunidades: `prompts/35_expert_consensus.md`.
 - Busqueda/validacion de simbolos o instrumentos: `prompts/40_symbol_web_research.md`.
 - Ranking de oportunidades (compras/recompras): `prompts/45_opportunity_scoring.md`.
@@ -24,3 +26,4 @@ Objetivo: enrutar cada consulta al prompt especializado correcto, manteniendo se
 - No ejecutar ordenes reales sin confirmacion explicita y comando final con `--confirm CONFIRMAR`.
 - Mantener salida accionable y breve; separar hechos, recomendaciones y supuestos.
 - En runs semanales de oportunidades, devolver siempre decision final (`comprar|recomprar|no operar`) y justificar el por que de cada recomendacion.
+- Antes de cualquier analisis de oportunidades o portafolio: ejecutar `prompts/32_regime_engine.md` como paso 0.
