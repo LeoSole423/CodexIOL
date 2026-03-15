@@ -353,9 +353,9 @@ def build_movements_app(*, get_client: Callable[[Any], Any]) -> typer.Typer:
         # --- Phase 1: fetch from /api/v2/operaciones ---
         try:
             params: Dict[str, Any] = {
-                "filtro.FechaDesde": f,
-                "filtro.FechaHasta": t,
-                "filtro.Estado": "terminada",
+                "filtro.fechaDesde": f"{f}T00:00:00",
+                "filtro.fechaHasta": f"{t}T23:59:59",
+                "filtro.estado": "terminadas",
             }
             if country:
                 params["filtro.pais"] = country

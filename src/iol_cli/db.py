@@ -17,7 +17,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
     for statement in SCHEMA_STATEMENTS:
         cur.execute(statement)
+    conn.commit()
+    # Apply column migrations before creating indexes that may reference new columns.
+    apply_migrations(conn, ensure_columns)
     for statement in INDEX_STATEMENTS:
         cur.execute(statement)
     conn.commit()
-    apply_migrations(conn, ensure_columns)
