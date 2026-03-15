@@ -18,7 +18,7 @@ import type {
   AdvisorHistoryResponse,
   OpportunityRunResponse,
 } from "@/types/advisor";
-import type { QualityResponse, ReconciliationLatestResponse, ReconciliationOpenResponse } from "@/types/quality";
+import type { QualityResponse, ReconciliationLatestResponse, ReconciliationOpenResponse, IncomeSummaryResponse } from "@/types/quality";
 import type { AnnualComparisonResponse, InflationSeriesComparison, MonthlyKPI } from "@/types/inflation";
 
 async function fetchJSON<T>(path: string, options?: RequestInit): Promise<T> {
@@ -116,6 +116,10 @@ export function addManualCashflow(data: ManualCashflowInput): Promise<ManualCash
 
 export function deleteManualCashflow(id: number): Promise<{ ok: boolean; id: number }> {
   return fetchJSON(`/api/cashflows/manual/${id}`, { method: "DELETE" });
+}
+
+export function getCashflowsIncomeSummary(days = 60): Promise<IncomeSummaryResponse> {
+  return fetchJSON(`/api/cashflows/income-summary?days=${days}`);
 }
 
 // ─── Advisor ─────────────────────────────────────────────────────────────────

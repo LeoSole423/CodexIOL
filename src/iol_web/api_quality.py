@@ -50,6 +50,59 @@ def _latest_evidence_stats(conn, as_of: str) -> Dict[str, Any]:
     return dict(row or {})
 
 
+def _movements_coverage_stats(conn, as_of: str) -> Dict[str, Any]:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(account_cash_movements)").fetchall()}
+    if not cols:
+        return {"income_total": 0, "income_with_symbol": 0, "coverage_pct": 0.0}
+    symbol_col = "symbol" if "symbol" in cols else "NULL"
+    cutoff = target_date(as_of, 90)
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS income_total,
+            SUM(CASE WHEN {symbol_col} IS NOT NULL AND {symbol_col} != '' THEN 1 ELSE 0 END) AS income_with_symbol
+        FROM account_cash_movements
+        WHERE kind IN ('dividend_income', 'coupon_income', 'bond_amortization_income')
+        AND movement_date >= ?
+        """,
+        (cutoff,),
+    ).fetchone()
+    total = int(row["income_total"] or 0) if row else 0
+    with_sym = int(row["income_with_symbol"] or 0) if row else 0
+    pct = (with_sym / total * 100.0) if total > 0 else 0.0
+    return {"income_total": total, "income_with_symbol": with_sym, "coverage_pct": round(pct, 1)}
+
+
+def _fee_linkage_stats(conn, as_of: str) -> Dict[str, Any]:
+    cols_fees = {r[1] for r in conn.execute("PRAGMA table_info(order_fees)").fetchall()}
+    if not cols_fees:
+        return {"fees_linked": 0, "fees_total": 0, "linkage_pct": 0.0}
+    cols_mv = {r[1] for r in conn.execute("PRAGMA table_info(account_cash_movements)").fetchall()}
+    cutoff = target_date(as_of, 90)
+    fees_linked = int(conn.execute(
+        "SELECT COUNT(*) FROM order_fees WHERE occurred_at >= ?", (cutoff,)
+    ).fetchone()[0] or 0)
+    fees_total = 0
+    if cols_mv:
+        fees_total = int(conn.execute(
+            "SELECT COUNT(*) FROM account_cash_movements WHERE kind = 'operational_fee_or_tax' AND movement_date >= ?",
+            (cutoff,),
+        ).fetchone()[0] or 0)
+    pct = (fees_linked / fees_total * 100.0) if fees_total > 0 else (100.0 if fees_linked == 0 else 0.0)
+    return {"fees_linked": fees_linked, "fees_total": fees_total, "linkage_pct": round(pct, 1)}
+
+
+def _fee_alerts_count(conn) -> int:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(advisor_alerts)").fetchall()}
+    if not cols or "kind" not in cols:
+        return 0
+    status_filter = "AND (status IS NULL OR status = 'open')" if "status" in cols else ""
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM advisor_alerts WHERE kind = 'fee_discrepancy' {status_filter}"
+    ).fetchone()
+    return int(row[0] or 0)
+
+
 def _cashflow_import_stats(conn, as_of: str) -> Dict[str, Any]:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(account_cash_movements)").fetchall()}
     if not cols:
@@ -241,6 +294,46 @@ def build_quality_router(
                 )
             )
 
+            mov_cov = _movements_coverage_stats(conn, latest_snapshot_date)
+            mov_cov_total = int(mov_cov.get("income_total") or 0)
+            mov_cov_pct = float(mov_cov.get("coverage_pct") or 0.0)
+            mov_cov_kind = "ok" if mov_cov_pct >= 80 else ("info" if mov_cov_pct >= 40 else ("warn" if mov_cov_total > 0 else "info"))
+            mov_cov_value = f"{mov_cov_pct:.0f}% con símbolo" if mov_cov_total > 0 else "Sin ingresos"
+            mov_cov_detail = (
+                "Los movimientos de ingresos (dividendos, cupones, amortizaciones) tienen símbolo identificado."
+                if mov_cov_pct >= 80
+                else (
+                    "Parte de los ingresos no tienen símbolo identificado — correr 'movements sync' para completar."
+                    if mov_cov_total > 0
+                    else "No hay movimientos de ingresos registrados en los últimos 90 días."
+                )
+            )
+
+            fee_lnk = _fee_linkage_stats(conn, latest_snapshot_date)
+            fee_lnk_linked = int(fee_lnk.get("fees_linked") or 0)
+            fee_lnk_total = int(fee_lnk.get("fees_total") or 0)
+            fee_lnk_pct = float(fee_lnk.get("linkage_pct") or 0.0)
+            fee_lnk_kind = "ok" if fee_lnk_pct >= 80 else ("info" if fee_lnk_total == 0 else "warn")
+            fee_lnk_value = f"{fee_lnk_linked} vinculadas" if fee_lnk_total > 0 else "Sin comisiones"
+            fee_lnk_detail = (
+                "Las comisiones están vinculadas a operaciones de compra/venta — verificación activa."
+                if fee_lnk_pct >= 80
+                else (
+                    "Correr 'movements link-fees' para vincular comisiones a sus operaciones."
+                    if fee_lnk_total > 0
+                    else "No hay comisiones registradas en los últimos 90 días."
+                )
+            )
+
+            fee_alert_count = _fee_alerts_count(conn)
+            fee_alert_kind = "ok" if fee_alert_count == 0 else ("warn" if fee_alert_count <= 3 else "warn")
+            fee_alert_value = "Sin alertas" if fee_alert_count == 0 else f"{fee_alert_count} alertas"
+            fee_alert_detail = (
+                "No se detectaron discrepancias en comisiones respecto a la tarifa del tier."
+                if fee_alert_count == 0
+                else f"Hay {fee_alert_count} alerta(s) de comisión fuera de rango — revisar con 'movements check-fees'."
+            )
+
             evidence_stats = _latest_evidence_stats(conn, latest_snapshot_date)
             latest_evidence = str(evidence_stats.get("latest_retrieved_at") or "")
             evidence_kind = "warn"
@@ -402,6 +495,41 @@ def build_quality_router(
                     coverage_kind,
                     "Cuantas ventanas de retorno tienen base historica usable.",
                     sources=[f"{item['label']}: {item['block'].get('from')} -> {item['block'].get('to')}" for item in period_blocks],
+                ),
+                _quality_row(
+                    "movements_coverage",
+                    "Cobertura de ingresos",
+                    mov_cov_value,
+                    mov_cov_kind,
+                    mov_cov_detail,
+                    sources=[
+                        f"Ingresos 90d: {mov_cov_total}",
+                        f"Con símbolo: {int(mov_cov.get('income_with_symbol') or 0)}",
+                        f"Cobertura: {mov_cov_pct:.1f}%",
+                    ],
+                    codes=["INCOME_SYMBOL_OK" if mov_cov_pct >= 80 else "INCOME_SYMBOL_PARTIAL"],
+                ),
+                _quality_row(
+                    "fee_linkage",
+                    "Vinculación de comisiones",
+                    fee_lnk_value,
+                    fee_lnk_kind,
+                    fee_lnk_detail,
+                    sources=[
+                        f"Comisiones 90d: {fee_lnk_total}",
+                        f"Vinculadas: {fee_lnk_linked}",
+                        f"Cobertura: {fee_lnk_pct:.1f}%",
+                    ],
+                    codes=["FEE_LINKED_OK" if fee_lnk_pct >= 80 else ("FEE_UNLINKED" if fee_lnk_total > 0 else "FEE_NONE")],
+                ),
+                _quality_row(
+                    "fee_alerts",
+                    "Alertas de comisiones",
+                    fee_alert_value,
+                    fee_alert_kind,
+                    fee_alert_detail,
+                    sources=[f"Alertas abiertas: {fee_alert_count}"],
+                    codes=["FEE_ALERTS_CLEAN" if fee_alert_count == 0 else f"FEE_ALERTS_{fee_alert_count}"],
                 ),
             ]
             return {"rows": rows, "meta": {"snapshot_date": latest_snapshot_date}}

@@ -9,6 +9,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { QualityStatusList } from "./QualityStatusList";
 import { ReconciliationPanel } from "./ReconciliationPanel";
 import { CashflowForm } from "./CashflowForm";
+import { IncomeBreakdownPanel } from "./IncomeBreakdownPanel";
 import { useQuality } from "@/hooks/useAdvisor";
 import type { QualityRow } from "@/types/quality";
 
@@ -99,7 +100,10 @@ export function QualityView() {
         </div>
       </div>
 
-      <ReconciliationPanel />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <IncomeBreakdownPanel />
+        <ReconciliationPanel />
+      </div>
       <CashflowForm />
     </div>
   );

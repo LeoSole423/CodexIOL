@@ -48,3 +48,25 @@ export interface ReconciliationLatestResponse {
   intervals: unknown[];
   proposals: ReconciliationProposal[];
 }
+
+export interface IncomeSummaryByKind {
+  kind: string;
+  count: number;
+  total_ars: number;
+}
+
+export interface IncomeSummaryBySymbol {
+  symbol: string;
+  kind: string;
+  count: number;
+  total_ars: number;
+}
+
+export interface IncomeSummaryResponse {
+  days: number;
+  from: string | null;
+  to: string | null;
+  total_ars: number;
+  by_kind: IncomeSummaryByKind[];
+  by_symbol: IncomeSummaryBySymbol[];
+}

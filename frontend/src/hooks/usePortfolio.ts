@@ -57,6 +57,16 @@ export function useManualCashflows(params?: { from?: string; to?: string }) {
   });
 }
 
+export function useIncomeSummary(days = 60) {
+  return useQuery({
+    queryKey: ["cashflows", "income-summary", days],
+    queryFn: async () => {
+      const { getCashflowsIncomeSummary } = await import("@/lib/api");
+      return getCashflowsIncomeSummary(days);
+    },
+  });
+}
+
 export function useCashflowMutations() {
   const qc = useQueryClient();
 

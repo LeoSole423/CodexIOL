@@ -30,10 +30,12 @@ const schema = z.object({
 type FormValues = z.infer<typeof schema>;
 
 const KIND_OPTIONS = [
-  { value: "deposit", label: "Depósito" },
-  { value: "withdrawal", label: "Extracción" },
-  { value: "dividend", label: "Dividendo" },
-  { value: "fee", label: "Comisión" },
+  { value: "external_deposit", label: "Depósito externo" },
+  { value: "external_withdraw", label: "Extracción externa" },
+  { value: "dividend_income", label: "Dividendo" },
+  { value: "coupon_income", label: "Cupón de bono" },
+  { value: "bond_amortization_income", label: "Amortización de bono" },
+  { value: "operational_fee_or_tax", label: "Comisión / impuesto" },
   { value: "other", label: "Otro" },
 ];
 
