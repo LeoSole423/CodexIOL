@@ -498,6 +498,81 @@ SCHEMA_STATEMENTS = [
         notes TEXT
     )
     """,
+    # ── Swing Trading Simulation ─────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS swing_simulation_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_name TEXT NOT NULL,
+        date_from TEXT NOT NULL,
+        date_to TEXT NOT NULL,
+        initial_cash REAL NOT NULL,
+        final_value REAL,
+        total_return_pct REAL,
+        sharpe_ratio REAL,
+        max_drawdown_pct REAL,
+        win_rate_pct REAL,
+        avg_hold_days REAL,
+        total_trades INTEGER,
+        mode TEXT NOT NULL DEFAULT 'backtest',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS swing_simulation_trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        symbol TEXT NOT NULL,
+        entry_date TEXT NOT NULL,
+        exit_date TEXT,
+        entry_price REAL NOT NULL,
+        exit_price REAL,
+        quantity REAL NOT NULL,
+        amount_ars REAL NOT NULL,
+        pnl_ars REAL,
+        return_pct REAL,
+        hold_days INTEGER,
+        exit_reason TEXT,
+        entry_signals_json TEXT,
+        exit_signals_json TEXT,
+        FOREIGN KEY(run_id) REFERENCES swing_simulation_runs(id)
+    )
+    """,
+    # ── Event-Driven Simulation ───────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS event_simulation_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_name TEXT NOT NULL,
+        date_from TEXT NOT NULL,
+        date_to TEXT NOT NULL,
+        initial_cash REAL NOT NULL,
+        final_value REAL,
+        total_return_pct REAL,
+        sharpe_ratio REAL,
+        max_drawdown_pct REAL,
+        win_rate_pct REAL,
+        total_events_triggered INTEGER,
+        total_trades INTEGER,
+        mode TEXT NOT NULL DEFAULT 'backtest',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS event_simulation_trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        symbol TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        action TEXT NOT NULL,
+        quantity REAL NOT NULL,
+        price REAL NOT NULL,
+        amount_ars REAL NOT NULL,
+        pnl_ars REAL,
+        trigger_event_type TEXT NOT NULL,
+        trigger_event_description TEXT,
+        portfolio_value_after REAL,
+        FOREIGN KEY(run_id) REFERENCES event_simulation_runs(id)
+    )
+    """,
     # ── Simulation Framework ────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS simulation_bot_configs (
@@ -588,6 +663,14 @@ INDEX_STATEMENTS = [
     # simulation indexes
     "CREATE INDEX IF NOT EXISTS idx_sim_runs_bot ON simulation_runs(bot_config_id)",
     "CREATE INDEX IF NOT EXISTS idx_sim_trades_run ON simulation_trades(run_id, trade_date)",
+    # swing simulation indexes
+    "CREATE INDEX IF NOT EXISTS idx_swing_runs_bot ON swing_simulation_runs(bot_name)",
+    "CREATE INDEX IF NOT EXISTS idx_swing_trades_run ON swing_simulation_trades(run_id, entry_date)",
+    "CREATE INDEX IF NOT EXISTS idx_swing_trades_symbol ON swing_simulation_trades(symbol)",
+    # event simulation indexes
+    "CREATE INDEX IF NOT EXISTS idx_event_runs_bot ON event_simulation_runs(bot_name)",
+    "CREATE INDEX IF NOT EXISTS idx_event_trades_run ON event_simulation_trades(run_id, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_event_trades_event_type ON event_simulation_trades(trigger_event_type)",
     # engine signal outcomes indexes
     "CREATE INDEX IF NOT EXISTS idx_engine_outcomes_engine_asof ON engine_signal_outcomes(engine_name, as_of)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_engine_outcomes_engine_asof ON engine_signal_outcomes(engine_name, as_of)",

@@ -50,10 +50,14 @@ npm run type-check                 # TypeScript
 
 ### Docker (entorno completo)
 
+> ⚠️ **ENTORNO REAL ES DOCKER.** El frontend proxea `/api/*` a `http://web:8000` (hostname interno Docker). Fuera de Docker esa URL no resuelve. Nunca usar `preview_start` ni uvicorn local para testear — siempre rebuilding Docker.
+
 ```bash
 docker compose up -d --build                     # CLI + scheduler
-docker compose up -d --build web frontend        # API (:8000) + frontend (:3000)
+docker compose up -d --build web frontend        # API (:8000) + frontend (:3000)  ← deploy tras cambios
 docker exec -it iol-cli iol <comando>
+docker compose logs -f frontend                  # Ver logs del frontend en vivo
+docker compose logs -f web                       # Ver logs de la API en vivo
 ```
 
 ### CLI útiles
@@ -191,6 +195,8 @@ Tablas principales (ver `src/iol_cli/db_schema.py` para definición completa):
 
 ## Qué NO hacer
 
+- No usar `preview_start` ni iniciar servidores locales para testear — el entorno real es Docker (`docker compose up -d --build web frontend`).
+- No verificar cambios de UI en localhost fuera de Docker — el proxy Next.js apunta a `http://web:8000` que solo resuelve dentro del contenedor.
 - No importar `iol_web` desde `iol_cli` ni viceversa — usar `iol_shared` como puente.
 - No mockear la DB en tests — usar bases temporales reales (ver `tests_support.py`).
 - No agregar Jinja2, templates HTML ni static files al backend — el frontend es Next.js.

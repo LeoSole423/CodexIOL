@@ -26,10 +26,25 @@ INTERVAL_MIN=${IOL_SNAPSHOT_INTERVAL_MIN:-5}
   ENGINE_HOUR_OFFSET=$(( (CRON_MIN + 15) / 60 ))
   ENGINE_HOUR=$(( CRON_HOUR + ENGINE_HOUR_OFFSET ))
   echo "${ENGINE_MIN} ${ENGINE_HOUR} * * 1-5 root iol engines run-all --skip-external --skip-smart-money >> /var/log/cron.log 2>&1"
-  # Live paper trading step: runs 5 minutes after engine refresh
-  STEP_MIN=$(( (ENGINE_MIN + 5) % 60 ))
-  STEP_HOUR_OFFSET=$(( (ENGINE_MIN + 5) / 60 ))
-  STEP_HOUR=$(( ENGINE_HOUR + STEP_HOUR_OFFSET ))
+  # Opportunities pipeline: run 5 min after engine refresh to populate advisor_opportunity_candidates
+  OPP_MIN=$(( (ENGINE_MIN + 5) % 60 ))
+  OPP_HOUR_OFFSET=$(( (ENGINE_MIN + 5) / 60 ))
+  OPP_HOUR=$(( ENGINE_HOUR + OPP_HOUR_OFFSET ))
+  echo "${OPP_MIN} ${OPP_HOUR} * * 1-5 root iol advisor opportunities run --mode both --budget-ars 200000 --top 15 >> /var/log/cron.log 2>&1"
+  # Swing live-step: 5 min after opportunities (uses advisor_opportunity_candidates for symbol selection)
+  SWING_MIN=$(( (OPP_MIN + 5) % 60 ))
+  SWING_HOUR_OFFSET=$(( (OPP_MIN + 5) / 60 ))
+  SWING_HOUR=$(( OPP_HOUR + SWING_HOUR_OFFSET ))
+  echo "${SWING_MIN} ${SWING_HOUR} * * 1-5 root iol simulate swing live-step --bots all >> /var/log/cron.log 2>&1"
+  # Event live-step: 5 min after swing
+  EVENT_MIN=$(( (SWING_MIN + 5) % 60 ))
+  EVENT_HOUR_OFFSET=$(( (SWING_MIN + 5) / 60 ))
+  EVENT_HOUR=$(( SWING_HOUR + EVENT_HOUR_OFFSET ))
+  echo "${EVENT_MIN} ${EVENT_HOUR} * * 1-5 root iol simulate event live-step --bots all >> /var/log/cron.log 2>&1"
+  # Daily bots live-step: 5 min after event bots
+  STEP_MIN=$(( (EVENT_MIN + 5) % 60 ))
+  STEP_HOUR_OFFSET=$(( (EVENT_MIN + 5) / 60 ))
+  STEP_HOUR=$(( EVENT_HOUR + STEP_HOUR_OFFSET ))
   echo "${STEP_MIN} ${STEP_HOUR} * * 1-5 root iol simulate live-step --bots all >> /var/log/cron.log 2>&1"
 } > "$CRON_FILE"
 
