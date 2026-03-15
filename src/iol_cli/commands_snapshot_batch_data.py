@@ -241,6 +241,44 @@ def build_data_app(*, print_json: Callable[[Any], None]) -> typer.Typer:
         finally:
             conn.close()
 
+    @data_app.command("detect-pivots")
+    def detect_pivots_cmd(
+        ctx: typer.Context,
+        as_of: str = typer.Option(None, "--as-of", help="Date YYYY-MM-DD (default: today)"),
+        strength: int = typer.Option(3, "--strength", help="Bars to confirm pivot"),
+        lookback: int = typer.Option(60, "--lookback-days", help="Days of OHLCV to analyze"),
+        symbol: str = typer.Option(None, "--symbol", help="Single symbol (default: all)"),
+    ):
+        """Detect and store pivot highs/lows from OHLCV data."""
+        from datetime import date as _date
+        from iol_engines.market_data_ohlcv import detect_pivots, detect_pivots_all_symbols
+        from rich.table import Table
+
+        target = as_of or _date.today().isoformat()
+
+        db_path = resolve_db_path(ctx.obj.config.db_path)
+        conn = connect(db_path)
+        init_db(conn)
+
+        if symbol:
+            pivots = detect_pivots(conn, symbol, target, lookback_days=lookback, strength=strength)
+            results = {"symbols_processed": 1, "pivots_detected": len(pivots), "by_symbol": {symbol: pivots} if pivots else {}}
+        else:
+            results = detect_pivots_all_symbols(conn, target, strength=strength, lookback_days=lookback)
+
+        console.print(f"[bold]Pivot detection[/bold] as_of={target} strength={strength}")
+        console.print(f"Symbols: {results['symbols_processed']}  Pivots detected: {results['pivots_detected']}")
+
+        if results["by_symbol"]:
+            table = Table("Symbol", "Date", "Type", "Price", "Strength")
+            for sym, plist in results["by_symbol"].items():
+                for p in plist:
+                    color = "green" if p["pivot_type"] == "low" else "red"
+                    table.add_row(sym, p["pivot_date"], f"[{color}]{p['pivot_type']}[/{color}]",
+                                  str(p["price"]), str(p["strength"]))
+            console.print(table)
+        conn.close()
+
     @data_app.command("export")
     def data_export(
         ctx: typer.Context,

@@ -495,6 +495,82 @@ def _save_snapshot(
         )
 
 
+def _update_market_data(
+    conn,
+    assets: List[Dict[str, Any]],
+    trade_date: str,
+    tick_time_utc: str,
+    source: str,
+    mode: str,
+) -> None:
+    """Insert intraday ticks and update OHLCV for each asset in the snapshot."""
+    cur = conn.cursor()
+    now_str = tick_time_utc
+
+    for a in assets:
+        symbol = a.get("symbol")
+        price = a.get("last_price")
+        if not symbol or price is None:
+            continue
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            continue
+        daily_var_pct = a.get("daily_var_pct")
+
+        # 1. Insert tick (ignore duplicate tick_time for same symbol)
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO symbol_intraday_ticks
+                (symbol, trade_date, tick_time, price, daily_var_pct, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (symbol, trade_date, now_str, price, daily_var_pct, source),
+        )
+
+        # 2. Derive prev_close from daily_var_pct (only on first encounter of the day)
+        prev_close: Optional[float] = None
+        if daily_var_pct is not None:
+            try:
+                pct = float(daily_var_pct)
+                if pct != -100.0:
+                    prev_close = round(price / (1.0 + pct / 100.0), 4)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+
+        # 3. Upsert OHLCV row — open is set only if no row exists yet for this day
+        existing = cur.execute(
+            "SELECT open, high, low, close FROM symbol_daily_ohlcv WHERE symbol=? AND trade_date=?",
+            (symbol, trade_date),
+        ).fetchone()
+
+        if existing is None:
+            # First tick of the day → set open
+            cur.execute(
+                """
+                INSERT INTO symbol_daily_ohlcv
+                    (symbol, trade_date, open, high, low, close, prev_close, daily_var_pct, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (symbol, trade_date, price, price, price,
+                 price if mode == "close" else None,
+                 prev_close, daily_var_pct, source, now_str),
+            )
+        else:
+            ex_open, ex_high, ex_low, ex_close = existing
+            new_high = max(ex_high, price) if ex_high is not None else price
+            new_low  = min(ex_low,  price) if ex_low  is not None else price
+            new_close = price if mode == "close" else ex_close
+            cur.execute(
+                """
+                UPDATE symbol_daily_ohlcv
+                SET high=?, low=?, close=?, daily_var_pct=?, source=?, updated_at=?
+                WHERE symbol=? AND trade_date=?
+                """,
+                (new_high, new_low, new_close, daily_var_pct, source, now_str, symbol, trade_date),
+            )
+
+
 def run_snapshot(
     client: IOLClient,
     config: Config,
@@ -592,6 +668,14 @@ def run_snapshot(
             replace_assets=replace_assets,
         )
         _log_run(conn, snapshot_day.isoformat(), retrieved_at, source, "ok", None)
+        _update_market_data(
+            conn,
+            assets=assets,
+            trade_date=snapshot_day.isoformat(),
+            tick_time_utc=retrieved_at,
+            source=source,
+            mode=mode,
+        )
         conn.commit()
     except Exception as exc:
         _log_run(conn, snapshot_day.isoformat(), retrieved_at, source, "error", str(exc))

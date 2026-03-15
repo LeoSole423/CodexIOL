@@ -6,6 +6,7 @@ dataclasses.  No DB I/O.  Uses the same PriceSeries type as regime/indicators.py
 from __future__ import annotations
 
 import math
+import sqlite3
 import statistics
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -13,6 +14,36 @@ from typing import List, Optional, Tuple
 
 PriceSeries = List[Tuple[str, float]]   # [(YYYY-MM-DD, price), ...]
 OHLCSeries = List[Tuple[str, float, float, float, float]]  # [(date, open, high, low, close), ...]
+
+
+# ── OHLCV loader ──────────────────────────────────────────────────────────────
+
+def _load_ohlcv_series(
+    conn: sqlite3.Connection,
+    symbol: str,
+    as_of: str,
+    lookback: int = 60,
+) -> tuple:
+    """Return (closes, highs, lows) lists from symbol_daily_ohlcv. Falls back to empty lists."""
+    from datetime import date, timedelta
+    try:
+        end = date.fromisoformat(as_of)
+        start = (end - timedelta(days=lookback)).isoformat()
+    except ValueError:
+        return [], [], []
+    rows = conn.execute(
+        """
+        SELECT close, high, low FROM symbol_daily_ohlcv
+        WHERE symbol = ? AND trade_date >= ? AND trade_date <= ?
+          AND close IS NOT NULL
+        ORDER BY trade_date ASC
+        """,
+        (symbol, start, as_of),
+    ).fetchall()
+    closes = [float(r[0]) for r in rows]
+    highs  = [float(r[1]) if r[1] is not None else float(r[0]) for r in rows]
+    lows   = [float(r[2]) if r[2] is not None else float(r[0]) for r in rows]
+    return closes, highs, lows
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -98,19 +129,30 @@ def bollinger_bands(
 
 # ── ATR (Average True Range) ─────────────────────────────────────────────────
 
-def atr(ohlc: OHLCSeries, period: int = 14) -> Optional[float]:
-    """Average True Range. Uses high/low/close. None if insufficient data."""
-    if len(ohlc) < period + 1:
-        return None
-    true_ranges = []
-    for i in range(1, len(ohlc)):
-        _, _, high, low, close = ohlc[i]
-        prev_close = ohlc[i - 1][4]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        true_ranges.append(tr)
-    if len(true_ranges) < period:
-        return None
-    return statistics.mean(true_ranges[-period:])
+def atr(
+    closes: List[float],
+    highs: Optional[List[float]] = None,
+    lows: Optional[List[float]] = None,
+    period: int = 14,
+) -> float:
+    """Average True Range. Uses high/low if provided, else close-to-close proxy."""
+    if len(closes) < 2:
+        return 0.0
+    if highs and lows and len(highs) == len(closes) and len(lows) == len(closes):
+        trs = []
+        for i in range(1, len(closes)):
+            high_i = highs[i]
+            low_i = lows[i]
+            prev_close = closes[i - 1]
+            tr = max(high_i - low_i, abs(high_i - prev_close), abs(low_i - prev_close))
+            trs.append(tr)
+    else:
+        # Fallback: close-to-close range
+        trs = [abs(closes[i] - closes[i - 1]) for i in range(1, len(closes))]
+    if not trs:
+        return 0.0
+    n = min(period, len(trs))
+    return sum(trs[-n:]) / n
 
 
 def atr_from_close_only(series: PriceSeries, period: int = 14) -> Optional[float]:
@@ -178,10 +220,16 @@ class SwingTA:
         return (self.last_price - self.bb_lower) / (self.bb_upper - self.bb_lower)
 
 
-def compute_swing_ta(symbol: str, price_history: PriceSeries) -> SwingTA:
+def compute_swing_ta(
+    symbol: str,
+    price_history: PriceSeries,
+    conn: Optional[sqlite3.Connection] = None,
+    as_of: Optional[str] = None,
+) -> "SwingTA":
     """Compute all swing TA indicators for a symbol from its price history.
 
     price_history should contain at least 30 days of data for reliable signals.
+    If conn and as_of are provided, ATR will use OHLCV high/low data when available.
     """
     prices_list = _prices(price_history)
     last_price = prices_list[-1] if prices_list else 0.0
@@ -189,11 +237,17 @@ def compute_swing_ta(symbol: str, price_history: PriceSeries) -> SwingTA:
     rsi_val = rsi(price_history)
     macd_result = macd(price_history)
     bb_result = bollinger_bands(price_history)
-    atr_val = atr_from_close_only(price_history)
     ma20_dev = price_vs_ma(price_history, 20)
     ma50_dev = price_vs_ma(price_history, 50)
     ma20 = moving_average(price_history, 20)
     ma50 = moving_average(price_history, 50)
+
+    closes = [p for _, p in price_history]
+    highs_list: List[float] = []
+    lows_list: List[float] = []
+    if conn is not None and as_of is not None:
+        _, highs_list, lows_list = _load_ohlcv_series(conn, symbol, as_of)
+    atr_val = atr(closes, highs=highs_list or None, lows=lows_list or None)
 
     return SwingTA(
         symbol=symbol,
@@ -205,7 +259,7 @@ def compute_swing_ta(symbol: str, price_history: PriceSeries) -> SwingTA:
         bb_upper=bb_result[0] if bb_result else None,
         bb_mid=bb_result[1] if bb_result else None,
         bb_lower=bb_result[2] if bb_result else None,
-        atr_14=atr_val,
+        atr_14=atr_val if atr_val else None,
         ma20_deviation_pct=ma20_dev,
         ma50_deviation_pct=ma50_dev,
         price_above_ma20=(last_price > ma20) if ma20 is not None else None,

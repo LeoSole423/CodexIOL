@@ -17,6 +17,12 @@ INTERVAL_MIN=${IOL_SNAPSHOT_INTERVAL_MIN:-5}
   echo "SHELL=/bin/sh"
   echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   echo "CRON_TZ=${CRON_TZ_VALUE}"
+  # Open snapshot: capture opening prices at 11:05 AM
+  OPEN_HOUR=$(echo "$COPEN_TIME_VALUE" | cut -d: -f1)
+  OPEN_MIN=$(echo "$COPEN_TIME_VALUE" | cut -d: -f2)
+  OPEN_MIN_PLUS5=$(( (OPEN_MIN + 5) % 60 ))
+  OPEN_HOUR_FINAL=$(( OPEN_HOUR + (OPEN_MIN + 5) / 60 ))
+  echo "${OPEN_MIN_PLUS5} ${OPEN_HOUR_FINAL} * * 1-5 root iol snapshot run --mode live --source cron_open >> /var/log/cron.log 2>&1"
   # Intraday updates: one row per day (snapshot_date = today) updated every N minutes while market is open.
   echo "*/${INTERVAL_MIN} * * * 1-5 root iol snapshot run --mode live --only-market-open --source cron_intraday >> /var/log/cron.log 2>&1"
   # Close snapshot (keeps the strongest point near close if you also run manual snapshots).
@@ -26,6 +32,11 @@ INTERVAL_MIN=${IOL_SNAPSHOT_INTERVAL_MIN:-5}
   ENGINE_HOUR_OFFSET=$(( (CRON_MIN + 15) / 60 ))
   ENGINE_HOUR=$(( CRON_HOUR + ENGINE_HOUR_OFFSET ))
   echo "${ENGINE_MIN} ${ENGINE_HOUR} * * 1-5 root iol engines run-all --skip-external --skip-smart-money >> /var/log/cron.log 2>&1"
+  # Pivot detection: run 2 min after engine refresh (post-close only)
+  PIVOT_MIN=$(( (ENGINE_MIN + 2) % 60 ))
+  PIVOT_HOUR_OFFSET=$(( (ENGINE_MIN + 2) / 60 ))
+  PIVOT_HOUR=$(( ENGINE_HOUR + PIVOT_HOUR_OFFSET ))
+  echo "${PIVOT_MIN} ${PIVOT_HOUR} * * 1-5 root iol data detect-pivots >> /var/log/cron.log 2>&1"
   # Opportunities pipeline: run 5 min after engine refresh to populate advisor_opportunity_candidates
   OPP_MIN=$(( (ENGINE_MIN + 5) % 60 ))
   OPP_HOUR_OFFSET=$(( (ENGINE_MIN + 5) / 60 ))

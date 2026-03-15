@@ -617,6 +617,46 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(run_id) REFERENCES simulation_runs(id)
     )
     """,
+    # ── Market Data OHLCV ────────────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS symbol_daily_ohlcv (
+        symbol      TEXT NOT NULL,
+        trade_date  TEXT NOT NULL,
+        open        REAL,
+        high        REAL,
+        low         REAL,
+        close       REAL,
+        prev_close  REAL,
+        daily_var_pct REAL,
+        volume      REAL,
+        source      TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        PRIMARY KEY (symbol, trade_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS symbol_intraday_ticks (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol      TEXT NOT NULL,
+        trade_date  TEXT NOT NULL,
+        tick_time   TEXT NOT NULL,
+        price       REAL NOT NULL,
+        daily_var_pct REAL,
+        source      TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS symbol_pivots (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol      TEXT NOT NULL,
+        pivot_date  TEXT NOT NULL,
+        pivot_type  TEXT NOT NULL CHECK(pivot_type IN ('high', 'low')),
+        price       REAL NOT NULL,
+        strength    INTEGER NOT NULL DEFAULT 3,
+        timeframe   TEXT NOT NULL DEFAULT 'daily',
+        detected_at TEXT NOT NULL
+    )
+    """,
 ]
 
 
@@ -674,4 +714,9 @@ INDEX_STATEMENTS = [
     # engine signal outcomes indexes
     "CREATE INDEX IF NOT EXISTS idx_engine_outcomes_engine_asof ON engine_signal_outcomes(engine_name, as_of)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_engine_outcomes_engine_asof ON engine_signal_outcomes(engine_name, as_of)",
+    # market data ohlcv indexes
+    "CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_date ON symbol_daily_ohlcv(symbol, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ticks_symbol_date ON symbol_intraday_ticks(symbol, trade_date, tick_time)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_ticks_symbol_time ON symbol_intraday_ticks(symbol, tick_time)",
+    "CREATE INDEX IF NOT EXISTS idx_pivots_symbol_date ON symbol_pivots(symbol, pivot_date DESC)",
 ]
