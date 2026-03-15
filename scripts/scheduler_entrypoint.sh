@@ -21,6 +21,16 @@ INTERVAL_MIN=${IOL_SNAPSHOT_INTERVAL_MIN:-5}
   echo "*/${INTERVAL_MIN} * * * 1-5 root iol snapshot run --mode live --only-market-open --source cron_intraday >> /var/log/cron.log 2>&1"
   # Close snapshot (keeps the strongest point near close if you also run manual snapshots).
   echo "${CRON_MIN} ${CRON_HOUR} * * 1-5 root iol snapshot run --mode close --source cron_close >> /var/log/cron.log 2>&1"
+  # Engine refresh: run regime+macro engines 15 min after market close (local DB only, no external calls).
+  ENGINE_MIN=$(( (CRON_MIN + 15) % 60 ))
+  ENGINE_HOUR_OFFSET=$(( (CRON_MIN + 15) / 60 ))
+  ENGINE_HOUR=$(( CRON_HOUR + ENGINE_HOUR_OFFSET ))
+  echo "${ENGINE_MIN} ${ENGINE_HOUR} * * 1-5 root iol engines run-all --skip-external --skip-smart-money >> /var/log/cron.log 2>&1"
+  # Live paper trading step: runs 5 minutes after engine refresh
+  STEP_MIN=$(( (ENGINE_MIN + 5) % 60 ))
+  STEP_HOUR_OFFSET=$(( (ENGINE_MIN + 5) / 60 ))
+  STEP_HOUR=$(( ENGINE_HOUR + STEP_HOUR_OFFSET ))
+  echo "${STEP_MIN} ${STEP_HOUR} * * 1-5 root iol simulate live-step --bots all >> /var/log/cron.log 2>&1"
 } > "$CRON_FILE"
 
 chmod 0644 "$CRON_FILE"

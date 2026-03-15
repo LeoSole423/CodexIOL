@@ -21,6 +21,12 @@ MIGRATION_COLUMNS = {
         "score_version": "TEXT",
         "run_metrics_json": "TEXT",
     },
+    "simulation_runs": {
+        "mode": "TEXT",
+        "engine_driven": "INTEGER",
+        "avg_regime_score": "REAL",
+        "regime_context_json": "TEXT",
+    },
     "advisor_opportunity_candidates": {
         "expert_signal_score": "REAL",
         "trusted_refs_count": "INTEGER",

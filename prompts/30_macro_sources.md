@@ -1,9 +1,13 @@
-# Prompt Especializado: Macro y Fuentes Externas
+# Referencia: Fuentes Macro Externas
 
-## Objetivo
-Incorporar contexto macro y de mercado con fuentes primarias u oficiales, citando fecha de publicacion y fecha de consulta.
+Para señales macro ya computadas (BCRA rate, USD/ARS, Fed rate, stress AR, risk-on global), usar primero:
+```
+iol engines macro show
+```
+Este prompt es solo para investigacion manual profunda o validacion cuando los motores no tengan datos recientes.
 
-## Politica de fuentes (orden recomendado)
+## Fuentes de referencia
+
 Global:
 - IMF data hub: https://www.imf.org/en/Data
 - World Bank data/publications hub: https://www.worldbank.org/en/research
@@ -16,7 +20,6 @@ Global:
 
 Argentina (oficial):
 - BCRA: https://www.bcra.gob.ar/
-- BCRA politica monetaria: https://www.bcra.gob.ar/politica-monetaria/
 - BCRA catalogo de datos: https://www.bcra.gob.ar/catalogo_de_datos/
 - INDEC: https://www.indec.gob.ar/
 - Ministerio de Economia: https://www.argentina.gob.ar/economia
@@ -27,7 +30,6 @@ Argentina (oficial):
 - Citar URL y fecha concreta (publicacion y consulta).
 - Si no hay fecha de publicacion verificable, marcar baja confianza.
 - Diferenciar hecho confirmado vs interpretacion.
-- Evitar URLs puntuales con fecha fija cuando exista hub estable.
 
 ## Salida
 Usar formato de `prompts/contracts/output_schema.md` tipo `macro`.

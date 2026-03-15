@@ -415,6 +415,133 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(run_id) REFERENCES batch_runs(id)
     )
     """,
+    # ── Multi-Engine Financial Advisor ──────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS engine_regime_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        as_of TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        regime TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        regime_score REAL NOT NULL,
+        favored_asset_classes_json TEXT NOT NULL,
+        defensive_weight_adjustment REAL NOT NULL,
+        breadth_score REAL,
+        volatility_regime TEXT,
+        notes TEXT,
+        raw_inputs_json TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS engine_macro_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        as_of TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        inflation_mom_pct REAL,
+        bcra_rate_pct REAL,
+        usd_ars_official REAL,
+        usd_ars_blue REAL,
+        cedear_fx_premium_pct REAL,
+        fed_rate_pct REAL,
+        us_cpi_yoy_pct REAL,
+        argentina_macro_stress REAL NOT NULL,
+        global_risk_on REAL NOT NULL,
+        sentiment_score REAL,
+        upcoming_events_json TEXT,
+        raw_sources_json TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS engine_smart_money_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        as_of TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        net_institutional_direction TEXT NOT NULL,
+        conviction_score REAL NOT NULL,
+        top_holders_added_json TEXT,
+        top_holders_trimmed_json TEXT,
+        latest_13f_date TEXT,
+        notes TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS engine_strategy_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at_utc TEXT NOT NULL,
+        as_of TEXT NOT NULL,
+        opportunity_run_id INTEGER,
+        bot_config_id TEXT,
+        regime_snapshot_id INTEGER,
+        macro_snapshot_id INTEGER,
+        portfolio_cash_ars REAL,
+        portfolio_cash_usd REAL,
+        defensive_overlay_applied INTEGER NOT NULL DEFAULT 0,
+        actions_json TEXT NOT NULL,
+        notes TEXT,
+        FOREIGN KEY(opportunity_run_id) REFERENCES advisor_opportunity_runs(id),
+        FOREIGN KEY(regime_snapshot_id) REFERENCES engine_regime_snapshots(id),
+        FOREIGN KEY(macro_snapshot_id) REFERENCES engine_macro_snapshots(id)
+    )
+    """,
+    # ── Engine Signal Outcomes (accuracy tracking) ───────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS engine_signal_outcomes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        engine_name TEXT NOT NULL,
+        as_of TEXT NOT NULL,
+        signal_summary TEXT NOT NULL,
+        lookahead_days INTEGER NOT NULL,
+        outcome_date TEXT,
+        outcome_return_pct REAL,
+        signal_correct INTEGER,
+        notes TEXT
+    )
+    """,
+    # ── Simulation Framework ────────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS simulation_bot_configs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        created_at_utc TEXT NOT NULL,
+        description TEXT,
+        config_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS simulation_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at_utc TEXT NOT NULL,
+        bot_config_id INTEGER NOT NULL,
+        date_from TEXT NOT NULL,
+        date_to TEXT NOT NULL,
+        status TEXT NOT NULL,
+        final_value_ars REAL,
+        initial_value_ars REAL,
+        total_return_pct REAL,
+        sharpe_ratio REAL,
+        max_drawdown_pct REAL,
+        metrics_json TEXT,
+        error_message TEXT,
+        FOREIGN KEY(bot_config_id) REFERENCES simulation_bot_configs(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS simulation_trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        trade_date TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        action TEXT NOT NULL,
+        quantity REAL,
+        price REAL,
+        amount_ars REAL,
+        portfolio_value_after REAL,
+        reason TEXT,
+        engine_source TEXT,
+        FOREIGN KEY(run_id) REFERENCES simulation_runs(id)
+    )
+    """,
 ]
 
 
@@ -453,4 +580,15 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_cash_movements_currency ON account_cash_movements(currency)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_cash_movements_movement_id ON account_cash_movements(movement_id) WHERE movement_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_batch_ops_run ON batch_ops(run_id)",
+    # engine indexes
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_regime_asof ON engine_regime_snapshots(as_of)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_macro_asof ON engine_macro_snapshots(as_of)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_smart_money_symbol_asof ON engine_smart_money_snapshots(symbol, as_of)",
+    "CREATE INDEX IF NOT EXISTS idx_engine_strategy_asof ON engine_strategy_runs(as_of)",
+    # simulation indexes
+    "CREATE INDEX IF NOT EXISTS idx_sim_runs_bot ON simulation_runs(bot_config_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sim_trades_run ON simulation_trades(run_id, trade_date)",
+    # engine signal outcomes indexes
+    "CREATE INDEX IF NOT EXISTS idx_engine_outcomes_engine_asof ON engine_signal_outcomes(engine_name, as_of)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_engine_outcomes_engine_asof ON engine_signal_outcomes(engine_name, as_of)",
 ]

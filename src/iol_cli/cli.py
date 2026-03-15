@@ -13,6 +13,8 @@ from .commands_advisor_autopilot import register_advisor_autopilot_commands
 from .commands_advisor_evidence import register_advisor_evidence_commands
 from .commands_advisor_opportunities import register_advisor_opportunity_commands
 from .commands_cashflow_reconcile import build_cashflow_app, build_reconcile_app
+from .commands_engines import build_engines_app
+from .commands_simulate import build_simulate_app
 from .commands_snapshot_batch_data import build_batch_app, build_data_app, build_snapshot_app
 from .iol_client import IOLClient, IOLAPIError
 from .storage import add_pending, get_pending, remove_pending
@@ -623,6 +625,12 @@ app.add_typer(data_app, name="data")
 
 batch_app = build_batch_app(get_client=_get_client, print_json=_print_json)
 app.add_typer(batch_app, name="batch")
+
+engines_app = build_engines_app(print_json=_print_json)
+app.add_typer(engines_app, name="engines")
+
+simulate_app = build_simulate_app(print_json=_print_json)
+app.add_typer(simulate_app, name="simulate")
 
 
 advisor_app = typer.Typer(help="Advisor utilities")
