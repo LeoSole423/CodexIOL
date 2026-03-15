@@ -165,6 +165,24 @@ class IOLClient:
     def fci_redeem(self, payload: Dict[str, Any]) -> Any:
         return self._request("POST", "/api/v2/operar/rescate/fci", payload=payload)
 
+    def get_asesor_movimientos(
+        self,
+        fecha_desde: str,
+        fecha_hasta: str,
+        pais: str = "argentina",
+        moneda: Optional[str] = None,
+    ) -> Any:
+        """POST /api/v2/Asesor/Movimientos — account movement history.
+        May return 403/404 on standard accounts; callers should handle gracefully."""
+        payload: Dict[str, Any] = {
+            "fechaDesde": fecha_desde,
+            "fechaHasta": fecha_hasta,
+            "pais": pais,
+        }
+        if moneda:
+            payload["moneda"] = moneda
+        return self._request("POST", "/api/v2/Asesor/Movimientos", payload=payload)
+
     def raw_request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None,
                     payload: Optional[Dict[str, Any]] = None, raw_json: Optional[str] = None) -> Any:
         return self._request(method, path, params=params, payload=payload, raw_json=raw_json)

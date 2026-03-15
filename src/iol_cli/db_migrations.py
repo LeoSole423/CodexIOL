@@ -35,6 +35,9 @@ MIGRATION_COLUMNS = {
         "status": "TEXT",
         "plan_json": "TEXT",
     },
+    "account_cash_movements": {
+        "symbol": "TEXT",
+    },
     "advisor_opportunity_candidates": {
         "expert_signal_score": "REAL",
         "trusted_refs_count": "INTEGER",

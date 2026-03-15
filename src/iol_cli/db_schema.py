@@ -73,6 +73,7 @@ SCHEMA_STATEMENTS = [
         currency TEXT NOT NULL,
         amount REAL NOT NULL,
         kind TEXT NOT NULL,
+        symbol TEXT,
         description TEXT,
         source TEXT,
         raw_json TEXT,
@@ -617,6 +618,21 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(run_id) REFERENCES simulation_runs(id)
     )
     """,
+    # ── Order Fees Linkage ───────────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS order_fees (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_order_number INTEGER,
+        fee_order_number INTEGER NOT NULL,
+        fee_kind TEXT NOT NULL,
+        symbol TEXT,
+        amount_ars REAL NOT NULL,
+        occurred_at TEXT,
+        linked_at_utc TEXT NOT NULL,
+        link_method TEXT NOT NULL,
+        FOREIGN KEY(fee_order_number) REFERENCES orders(order_number)
+    )
+    """,
     # ── Market Data OHLCV ────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS symbol_daily_ohlcv (
@@ -693,7 +709,11 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_cash_movements_date ON account_cash_movements(movement_date)",
     "CREATE INDEX IF NOT EXISTS idx_cash_movements_kind ON account_cash_movements(kind)",
     "CREATE INDEX IF NOT EXISTS idx_cash_movements_currency ON account_cash_movements(currency)",
+    "CREATE INDEX IF NOT EXISTS idx_cash_movements_symbol ON account_cash_movements(symbol)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_cash_movements_movement_id ON account_cash_movements(movement_id) WHERE movement_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_order_fees_trade ON order_fees(trade_order_number)",
+    "CREATE INDEX IF NOT EXISTS idx_order_fees_fee ON order_fees(fee_order_number)",
+    "CREATE INDEX IF NOT EXISTS idx_order_fees_symbol ON order_fees(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_batch_ops_run ON batch_ops(run_id)",
     # engine indexes
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_regime_asof ON engine_regime_snapshots(as_of)",

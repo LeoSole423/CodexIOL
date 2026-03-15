@@ -375,13 +375,17 @@ def _build_interval(
     sell_amount = float(amounts.get("sell_amount") or 0.0)
     income_amount = float(amounts.get("income_amount") or 0.0)
     fee_amount = float(amounts.get("fee_amount") or 0.0)
+    bond_amortization_amount = float(amounts.get("bond_amortization_amount") or 0.0)
+    dividend_amount = float(amounts.get("dividend_amount") or 0.0)
+    coupon_amount = float(amounts.get("coupon_amount") or 0.0)
     order_fee_internal_ars = -abs(float(fee_amount or 0.0))
 
     imported = _aggregate_imported_movements(conn, base_snap.snapshot_date, end_snap.snapshot_date, fx_end)
     for warn in imported.get("warnings") or []:
         warnings.append(str(warn))
 
-    external_raw = float(cash_total_delta) + buy_amount - sell_amount - income_amount
+    # bond_amortization is an internal cash inflow (principal returned), not an external deposit
+    external_raw = float(cash_total_delta) + buy_amount - sell_amount - income_amount - bond_amortization_amount
     imported_internal = float(imported.get("imported_internal_ars") or 0.0)
     imported_external = float(imported.get("imported_external_ars") or 0.0)
     external_adjusted = external_raw - float(fx_revaluation_ars) - imported_internal - order_fee_internal_ars
@@ -389,7 +393,7 @@ def _build_interval(
 
     manual_adjustment_ars = float(shared_db.manual_cashflow_sum(conn, base_snap.snapshot_date, end_snap.snapshot_date) or 0.0)
     residual_after_manual = float(external_final) - float(manual_adjustment_ars)
-    traded_gross = abs(buy_amount) + abs(sell_amount) + abs(income_amount) + abs(fee_amount)
+    traded_gross = abs(buy_amount) + abs(sell_amount) + abs(income_amount) + abs(fee_amount) + abs(bond_amortization_amount)
     residual_ratio = (abs(external_final) / traded_gross) if traded_gross > 0 else None
     imported_rows_count = int(imported.get("rows_count") or 0)
     manual_rows_count = _manual_rows_count(conn, base_snap.snapshot_date, end_snap.snapshot_date)
@@ -447,6 +451,9 @@ def _build_interval(
         "buy_amount_ars": buy_amount,
         "sell_amount_ars": sell_amount,
         "income_amount_ars": income_amount,
+        "dividend_amount_ars": dividend_amount,
+        "coupon_amount_ars": coupon_amount,
+        "bond_amortization_amount_ars": bond_amortization_amount,
         "fee_amount_ars": fee_amount,
         "external_raw_ars": float(external_raw),
         "external_adjusted_ars": float(external_adjusted),

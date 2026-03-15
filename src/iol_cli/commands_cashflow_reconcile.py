@@ -136,9 +136,13 @@ def _infer_movement_kind(kind_raw: Any, description_raw: Any) -> str:
     k = _norm_text(kind_raw)
     d = _norm_text(description_raw)
     s = f"{k} {d}".strip()
+    # Accept already-normalized kinds (including legacy and new)
     if k in (
         "external_deposit",
         "external_withdraw",
+        "dividend_income",
+        "coupon_income",
+        "bond_amortization_income",
         "dividend_or_coupon_income",
         "operational_fee_or_tax",
         "settlement_carryover",
@@ -152,8 +156,12 @@ def _infer_movement_kind(kind_raw: Any, description_raw: Any) -> str:
         return "external_deposit"
     if any(w in s for w in ("retiro", "extraccion", "egreso externo", "transferencia enviada")):
         return "external_withdraw"
-    if any(w in s for w in ("dividendo", "renta", "cupon", "interes")):
-        return "dividend_or_coupon_income"
+    if any(w in s for w in ("amortizacion", "devolucion de capital", "pago de capital")):
+        return "bond_amortization_income"
+    if any(w in s for w in ("dividendo", "pago de dividendos", "acreditacion dividendo")):
+        return "dividend_income"
+    if any(w in s for w in ("renta", "cupon", "pago de renta", "pago de cupon", "interes")):
+        return "coupon_income"
     if any(w in s for w in ("comision", "impuesto", "iva", "arancel", "gasto", "fee", "derecho")):
         return "operational_fee_or_tax"
     if any(w in s for w in ("liquidacion", "settlement", "carryover")):
@@ -173,7 +181,7 @@ def _normalize_movement_amount(kind: str, amount: float) -> float:
         return abs(value)
     if kind == "external_withdraw":
         return -abs(value)
-    if kind == "dividend_or_coupon_income":
+    if kind in ("dividend_or_coupon_income", "dividend_income", "coupon_income", "bond_amortization_income"):
         return abs(value)
     if kind == "operational_fee_or_tax":
         return -abs(value)
@@ -236,6 +244,9 @@ def _movement_to_row(rec: Dict[str, Any], fmt: str, default_source: str) -> Dict
     if fmt not in ("normalized", "iol_raw"):
         raise ValueError("format must be normalized|iol_raw")
 
+    symbol_raw = _extract_first(rec, ["symbol", "simbolo", "ticker", "instrument"])
+    symbol = _normalize_symbol_base(symbol_raw) if symbol_raw else None
+
     return {
         "movement_id": movement_id,
         "occurred_at": occurred_at,
@@ -243,6 +254,7 @@ def _movement_to_row(rec: Dict[str, Any], fmt: str, default_source: str) -> Dict
         "currency": currency,
         "amount": float(amount_norm),
         "kind": kind,
+        "symbol": symbol,
         "description": (str(description).strip() if description is not None else None),
         "source": source,
         "raw_json": json.dumps(rec, ensure_ascii=True),
@@ -405,7 +417,8 @@ def build_cashflow_app() -> typer.Typer:
                     conn.execute(
                         """
                         UPDATE account_cash_movements
-                        SET occurred_at = ?, movement_date = ?, currency = ?, amount = ?, kind = ?, description = ?, source = ?, raw_json = ?
+                        SET occurred_at = ?, movement_date = ?, currency = ?, amount = ?, kind = ?,
+                            symbol = ?, description = ?, source = ?, raw_json = ?
                         WHERE movement_id = ?
                         """,
                         (
@@ -414,6 +427,7 @@ def build_cashflow_app() -> typer.Typer:
                             row["currency"],
                             float(row["amount"]),
                             row["kind"],
+                            row.get("symbol"),
                             row.get("description"),
                             row.get("source"),
                             row.get("raw_json"),
@@ -425,8 +439,9 @@ def build_cashflow_app() -> typer.Typer:
                     conn.execute(
                         """
                         INSERT INTO account_cash_movements(
-                            movement_id, occurred_at, movement_date, currency, amount, kind, description, source, raw_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            movement_id, occurred_at, movement_date, currency, amount, kind,
+                            symbol, description, source, raw_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             row["movement_id"],
@@ -435,6 +450,7 @@ def build_cashflow_app() -> typer.Typer:
                             row["currency"],
                             float(row["amount"]),
                             row["kind"],
+                            row.get("symbol"),
                             row.get("description"),
                             row.get("source"),
                             row.get("raw_json"),

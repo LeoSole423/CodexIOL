@@ -13,6 +13,7 @@ from .commands_advisor_autopilot import register_advisor_autopilot_commands
 from .commands_advisor_evidence import register_advisor_evidence_commands
 from .commands_advisor_opportunities import register_advisor_opportunity_commands
 from .commands_cashflow_reconcile import build_cashflow_app, build_reconcile_app
+from .commands_movements import build_movements_app
 from .commands_engines import build_engines_app
 from .commands_simulate import build_simulate_app
 from .commands_snapshot_batch_data import build_batch_app, build_data_app, build_snapshot_app
@@ -617,6 +618,8 @@ cashflow_app = build_cashflow_app()
 app.add_typer(cashflow_app, name="cashflow")
 reconcile_app = build_reconcile_app()
 app.add_typer(reconcile_app, name="reconcile")
+movements_app = build_movements_app(get_client=_get_client)
+app.add_typer(movements_app, name="movements")
 
 
 data_app = build_data_app(print_json=_print_json)

@@ -97,6 +97,13 @@ def movement_amount_to_ars(
     return None
 
 
+_EXTERNAL_KINDS = frozenset({"external_deposit", "external_withdraw"})
+_DIVIDEND_KINDS = frozenset({"dividend_income", "dividend_or_coupon_income"})
+_COUPON_KINDS = frozenset({"coupon_income"})
+_AMORTIZATION_KINDS = frozenset({"bond_amortization_income"})
+_FEE_KINDS = frozenset({"operational_fee_or_tax"})
+
+
 def aggregate_imported_movements(
     rows: List[Dict[str, Any]],
     fx_end_ars_per_usd: Optional[float],
@@ -104,6 +111,8 @@ def aggregate_imported_movements(
     imported_external = 0.0
     imported_internal = 0.0
     imported_dividend = 0.0
+    imported_coupon = 0.0
+    imported_amortization = 0.0
     imported_fee = 0.0
     imported_count = 0
     warnings: List[str] = []
@@ -113,13 +122,17 @@ def aggregate_imported_movements(
         if amt_ars is None:
             continue
         imported_count += 1
-        if kind in ("external_deposit", "external_withdraw"):
+        if kind in _EXTERNAL_KINDS:
             imported_external += float(amt_ars)
         else:
             imported_internal += float(amt_ars)
-            if kind == "dividend_or_coupon_income":
+            if kind in _DIVIDEND_KINDS:
                 imported_dividend += float(amt_ars)
-            if kind == "operational_fee_or_tax":
+            elif kind in _COUPON_KINDS:
+                imported_coupon += float(amt_ars)
+            elif kind in _AMORTIZATION_KINDS:
+                imported_amortization += float(amt_ars)
+            elif kind in _FEE_KINDS:
                 imported_fee += float(amt_ars)
 
     return {
@@ -127,6 +140,8 @@ def aggregate_imported_movements(
         "imported_external_ars": float(imported_external),
         "imported_internal_ars": float(imported_internal),
         "imported_dividend_ars": float(imported_dividend),
+        "imported_coupon_ars": float(imported_coupon),
+        "imported_amortization_ars": float(imported_amortization),
         "imported_fee_ars": float(imported_fee),
         "warnings": list(dict.fromkeys(warnings)),
     }

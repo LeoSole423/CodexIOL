@@ -305,10 +305,14 @@ def _norm_order_side(v: Any) -> Optional[str]:
     s = " ".join(s.split())
     if s in ("buy", "compra", "suscripcion fci"):
         return "buy"
-    if s in ("sell", "venta", "rescate fci", "pago de amortizacion"):
+    if s in ("sell", "venta", "rescate fci"):
         return "sell"
-    if s in ("pago de dividendos", "pago de renta"):
-        return "income"
+    if s in ("pago de amortizacion",):
+        return "bond_amortization"
+    if s in ("pago de dividendos",):
+        return "dividend"
+    if s in ("pago de renta",):
+        return "coupon"
     if s in (
         "comision",
         "comision de mercado",
@@ -434,7 +438,8 @@ def orders_cashflows_by_symbol(
         if side is None:
             unclassified += 1
             continue
-        if side in ("ignore", "income", "fee"):
+        # dividend/coupon are internal income (like old "income"); bond_amortization acts like sell
+        if side in ("ignore", "income", "fee", "dividend", "coupon"):
             ignored += 1
             continue
 
@@ -448,6 +453,7 @@ def orders_cashflows_by_symbol(
         if side == "buy":
             bucket["buy_amount"] += amt_f
         else:
+            # includes "sell" and "bond_amortization" — both return cash from a position
             bucket["sell_amount"] += amt_f
 
     stats = {
@@ -467,12 +473,23 @@ def orders_flow_summary(
     currency: str = "peso_Argentino",
 ) -> Tuple[Dict[str, float], Dict[str, int]]:
     cols = table_columns(conn, "orders")
-    empty_amounts = {"buy_amount": 0.0, "sell_amount": 0.0, "income_amount": 0.0, "fee_amount": 0.0}
+    empty_amounts = {
+        "buy_amount": 0.0,
+        "sell_amount": 0.0,
+        "income_amount": 0.0,
+        "fee_amount": 0.0,
+        "dividend_amount": 0.0,
+        "coupon_amount": 0.0,
+        "bond_amortization_amount": 0.0,
+    }
     empty_stats = {
         "total": 0,
         "classified": 0,
         "income_classified": 0,
         "fee_classified": 0,
+        "dividend_classified": 0,
+        "coupon_classified": 0,
+        "amortization_classified": 0,
         "unclassified": 0,
         "amount_missing": 0,
         "income_missing_deduped": 0,
@@ -527,14 +544,23 @@ def orders_flow_summary(
     """
     rows = conn.execute(sql, tuple(params)).fetchall()
 
-    amounts = {"buy_amount": 0.0, "sell_amount": 0.0, "income_amount": 0.0, "fee_amount": 0.0}
+    amounts = {
+        "buy_amount": 0.0,
+        "sell_amount": 0.0,
+        "income_amount": 0.0,
+        "fee_amount": 0.0,
+        "dividend_amount": 0.0,
+        "coupon_amount": 0.0,
+        "bond_amortization_amount": 0.0,
+    }
     total = classified = income_classified = fee_classified = unclassified = amount_missing = ignored = 0
+    dividend_classified = coupon_classified = amortization_classified = 0
     income_missing_deduped = 0
 
     income_keys_with_amount = set()
     for r in rows:
         side = _norm_order_side(r["side"])
-        if side != "income":
+        if side not in ("income", "dividend", "coupon"):
             continue
         amt = _order_amount(r)
         if amt is None:
@@ -542,7 +568,7 @@ def orders_flow_summary(
         ts = str(r["event_ts"] or "")[:19]
         sym_base = _symbol_base_for_dedupe(r["symbol"])
         if ts and sym_base:
-            income_keys_with_amount.add((ts, sym_base, "income"))
+            income_keys_with_amount.add((ts, sym_base, side))
 
     for r in rows:
         total += 1
@@ -556,10 +582,10 @@ def orders_flow_summary(
 
         amt = _order_amount(r)
         if amt is None:
-            if side == "income":
+            if side in ("income", "dividend", "coupon"):
                 ts = str(r["event_ts"] or "")[:19]
                 sym_base = _symbol_base_for_dedupe(r["symbol"])
-                if (ts, sym_base, "income") in income_keys_with_amount:
+                if (ts, sym_base, side) in income_keys_with_amount:
                     income_missing_deduped += 1
                     ignored += 1
                     continue
@@ -572,6 +598,19 @@ def orders_flow_summary(
         elif side == "sell":
             amounts["sell_amount"] += amt
             classified += 1
+        elif side == "bond_amortization":
+            amounts["bond_amortization_amount"] += amt
+            amortization_classified += 1
+        elif side == "dividend":
+            amounts["dividend_amount"] += amt
+            amounts["income_amount"] += amt
+            dividend_classified += 1
+            income_classified += 1
+        elif side == "coupon":
+            amounts["coupon_amount"] += amt
+            amounts["income_amount"] += amt
+            coupon_classified += 1
+            income_classified += 1
         elif side == "income":
             amounts["income_amount"] += amt
             income_classified += 1
@@ -586,6 +625,9 @@ def orders_flow_summary(
         "classified": classified,
         "income_classified": income_classified,
         "fee_classified": fee_classified,
+        "dividend_classified": dividend_classified,
+        "coupon_classified": coupon_classified,
+        "amortization_classified": amortization_classified,
         "unclassified": unclassified,
         "amount_missing": amount_missing,
         "income_missing_deduped": income_missing_deduped,
