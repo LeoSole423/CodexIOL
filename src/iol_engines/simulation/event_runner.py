@@ -42,6 +42,7 @@ def _load_opportunity_scores(
         """
         SELECT symbol, score_total FROM advisor_opportunity_candidates
         WHERE run_id = ? AND score_total IS NOT NULL
+          AND candidate_status NOT IN ('suppressed', 'rejected')
         ORDER BY score_total DESC
         """,
         (run_id,),

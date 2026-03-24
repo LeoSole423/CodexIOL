@@ -79,6 +79,7 @@ def _load_opportunity_scores(
         SELECT symbol, score_total
         FROM advisor_opportunity_candidates
         WHERE run_id = ? AND score_total IS NOT NULL
+          AND candidate_status NOT IN ('suppressed', 'rejected')
         ORDER BY score_total DESC
         """,
         (run_id,),
@@ -531,7 +532,7 @@ def run_swing_live_step(
 
         # Check if already executed today
         already = conn.execute(
-            "SELECT 1 FROM swing_simulation_trades WHERE run_id=? AND entry_date=? LIMIT 1",
+            "SELECT 1 FROM swing_simulation_steps WHERE run_id=? AND step_date=? LIMIT 1",
             (run_id, as_of),
         ).fetchone()
         if already:
@@ -694,6 +695,26 @@ def run_swing_live_step(
                 round((final_val - initial_cash_ars) / initial_cash_ars * 100, 2),
                 json.dumps(plan),
                 run_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO swing_simulation_steps
+                (run_id, step_date, regime, regime_score, macro_stress,
+                 entries_count, exits_count, open_positions_count,
+                 portfolio_value_ars, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id, as_of,
+                regime.regime if regime else None,
+                round(regime_score, 2),
+                round(macro_stress, 2),
+                len(step_entries),
+                len(step_exits),
+                len(open_positions),
+                round(final_val, 2),
+                datetime.now(timezone.utc).isoformat(),
             ),
         )
         conn.commit()

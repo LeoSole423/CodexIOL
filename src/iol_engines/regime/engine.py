@@ -70,7 +70,7 @@ def _fetch_vix(as_of: str) -> Optional[float]:
     try:
         import urllib.request
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS"
-        req = urllib.request.Request(url, headers={"User-Agent": "CodexIOL/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.80.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             lines = resp.read().decode("utf-8").splitlines()
         # CSV: DATE,VIXCLS — walk backwards to find latest non-null value

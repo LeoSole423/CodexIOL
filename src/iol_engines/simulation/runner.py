@@ -63,6 +63,7 @@ def _load_opportunity_candidates(
                suggested_weight_pct, suggested_amount_ars, reason_summary, sector_bucket
         FROM advisor_opportunity_candidates
         WHERE run_id = ?
+          AND candidate_status NOT IN ('suppressed', 'rejected')
         ORDER BY score_total DESC LIMIT ?
         """,
         (run_id, top_n),

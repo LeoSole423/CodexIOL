@@ -8,9 +8,126 @@ The adapter is purely functional: given signals → return adjusted dicts.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..signals import MacroSignal, RegimeSignal, SmartMoneySignal
+
+# Symbols that represent global equity (react to regime/global_risk_on).
+_EQUITY_SYMBOLS = {"SPY", "ACWI", "EEM", "QQQ", "IWM", "VTI"}
+# Symbols sensitive to Argentina macro stress.
+_AR_SOVEREIGN_SYMBOLS = {"TO26", "AL30", "GD30", "AE38"}
+# Symbols classified as defensive / alternative.
+_DEFENSIVE_SYMBOLS = {"GLD", "IAU", "TLT", "BIL"}
+
+
+def engine_signals_to_evidence(
+    regime: Optional[RegimeSignal],
+    macro: Optional[MacroSignal],
+    smart_money: Optional[List[SmartMoneySignal]],
+    as_of: str,
+    portfolio_symbols: List[str],
+) -> List[Dict[str, Any]]:
+    """Convert engine signals into synthetic evidence rows for build_candidates().
+
+    Generated rows carry source_tier='official' so they are treated as trusted
+    references by evidence_stats().  They are NOT persisted to advisor_evidence —
+    they are injected ephemerally into the evidence_map for the current run only.
+
+    Each row follows the advisor_evidence schema (same keys used by load_evidence_rows_grouped).
+    """
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows: List[Dict[str, Any]] = []
+
+    def _row(symbol: str, claim: str, stance: str, confidence: str, conflict_key: str) -> Dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "query": "engine_synthetic",
+            "source_name": "engine_synthetic",
+            "source_url": "",
+            "published_date": as_of,
+            "retrieved_at_utc": now_utc,
+            "claim": claim,
+            "confidence": confidence,
+            "date_confidence": "high",
+            "notes": json.dumps({"source_tier": "official", "stance": stance}, ensure_ascii=True),
+            "conflict_key": conflict_key,
+        }
+
+    upper_symbols = [s.upper() for s in portfolio_symbols]
+
+    # ── Regime signal → equity symbols ──────────────────────────────────────
+    if regime is not None:
+        r = regime.regime.lower()
+        if r == "bull":
+            stance, conf, claim_tmpl = "bullish", "medium", "Regime engine: bull market ({score:.0f}/100)"
+        elif r == "bear":
+            stance, conf, claim_tmpl = "bearish", "high", "Regime engine: bear market ({score:.0f}/100)"
+        elif r == "crisis":
+            stance, conf, claim_tmpl = "bearish", "high", "Regime engine: crisis regime ({score:.0f}/100)"
+        else:  # sideways
+            stance, conf, claim_tmpl = "neutral", "low", "Regime engine: sideways ({score:.0f}/100)"
+
+        claim = claim_tmpl.format(score=float(regime.regime_score))
+        for sym in upper_symbols:
+            if sym in _EQUITY_SYMBOLS:
+                rows.append(_row(sym, claim, stance, conf, f"{sym}:regime"))
+
+        # Defensive symbols: inverse regime (bear/crisis → bullish for GLD)
+        if r in ("bear", "crisis"):
+            def_claim = f"Regime engine: defensive assets favored in {r} ({regime.regime_score:.0f}/100)"
+            for sym in upper_symbols:
+                if sym in _DEFENSIVE_SYMBOLS:
+                    rows.append(_row(sym, def_claim, "bullish", "high", f"{sym}:regime"))
+
+    # ── Macro signal ────────────────────────────────────────────────────────
+    if macro is not None:
+        # Global risk-on → equity boost
+        global_risk = float(macro.global_risk_on or 50.0)
+        if global_risk >= 65.0:
+            claim = f"Macro engine: global risk-on at {global_risk:.0f}/100"
+            for sym in upper_symbols:
+                if sym in _EQUITY_SYMBOLS:
+                    rows.append(_row(sym, claim, "bullish", "medium", f"{sym}:macro_global"))
+        elif global_risk <= 35.0:
+            claim = f"Macro engine: global risk-off at {global_risk:.0f}/100"
+            for sym in upper_symbols:
+                if sym in _EQUITY_SYMBOLS:
+                    rows.append(_row(sym, claim, "bearish", "medium", f"{sym}:macro_global"))
+
+        # Argentina macro stress → sovereign bonds
+        ar_stress = float(macro.argentina_macro_stress or 50.0)
+        if ar_stress >= 70.0:
+            claim = f"Macro engine: Argentina macro stress high ({ar_stress:.0f}/100)"
+            for sym in upper_symbols:
+                if sym in _AR_SOVEREIGN_SYMBOLS:
+                    rows.append(_row(sym, claim, "bearish", "medium", f"{sym}:macro_ar"))
+        elif ar_stress <= 30.0:
+            claim = f"Macro engine: Argentina macro stress low ({ar_stress:.0f}/100)"
+            for sym in upper_symbols:
+                if sym in _AR_SOVEREIGN_SYMBOLS:
+                    rows.append(_row(sym, claim, "bullish", "medium", f"{sym}:macro_ar"))
+
+    # ── Smart money signal → per-symbol ─────────────────────────────────────
+    if smart_money:
+        sm_by_symbol = {sig.symbol.upper(): sig for sig in smart_money}
+        for sym in upper_symbols:
+            sig = sm_by_symbol.get(sym)
+            if sig is None:
+                continue
+            conv = float(sig.conviction_score or 0.0)
+            if conv < 60.0:
+                continue
+            direction = str(sig.net_institutional_direction or "").lower()
+            if direction == "accumulate":
+                claim = f"Smart money engine: institutional accumulation of {sym} (conviction={conv:.0f})"
+                rows.append(_row(sym, claim, "bullish", "high", f"{sym}:institutional"))
+            elif direction == "distribute":
+                claim = f"Smart money engine: institutional distribution of {sym} (conviction={conv:.0f})"
+                rows.append(_row(sym, claim, "bearish", "high", f"{sym}:institutional"))
+
+    return rows
 
 
 # ── Default build_candidates weights & thresholds ───────────────────────────

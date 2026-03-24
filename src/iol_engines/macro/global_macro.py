@@ -15,8 +15,8 @@ from typing import List, Optional, Tuple
 
 
 _FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
-_TIMEOUT = 12
-_HEADERS = {"User-Agent": "CodexIOL/1.0 (macro-engine)"}
+_TIMEOUT = 20
+_HEADERS = {"User-Agent": "curl/7.80.0"}
 
 
 def _fetch_fred_series(series_id: str) -> Tuple[List[Tuple[str, float]], str]:

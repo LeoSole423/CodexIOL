@@ -141,6 +141,9 @@ def _aggregate_imported_movements(
         "rows_count": int(aggregated.get("rows_count") or 0),
         "imported_external_ars": float(aggregated.get("imported_external_ars") or 0.0),
         "imported_internal_ars": float(aggregated.get("imported_internal_ars") or 0.0),
+        "imported_amortization_ars": float(aggregated.get("imported_amortization_ars") or 0.0),
+        "imported_dividend_ars": float(aggregated.get("imported_dividend_ars") or 0.0),
+        "imported_coupon_ars": float(aggregated.get("imported_coupon_ars") or 0.0),
         "warnings": list(aggregated.get("warnings") or []),
     }
 
@@ -388,7 +391,14 @@ def _build_interval(
     external_raw = float(cash_total_delta) + buy_amount - sell_amount - income_amount - bond_amortization_amount
     imported_internal = float(imported.get("imported_internal_ars") or 0.0)
     imported_external = float(imported.get("imported_external_ars") or 0.0)
-    external_adjusted = external_raw - float(fx_revaluation_ars) - imported_internal - order_fee_internal_ars
+    # Income-type imported movements (amortization, dividend, coupon) derived from iol_orders_sync
+    # are already captured in orders (sell/income amounts). Exclude from external_adjusted to avoid
+    # double-counting the same cash event through both orders and account_cash_movements.
+    imported_amortization = float(imported.get("imported_amortization_ars") or 0.0)
+    imported_dividend = float(imported.get("imported_dividend_ars") or 0.0)
+    imported_coupon = float(imported.get("imported_coupon_ars") or 0.0)
+    effective_imported_internal = imported_internal - imported_amortization - imported_dividend - imported_coupon
+    external_adjusted = external_raw - float(fx_revaluation_ars) - effective_imported_internal - order_fee_internal_ars
     external_final = imported_external if abs(imported_external) > 1e-9 else external_adjusted
 
     manual_adjustment_ars = float(shared_db.manual_cashflow_sum(conn, base_snap.snapshot_date, end_snap.snapshot_date) or 0.0)
@@ -422,6 +432,10 @@ def _build_interval(
         state = "resolved_mixed"
     if state is None:
         state, _ = _quality_state_from_interval({"quality_warnings": warnings})
+
+    # Suppress proposals for intervals that are already resolved (residual within threshold).
+    if state is not None and state.startswith("resolved_"):
+        proposal = None
 
     resolution = None
     if proposal is not None:

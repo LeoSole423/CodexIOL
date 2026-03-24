@@ -37,7 +37,7 @@ def _is_stale(signal_as_of: Optional[str], reference_as_of: str, max_days: int) 
     try:
         ref = date.fromisoformat(reference_as_of)
         sig = date.fromisoformat(signal_as_of)
-        return (ref - sig).days > max_days
+        return (ref - sig).days >= max_days
     except ValueError:
         return True
 

@@ -652,7 +652,89 @@ advisor_app.add_typer(advisor_opp_app, name="opportunities")
 advisor_opp_app.add_typer(advisor_opp_variants_app, name="variants")
 advisor_app.add_typer(advisor_briefing_app, name="briefing")
 advisor_app.add_typer(advisor_autopilot_app, name="autopilot")
+advisor_target_app = typer.Typer(help="Structural target weights for conflict resolution")
+advisor_app.add_typer(advisor_target_app, name="target-weights")
 register_advisor_admin_commands(advisor_app, advisor_alert_app, advisor_event_app, advisor_briefing_app)
+
+
+@advisor_target_app.command("set")
+def advisor_target_weights_set(
+    ctx: typer.Context,
+    weights: List[str] = typer.Argument(
+        ...,
+        help="Symbol=pct pairs, e.g. SPY=32 ACWI=17 GLD=16 EEM=8 TO26=7 AL30=6 IBIT=6 ADRDOLA=8",
+    ),
+    as_of: Optional[str] = typer.Option(None, "--as-of", help="Effective date (default: today)"),
+):
+    """Set structural target weights (used by resolve_conflicts to avoid spurious sell signals)."""
+    from .db import connect, init_db, resolve_db_path
+    from datetime import date as _date
+    parsed: Dict[str, float] = {}
+    for item in weights:
+        if "=" not in item:
+            typer.echo(f"Invalid format '{item}', expected SYMBOL=PCT", err=True)
+            raise typer.Exit(1)
+        sym, pct_s = item.split("=", 1)
+        try:
+            parsed[sym.strip().upper()] = float(pct_s.strip())
+        except ValueError:
+            typer.echo(f"Invalid pct '{pct_s}' for {sym}", err=True)
+            raise typer.Exit(1)
+    total = sum(parsed.values())
+    if abs(total - 100.0) > 1.0:
+        typer.echo(f"Warning: weights sum to {total:.1f}% (expected ~100%)", err=True)
+    as_of_v = as_of or _date.today().isoformat()
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        for sym, pct in parsed.items():
+            conn.execute(
+                "INSERT INTO portfolio_target_weights (symbol, target_pct, as_of) VALUES (?, ?, ?) "
+                "ON CONFLICT(symbol) DO UPDATE SET target_pct=excluded.target_pct, as_of=excluded.as_of",
+                (sym, pct, as_of_v),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+    table = Table(title=f"Target weights (as_of={as_of_v})")
+    table.add_column("Symbol"); table.add_column("Target %", justify="right")
+    for sym, pct in sorted(parsed.items()):
+        table.add_row(sym, f"{pct:.1f}%")
+    table.add_row("TOTAL", f"{total:.1f}%")
+    console.print(table)
+
+
+@advisor_target_app.command("show")
+def advisor_target_weights_show(ctx: typer.Context):
+    """Show current structural target weights."""
+    from .db import connect, init_db, resolve_db_path
+    db_path = resolve_db_path(ctx.obj.config.db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        rows = conn.execute(
+            "SELECT symbol, target_pct, as_of FROM portfolio_target_weights ORDER BY target_pct DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        typer.echo("No target weights set. Use: iol advisor target-weights set SPY=32 ...")
+        return
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+    table = Table(title="Structural target weights")
+    table.add_column("Symbol"); table.add_column("Target %", justify="right"); table.add_column("as_of")
+    total = 0.0
+    for r in rows:
+        table.add_row(str(r["symbol"]), f"{r['target_pct']:.1f}%", str(r["as_of"]))
+        total += float(r["target_pct"])
+    table.add_row("TOTAL", f"{total:.1f}%", "")
+    console.print(table)
 
 def _store_evidence_rows(conn, rows: List[Dict[str, Any]]) -> int:
     return _store_evidence_rows_raw(

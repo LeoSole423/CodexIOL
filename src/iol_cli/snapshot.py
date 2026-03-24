@@ -495,6 +495,68 @@ def _save_snapshot(
         )
 
 
+def _enrich_with_quotes(
+    client: IOLClient,
+    assets: List[Dict[str, Any]],
+    watchlist: List[Tuple[str, str]],
+) -> List[Dict[str, Any]]:
+    """Enrich portfolio assets with volume + real OHLCV from get_quote.
+    Also appends watchlist symbols that are not already in the portfolio.
+    Returns a new list (portfolio enriched + watchlist extras).
+    Errors on individual symbols are silently skipped to not break the snapshot.
+    """
+    portfolio_symbols: set = {a.get("symbol") for a in assets}
+
+    # Enrich each portfolio asset with quote data (volume, real O/H/L)
+    for asset in assets:
+        symbol = asset.get("symbol")
+        market = asset.get("market") or "bCBA"
+        if not symbol:
+            continue
+        try:
+            q = client.get_quote(market, symbol)
+            asset["volume"] = q.get("volumenNominal")
+            if q.get("apertura") is not None:
+                asset["quote_open"] = float(q["apertura"])
+            if q.get("maximo") is not None:
+                asset["quote_high"] = float(q["maximo"])
+            if q.get("minimo") is not None:
+                asset["quote_low"] = float(q["minimo"])
+        except Exception:
+            pass  # keep going — portfolio snapshot must not fail due to quote errors
+
+    # Append watchlist symbols not already in portfolio
+    extra: List[Dict[str, Any]] = []
+    for symbol, market in watchlist:
+        if symbol in portfolio_symbols:
+            continue
+        try:
+            q = client.get_quote(market, symbol)
+            price = q.get("ultimoPrecio")
+            if price is None:
+                continue
+            extra.append({
+                "symbol": symbol,
+                "market": market,
+                "last_price": float(price),
+                "daily_var_pct": q.get("variacion"),
+                "volume": q.get("volumenNominal"),
+                "quote_open": float(q["apertura"]) if q.get("apertura") is not None else None,
+                "quote_high": float(q["maximo"]) if q.get("maximo") is not None else None,
+                "quote_low": float(q["minimo"]) if q.get("minimo") is not None else None,
+                # Not a portfolio position — portfolio-specific fields are absent
+                "quantity": None,
+                "total_value": None,
+                "ppc": None,
+                "description": q.get("descripcionTitulo"),
+                "currency": q.get("moneda"),
+            })
+        except Exception:
+            pass
+
+    return assets + extra
+
+
 def _update_market_data(
     conn,
     assets: List[Dict[str, Any]],
@@ -518,6 +580,14 @@ def _update_market_data(
             continue
         daily_var_pct = a.get("daily_var_pct")
 
+        # Volume from get_quote enrichment (may be None if enrichment was skipped)
+        volume = a.get("volume")
+
+        # Real OHLCV from quote endpoint (more accurate than tick accumulation)
+        quote_open: Optional[float] = a.get("quote_open")
+        quote_high: Optional[float] = a.get("quote_high")
+        quote_low: Optional[float] = a.get("quote_low")
+
         # 1. Insert tick (ignore duplicate tick_time for same symbol)
         cur.execute(
             """
@@ -538,36 +608,43 @@ def _update_market_data(
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
 
-        # 3. Upsert OHLCV row — open is set only if no row exists yet for this day
+        # 3. Upsert OHLCV row
+        #    Prefer quote OHLCV when available; fall back to tick-accumulation.
         existing = cur.execute(
             "SELECT open, high, low, close FROM symbol_daily_ohlcv WHERE symbol=? AND trade_date=?",
             (symbol, trade_date),
         ).fetchone()
 
         if existing is None:
-            # First tick of the day → set open
+            # First tick of the day → set open (prefer quote_open if present)
+            open_price = quote_open if quote_open is not None else price
+            high_price = quote_high if quote_high is not None else price
+            low_price  = quote_low  if quote_low  is not None else price
+            close_price = price if mode == "close" else None
             cur.execute(
                 """
                 INSERT INTO symbol_daily_ohlcv
-                    (symbol, trade_date, open, high, low, close, prev_close, daily_var_pct, source, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (symbol, trade_date, open, high, low, close, prev_close,
+                     daily_var_pct, volume, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (symbol, trade_date, price, price, price,
-                 price if mode == "close" else None,
-                 prev_close, daily_var_pct, source, now_str),
+                (symbol, trade_date, open_price, high_price, low_price,
+                 close_price, prev_close, daily_var_pct, volume, source, now_str),
             )
         else:
             ex_open, ex_high, ex_low, ex_close = existing
-            new_high = max(ex_high, price) if ex_high is not None else price
-            new_low  = min(ex_low,  price) if ex_low  is not None else price
+            # Use quote values when available; otherwise keep tick-accumulated extremes
+            new_high = max(quote_high or ex_high or price, price)
+            new_low  = min(quote_low  or ex_low  or price, price)
             new_close = price if mode == "close" else ex_close
             cur.execute(
                 """
                 UPDATE symbol_daily_ohlcv
-                SET high=?, low=?, close=?, daily_var_pct=?, source=?, updated_at=?
+                SET high=?, low=?, close=?, daily_var_pct=?, volume=?, source=?, updated_at=?
                 WHERE symbol=? AND trade_date=?
                 """,
-                (new_high, new_low, new_close, daily_var_pct, source, now_str, symbol, trade_date),
+                (new_high, new_low, new_close, daily_var_pct, volume, source, now_str,
+                 symbol, trade_date),
             )
 
 
@@ -668,9 +745,13 @@ def run_snapshot(
             replace_assets=replace_assets,
         )
         _log_run(conn, snapshot_day.isoformat(), retrieved_at, source, "ok", None)
+        # Enrich portfolio assets with real OHLCV + volume, and add watchlist symbols
+        assets_for_ohlcv = _enrich_with_quotes(
+            client, list(assets), getattr(config, "ohlcv_watchlist", [])
+        )
         _update_market_data(
             conn,
-            assets=assets,
+            assets=assets_for_ohlcv,
             trade_date=snapshot_day.isoformat(),
             tick_time_utc=retrieved_at,
             source=source,

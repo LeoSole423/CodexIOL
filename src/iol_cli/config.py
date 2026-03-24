@@ -1,5 +1,6 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List, Tuple
 from dotenv import load_dotenv
 
 class ConfigError(RuntimeError):
@@ -18,6 +19,7 @@ class Config:
     market_open_time: str
     market_close_time: str
     store_raw: bool
+    ohlcv_watchlist: List[Tuple[str, str]] = field(default_factory=list)
 
     def resolve_base_url(self, base_url_override=None):
         if base_url_override:
@@ -81,6 +83,25 @@ def load_config() -> Config:
     market_close_time = os.getenv("IOL_MARKET_CLOSE_TIME", "18:00").strip()
     store_raw = _get_bool("IOL_STORE_RAW", False)
 
+    # IOL_OHLCV_WATCHLIST: comma-separated "SYMBOL:MARKET" pairs to track
+    # even when not in the portfolio. Market defaults to "bCBA" if omitted.
+    # Example: IOL_OHLCV_WATCHLIST=SPY:bCBA,GLD:bCBA,GGAL:bCBA,YPF:bCBA
+    ohlcv_watchlist: List[Tuple[str, str]] = []
+    raw_watchlist = os.getenv("IOL_OHLCV_WATCHLIST", "").strip()
+    if raw_watchlist:
+        for entry in raw_watchlist.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if ":" in entry:
+                sym, mkt = entry.split(":", 1)
+            else:
+                sym, mkt = entry, "bCBA"
+            sym = sym.strip().upper()
+            mkt = mkt.strip()
+            if sym:
+                ohlcv_watchlist.append((sym, mkt))
+
     return Config(
         username=username,
         password=password,
@@ -93,4 +114,5 @@ def load_config() -> Config:
         market_open_time=market_open_time,
         market_close_time=market_close_time,
         store_raw=store_raw,
+        ohlcv_watchlist=ohlcv_watchlist,
     )

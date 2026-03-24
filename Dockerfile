@@ -8,6 +8,6 @@ COPY src /app/src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cron tzdata \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -e .
+    && pip install --no-cache-dir -e ".[dev]"
 
 CMD ["tail", "-f", "/dev/null"]

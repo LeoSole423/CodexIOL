@@ -727,6 +727,106 @@ class OpportunityCandidate:
         }
 
 
+def resolve_conflicts(
+    candidates: List["OpportunityCandidate"],
+    target_weights_by_symbol: Optional[Dict[str, float]] = None,
+) -> List["OpportunityCandidate"]:
+    """Post-process candidates to resolve simultaneous buy/sell for the same symbol.
+
+    For each symbol with both a buy and a sell candidate, applies a priority hierarchy:
+    1. Portfolio vs structural target: if current_weight is meaningfully below target,
+       suppress sells; if meaningfully above, suppress buys. If within ±2pp, suppress both.
+    2. Score dominance (when no target available): keep the signal whose score exceeds
+       the other by at least 20 points; otherwise suppress both (no conviction).
+
+    Suppressed candidates are kept in the list with candidate_status="suppressed" and
+    a resolution_reason field appended to their reason_summary for auditability.
+    """
+    from collections import defaultdict
+
+    by_symbol: Dict[str, List["OpportunityCandidate"]] = defaultdict(list)
+    for c in candidates:
+        by_symbol[c.symbol].append(c)
+
+    result: List["OpportunityCandidate"] = []
+    for symbol, group in by_symbol.items():
+        buys = [c for c in group if c.signal_side == "buy"]
+        sells = [c for c in group if c.signal_side == "sell"]
+
+        if not buys or not sells:
+            # No conflict — but still apply target-aware suppression for lone signals
+            if target_weights_by_symbol:
+                target_w = float((target_weights_by_symbol or {}).get(symbol, 0.0) or 0.0)
+                if target_w > 0.0:
+                    cur_w = float(group[0].current_weight_pct)
+                    deviation = cur_w - target_w
+                    for c in group:
+                        if c.signal_side == "sell" and deviation <= 2.0:
+                            # Symbol is on-track or underweight — no reason to sell
+                            c.candidate_status = "suppressed"
+                            c.reason_summary = c.reason_summary + f" | resolution=target_no_sell(cur={cur_w:.1f}%,tgt={target_w:.1f}%)"
+                        elif c.signal_side == "buy" and deviation >= 2.0:
+                            # Symbol is overweight — no reason to buy more
+                            c.candidate_status = "suppressed"
+                            c.reason_summary = c.reason_summary + f" | resolution=target_no_buy(cur={cur_w:.1f}%,tgt={target_w:.1f}%)"
+            result.extend(group)
+            continue
+
+        best_buy = max(buys, key=lambda c: c.score_total)
+        best_sell = max(sells, key=lambda c: c.score_total)
+
+        target_w = float((target_weights_by_symbol or {}).get(symbol, 0.0) or 0.0)
+        cur_w = float(best_buy.current_weight_pct)
+        suppress_buys = False
+        suppress_sells = False
+        reason = ""
+
+        if target_w > 0.0:
+            deviation = cur_w - target_w
+            if deviation < -2.0:
+                # Underweight vs target → suppress sells
+                suppress_sells = True
+                reason = f"target_underweight(cur={cur_w:.1f}%,tgt={target_w:.1f}%)"
+            elif deviation > 2.0:
+                # Overweight vs target → suppress buys
+                suppress_buys = True
+                reason = f"target_overweight(cur={cur_w:.1f}%,tgt={target_w:.1f}%)"
+            else:
+                # Within ±2pp of target → no action needed, suppress both
+                suppress_buys = True
+                suppress_sells = True
+                reason = f"target_on_track(cur={cur_w:.1f}%,tgt={target_w:.1f}%)"
+        else:
+            diff = abs(best_buy.score_total - best_sell.score_total)
+            if diff >= 20.0:
+                if best_buy.score_total >= best_sell.score_total:
+                    suppress_sells = True
+                    reason = f"score_dominant_buy(buy={best_buy.score_total:.1f},sell={best_sell.score_total:.1f})"
+                else:
+                    suppress_buys = True
+                    reason = f"score_dominant_sell(buy={best_buy.score_total:.1f},sell={best_sell.score_total:.1f})"
+            else:
+                suppress_buys = True
+                suppress_sells = True
+                reason = f"suppressed_tie(buy={best_buy.score_total:.1f},sell={best_sell.score_total:.1f})"
+
+        for c in group:
+            suppressed = (c.signal_side == "buy" and suppress_buys) or (c.signal_side == "sell" and suppress_sells)
+            if suppressed:
+                c.candidate_status = "suppressed"
+                c.reason_summary = c.reason_summary + f" | resolution={reason}"
+            result.append(c)
+
+    result.sort(
+        key=lambda c: (
+            0 if c.candidate_status not in ("suppressed", "rejected") else 1,
+            -float(c.score_total),
+            str(c.symbol),
+        )
+    )
+    return result
+
+
 def build_candidates(
     as_of: str,
     mode: str,
@@ -749,6 +849,8 @@ def build_candidates(
     weights: Optional[Dict[str, float]] = None,
     thresholds: Optional[Dict[str, Any]] = None,
     score_version: str = "baseline_v1",
+    target_weights_by_symbol: Optional[Dict[str, float]] = None,
+    min_actionable_score: float = 0.0,
 ) -> List[OpportunityCandidate]:
     mode_n = (mode or "").strip().lower()
     weight_cfg = dict(weights or {"risk": 0.35, "value": 0.20, "momentum": 0.35, "catalyst": 0.10})
@@ -844,9 +946,14 @@ def build_candidates(
             elif liq_score < 55.0:
                 risk_penalty += 5.0
 
-        if cur_w >= concentration_pct_max:
+        target_w_struct = float((target_weights_by_symbol or {}).get(symbol, 0.0) or 0.0)
+        effective_conc_max = max(concentration_pct_max, target_w_struct + 5.0) if target_w_struct > 0.0 else concentration_pct_max
+        if cur_w >= effective_conc_max:
             hard_ok = False
             flags.append("CONCENTRATION_MAX")
+        elif target_w_struct > 0.0 and cur_w > target_w_struct + 3.0:
+            risk_penalty += 10.0
+            flags.append("OVERWEIGHT_TARGET")
         elif cur_w > max(0.0, concentration_pct_max - 3.0):
             risk_penalty += 15.0
 
@@ -1032,6 +1139,8 @@ def build_candidates(
         elif str(r.get("signal_side") or "buy") == "buy" and (
             "EVIDENCE_INSUFFICIENT" in flags or str(r.get("consensus_state") or "") == "insufficient"
         ):
+            candidate_status = "watchlist"
+        elif float(min_actionable_score) > 0.0 and total < float(min_actionable_score):
             candidate_status = "watchlist"
 
         dd = r.get("dd")

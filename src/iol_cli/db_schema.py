@@ -196,6 +196,16 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS portfolio_target_weights (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL,
+        target_pct REAL NOT NULL,
+        as_of TEXT NOT NULL,
+        notes TEXT,
+        UNIQUE(symbol)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS advisor_opportunity_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at_utc TEXT NOT NULL,
@@ -538,6 +548,22 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(run_id) REFERENCES swing_simulation_runs(id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS swing_simulation_steps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        step_date TEXT NOT NULL,
+        regime TEXT,
+        regime_score REAL,
+        macro_stress REAL,
+        entries_count INTEGER NOT NULL DEFAULT 0,
+        exits_count INTEGER NOT NULL DEFAULT 0,
+        open_positions_count INTEGER NOT NULL DEFAULT 0,
+        portfolio_value_ars REAL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES swing_simulation_runs(id)
+    )
+    """,
     # ── Event-Driven Simulation ───────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS event_simulation_runs (
@@ -727,6 +753,8 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_swing_runs_bot ON swing_simulation_runs(bot_name)",
     "CREATE INDEX IF NOT EXISTS idx_swing_trades_run ON swing_simulation_trades(run_id, entry_date)",
     "CREATE INDEX IF NOT EXISTS idx_swing_trades_symbol ON swing_simulation_trades(symbol)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_swing_steps_run_date ON swing_simulation_steps(run_id, step_date)",
+    "CREATE INDEX IF NOT EXISTS idx_swing_steps_run ON swing_simulation_steps(run_id, step_date DESC)",
     # event simulation indexes
     "CREATE INDEX IF NOT EXISTS idx_event_runs_bot ON event_simulation_runs(bot_name)",
     "CREATE INDEX IF NOT EXISTS idx_event_trades_run ON event_simulation_trades(run_id, trade_date)",

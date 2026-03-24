@@ -1,8 +1,12 @@
 """Argentina macro data fetchers.
 
 Fetches:
-  - BCRA Open Data API (official exchange rate, policy rate)
-  - CEDEAR FX premium: computed from market_symbol_snapshots (no external call)
+  - BCRA Estadísticas Cambiarias API v1.0 (official USD/ARS rate)
+  - CEDEAR FX premium: computed from ARS/cable price pairs in market_symbol_snapshots
+
+BCRA policy rate (var 7) is no longer available via the estadisticas API
+(v2 deprecated, v3 returns 404). Fetching is skipped; the stress score
+degrades gracefully to available components.
 
 All functions return (value, error_note).  On failure the value is None and
 the caller falls back gracefully.
@@ -13,92 +17,115 @@ import json
 import sqlite3
 import urllib.request
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
+
+_BCRA_FX_BASE = "https://api.bcra.gob.ar/estadisticascambiarias/v1.0/cotizaciones"
+_TIMEOUT = 15
+_HEADERS = {"User-Agent": "curl/7.80.0", "Accept": "application/json"}
 
 
-_BCRA_BASE = "https://api.bcra.gob.ar/estadisticas/v3.0/datosvariable"
-_TIMEOUT = 12
+def _fetch_usd_cotizacion(date_from: str, date_to: str) -> Tuple[Optional[float], str]:
+    """Fetch USD/ARS official rate from BCRA estadisticascambiarias API.
 
-
-def _bcra_get(var_id: int, days_back: int = 30) -> Tuple[Optional[float], str]:
-    """Fetch the latest value of a BCRA variable.
-
-    BCRA API: GET /estadisticas/v3.0/datosvariable/{id}/{from}/{to}
-    Returns the most recent available observation.
+    Returns the *most recent* value within the date range.
     """
-    today = date.today()
-    date_from = (today - timedelta(days=days_back)).isoformat()
-    date_to = today.isoformat()
-    url = f"{_BCRA_BASE}/{var_id}/{date_from}/{date_to}"
+    url = f"{_BCRA_FX_BASE}/USD?fechadesde={date_from}&fechahasta={date_to}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "CodexIOL/1.0"})
+        req = urllib.request.Request(url, headers=_HEADERS)
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         results = data.get("results", [])
         if not results:
-            return None, f"BCRA var {var_id}: no data"
-        # results are ordered ascending; last = most recent
-        latest = results[-1]
-        value = latest.get("valor")
+            return None, f"BCRA cotizaciones: no data for {date_from}–{date_to}"
+        # API returns newest-first; first entry is the most recent.
+        detalle = results[0].get("detalle", [])
+        if not detalle:
+            return None, "BCRA cotizaciones: empty detalle"
+        value = detalle[0].get("tipoCotizacion")
         if value is None:
-            return None, f"BCRA var {var_id}: null valor"
+            return None, "BCRA cotizaciones: null tipoCotizacion"
         return float(value), ""
     except Exception as exc:
-        return None, f"BCRA var {var_id} error: {exc}"
-
-
-# BCRA variable IDs (documented at api.bcra.gob.ar/estadisticas)
-# 1  = Tipo de cambio minorista (oficial USD/ARS)
-# 7  = Tasa de política monetaria (%)
-# 272 = Tipo de pase pasivo a 1 día (%)  — alternative policy rate
-_VAR_USD_OFFICIAL = 1
-_VAR_POLICY_RATE = 7
+        return None, f"BCRA cotizaciones error: {exc}"
 
 
 def fetch_usd_official() -> Tuple[Optional[float], str]:
-    """Official USD/ARS retail rate from BCRA."""
-    return _bcra_get(_VAR_USD_OFFICIAL)
+    """Official USD/ARS retail rate from BCRA (today or most recent)."""
+    today = date.today().isoformat()
+    date_from = (date.today() - timedelta(days=5)).isoformat()
+    return _fetch_usd_cotizacion(date_from, today)
 
 
 def fetch_bcra_rate() -> Tuple[Optional[float], str]:
-    """BCRA monetary policy rate (% TNA)."""
-    return _bcra_get(_VAR_POLICY_RATE)
+    """BCRA monetary policy rate (% TNA).
+
+    The BCRA estadisticas API that provided this variable (var 7) has been
+    deprecated/removed.  Returns None with an informational note so the
+    macro stress score degrades gracefully.
+    """
+    return None, "BCRA policy rate: API unavailable (estadisticas v3 removed)"
+
+
+def fetch_prev_usd_official(days_back: int = 35) -> Tuple[Optional[float], str]:
+    """Fetch the official USD rate from ~30 days ago for devaluation calc."""
+    today = date.today()
+    date_to = (today - timedelta(days=days_back - 5)).isoformat()
+    date_from = (today - timedelta(days=days_back)).isoformat()
+    return _fetch_usd_cotizacion(date_from, date_to)
 
 
 # ── CEDEAR FX premium ────────────────────────────────────────────────────────
-# CEDEARs trade in ARS but track their USD underlying × an implicit FX rate.
-# Premium = (CEDEAR_ARS / official_rate / USD_reference) - 1
-# We estimate the implicit FX by comparing pairs of CEDEARs whose
-# ratio should equal the ratio of their US prices.
-# Simpler: use the CCL (contado con liquidación) approximation from IOL data
-# if we have both the CEDEAR price and a known recent USD ADR reference stored.
-#
-# Since we don't store USD ADR reference prices locally in Phase 2, we compute
-# the implicit rate from a basket of CEDEARs using the official rate and a
-# known ratio: implicitFX = cedear_price_ars / cedear_ratio / usd_reference.
-# We approximate usd_reference using the average daily_var_pct to see
-# divergence from official rate.
-#
-# Conservative approach for Phase 2: return None (not computable without
-# the USD reference).  MacroEngine will log a note and continue.
 
 def fetch_cedear_fx_premium(
     conn: sqlite3.Connection,
     as_of: str,
     usd_official: Optional[float],
 ) -> Tuple[Optional[float], str]:
-    """Estimate CEDEAR implicit FX premium vs official rate.
+    """Estimate CEDEAR implicit FX premium (CCL) vs official rate.
 
-    Uses the price of CEDEAR vs its ARS-equivalent at official rate.
-    Returns premium as a fraction (e.g. 0.15 = 15% above official).
+    Uses pairs stored in market_symbol_snapshots:
+      - SYMBOL  = ARS price (e.g. AAPL)
+      - SYMBOLC = USD cable price (e.g. AAPLC)
 
-    Currently returns None when USD reference is unavailable — will be
-    refined in a future phase when USD reference prices are stored.
+    Implied CCL = ARS_price / USD_cable_price.
+    Premium = (median_CCL / usd_official) - 1  (fraction, e.g. 0.04 = 4%).
+
+    Requires at least 5 pairs and a valid usd_official rate.
     """
-    # This is intentionally left as a stub for Phase 2.
-    # The CEDEAR FX premium requires knowing the US ADR closing price,
-    # which is not currently stored in market_symbol_snapshots.
-    return None, "CEDEAR FX premium: USD reference not yet available (Phase 2 stub)"
+    if usd_official is None or usd_official <= 0:
+        return None, "CEDEAR FX premium: usd_official not available"
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT a.last_price / b.last_price
+            FROM market_symbol_snapshots a
+            JOIN market_symbol_snapshots b
+              ON b.symbol = a.symbol || 'C'
+             AND b.snapshot_date = a.snapshot_date
+            WHERE a.snapshot_date = (
+                SELECT MAX(snapshot_date) FROM market_symbol_snapshots
+                WHERE snapshot_date <= ?
+            )
+            AND a.last_price > 0
+            AND b.last_price > 0
+            """,
+            (as_of,),
+        )
+        ccls = [row[0] for row in cur.fetchall()]
+        if len(ccls) < 5:
+            return None, f"CEDEAR FX premium: insufficient pairs ({len(ccls)})"
+
+        ccls_sorted = sorted(ccls)
+        n = len(ccls_sorted)
+        # Median — robust to outliers from thinly-traded CEDEARs
+        mid = n // 2
+        median_ccl = (ccls_sorted[mid - 1] + ccls_sorted[mid]) / 2 if n % 2 == 0 else ccls_sorted[mid]
+
+        premium = (median_ccl / usd_official) - 1.0
+        return round(premium, 4), ""
+    except Exception as exc:
+        return None, f"CEDEAR FX premium error: {exc}"
 
 
 # ── Argentina macro stress score ─────────────────────────────────────────────
@@ -122,20 +149,18 @@ def compute_argentina_stress(
 
     # Component 1: Policy rate (max reasonable = 200% TNA)
     if bcra_rate_pct is not None:
-        # 0% → 0 stress, 200%+ → 100 stress
         rate_stress = min(100.0, bcra_rate_pct / 2.0)
         score_components.append(rate_stress)
 
     # Component 2: Devaluation pace
     if usd_official is not None and prev_usd_official is not None and prev_usd_official > 0:
         monthly_deval_pct = (usd_official / prev_usd_official - 1) * 100
-        # 0% deval → 0 stress, 10%+ monthly deval → 100 stress
-        deval_stress = min(100.0, monthly_deval_pct * 10)
+        # 0% deval → 0 stress, 10%+ monthly deval → 100 stress; appreciation = 0 stress
+        deval_stress = max(0.0, min(100.0, monthly_deval_pct * 10))
         score_components.append(deval_stress)
 
     # Component 3: CEDEAR premium
     if cedear_premium is not None:
-        # 0% premium → 0, 100% premium → 100 stress
         premium_stress = min(100.0, cedear_premium * 100)
         score_components.append(premium_stress)
 
@@ -143,9 +168,3 @@ def compute_argentina_stress(
         return 50.0   # neutral — no data
 
     return round(sum(score_components) / len(score_components), 1)
-
-
-def fetch_prev_usd_official(days_back: int = 35) -> Tuple[Optional[float], str]:
-    """Fetch the official USD rate from ~30 days ago for devaluation calc."""
-    val, err = _bcra_get(_VAR_USD_OFFICIAL, days_back=days_back)
-    return val, err

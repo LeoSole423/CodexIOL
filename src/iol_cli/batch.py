@@ -60,7 +60,7 @@ def _get_defaults(plan: Dict[str, Any], price_mode_override: Optional[str], defa
 
 def validate_plan(plan: Dict[str, Any]) -> None:
     version = plan.get("version")
-    if version != 1:
+    if version not in (1, 2, 3):
         raise BatchError(f"Unsupported plan version: {version}")
     defaults = plan.get("defaults") or {}
     if defaults is not None:

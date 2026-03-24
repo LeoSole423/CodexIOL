@@ -864,5 +864,338 @@ class TestAdvisorOpportunities(unittest.TestCase):
             conn.close()
 
 
+class TestResolveConflicts(unittest.TestCase):
+    """Tests for resolve_conflicts() — the post-processing layer that eliminates
+    simultaneous buy/sell signals for the same symbol."""
+
+    def _make_candidate(self, symbol, signal_side, score, cur_weight=10.0, status="operable"):
+        from iol_cli.opportunities import OpportunityCandidate
+        return OpportunityCandidate(
+            symbol=symbol,
+            candidate_type="rebuy" if signal_side == "buy" else "trim",
+            signal_side=signal_side,
+            signal_family="rebuy" if signal_side == "buy" else "exit",
+            score_version="baseline_v1",
+            score_total=score,
+            score_risk=score,
+            score_value=score,
+            score_momentum=score,
+            score_catalyst=score,
+            entry_low=None,
+            entry_high=None,
+            suggested_weight_pct=None,
+            suggested_amount_ars=None,
+            reason_summary=f"{symbol}:{signal_side}",
+            risk_flags_json="[]",
+            filters_passed=1,
+            current_weight_pct=cur_weight,
+            expert_signal_score=50.0,
+            trusted_refs_count=0,
+            consensus_state="insufficient",
+            decision_gate="auto",
+            candidate_status=status,
+            evidence_summary_json="{}",
+            liquidity_score=80.0,
+            sector_bucket="financials",
+            is_crypto_proxy=0,
+            holding_context_json="{}",
+            score_features_json="{}",
+        )
+
+    def test_underweight_suppresses_sell(self):
+        """current_weight < target - 2pp → sell suppressed, buy survives."""
+        from iol_cli.opportunities import resolve_conflicts
+        # EEM at 0% with target 8% → clearly underweight (-8pp)
+        buy = self._make_candidate("EEM", "buy", score=38.0, cur_weight=0.0)
+        sell = self._make_candidate("EEM", "sell", score=63.0, cur_weight=0.0)
+        result = resolve_conflicts([buy, sell], target_weights_by_symbol={"EEM": 8.0})
+        by_side = {c.signal_side: c for c in result if c.symbol == "EEM"}
+        self.assertEqual(by_side["buy"].candidate_status, "operable")
+        self.assertEqual(by_side["sell"].candidate_status, "suppressed")
+        self.assertIn("target_underweight", by_side["sell"].reason_summary)
+
+    def test_overweight_suppresses_buy(self):
+        """current_weight > target + 2pp → buy suppressed, sell survives."""
+        from iol_cli.opportunities import resolve_conflicts
+        buy = self._make_candidate("ACWI", "buy", score=70.0, cur_weight=22.0)
+        sell = self._make_candidate("ACWI", "sell", score=45.0, cur_weight=22.0)
+        result = resolve_conflicts([buy, sell], target_weights_by_symbol={"ACWI": 17.0})
+        by_side = {c.signal_side: c for c in result if c.symbol == "ACWI"}
+        self.assertEqual(by_side["sell"].candidate_status, "operable")
+        self.assertEqual(by_side["buy"].candidate_status, "suppressed")
+        self.assertIn("target_overweight", by_side["buy"].reason_summary)
+
+    def test_on_track_suppresses_both(self):
+        """current_weight within ±2pp of target → both suppressed."""
+        from iol_cli.opportunities import resolve_conflicts
+        buy = self._make_candidate("GLD", "buy", score=70.0, cur_weight=15.5)
+        sell = self._make_candidate("GLD", "sell", score=45.0, cur_weight=15.5)
+        result = resolve_conflicts([buy, sell], target_weights_by_symbol={"GLD": 16.0})
+        by_side = {c.signal_side: c for c in result if c.symbol == "GLD"}
+        self.assertEqual(by_side["buy"].candidate_status, "suppressed")
+        self.assertEqual(by_side["sell"].candidate_status, "suppressed")
+        self.assertIn("target_on_track", by_side["buy"].reason_summary)
+
+    def test_score_dominant_buy_wins(self):
+        """No target: buy score >> sell score (diff >= 20) → buy kept."""
+        from iol_cli.opportunities import resolve_conflicts
+        buy = self._make_candidate("EEM", "buy", score=70.0)
+        sell = self._make_candidate("EEM", "sell", score=40.0)
+        result = resolve_conflicts([buy, sell])
+        by_side = {c.signal_side: c for c in result if c.symbol == "EEM"}
+        self.assertEqual(by_side["buy"].candidate_status, "operable")
+        self.assertEqual(by_side["sell"].candidate_status, "suppressed")
+        self.assertIn("score_dominant_buy", by_side["sell"].reason_summary)
+
+    def test_score_dominant_sell_wins(self):
+        """No target: sell score >> buy score (diff >= 20) → sell kept."""
+        from iol_cli.opportunities import resolve_conflicts
+        buy = self._make_candidate("IBIT", "buy", score=35.0)
+        sell = self._make_candidate("IBIT", "sell", score=65.0)
+        result = resolve_conflicts([buy, sell])
+        by_side = {c.signal_side: c for c in result if c.symbol == "IBIT"}
+        self.assertEqual(by_side["sell"].candidate_status, "operable")
+        self.assertEqual(by_side["buy"].candidate_status, "suppressed")
+        self.assertIn("score_dominant_sell", by_side["buy"].reason_summary)
+
+    def test_tie_suppresses_both(self):
+        """No target: scores too close (diff < 20) → both suppressed."""
+        from iol_cli.opportunities import resolve_conflicts
+        buy = self._make_candidate("AL30", "buy", score=55.0)
+        sell = self._make_candidate("AL30", "sell", score=50.0)
+        result = resolve_conflicts([buy, sell])
+        by_side = {c.signal_side: c for c in result if c.symbol == "AL30"}
+        self.assertEqual(by_side["buy"].candidate_status, "suppressed")
+        self.assertEqual(by_side["sell"].candidate_status, "suppressed")
+        self.assertIn("suppressed_tie", by_side["buy"].reason_summary)
+
+    def test_no_conflict_passes_through(self):
+        """Symbol with only buy signal is unchanged."""
+        from iol_cli.opportunities import resolve_conflicts
+        buy = self._make_candidate("TO26", "buy", score=60.0)
+        result = resolve_conflicts([buy])
+        self.assertEqual(result[0].candidate_status, "operable")
+        self.assertEqual(result[0].signal_side, "buy")
+
+    def test_multiple_symbols_resolved_independently(self):
+        """Each symbol resolves independently without cross-contamination."""
+        from iol_cli.opportunities import resolve_conflicts
+        # EEM at 0% vs target 8% → clearly underweight
+        eem_buy = self._make_candidate("EEM", "buy", score=38.0, cur_weight=0.0)
+        eem_sell = self._make_candidate("EEM", "sell", score=63.0, cur_weight=0.0)
+        # GLD at 12% vs target 16% → clearly underweight
+        gld_buy = self._make_candidate("GLD", "buy", score=70.0, cur_weight=12.0)
+        gld_sell = self._make_candidate("GLD", "sell", score=30.0, cur_weight=12.0)
+        result = resolve_conflicts(
+            [eem_buy, eem_sell, gld_buy, gld_sell],
+            target_weights_by_symbol={"EEM": 8.0, "GLD": 16.0},
+        )
+        by_sym_side = {(c.symbol, c.signal_side): c for c in result}
+        # EEM underweight → buy survives
+        self.assertEqual(by_sym_side[("EEM", "buy")].candidate_status, "operable")
+        self.assertEqual(by_sym_side[("EEM", "sell")].candidate_status, "suppressed")
+        # GLD underweight → buy survives
+        self.assertEqual(by_sym_side[("GLD", "buy")].candidate_status, "operable")
+        self.assertEqual(by_sym_side[("GLD", "sell")].candidate_status, "suppressed")
+
+
+class TestConcentrationWithTarget(unittest.TestCase):
+    """Tests for target-aware CONCENTRATION_MAX in build_candidates()."""
+
+    def _minimal_build(self, symbol, cur_weight_pct, target_weights=None):
+        """Run build_candidates() with a single symbol and return the candidate."""
+        from iol_cli.opportunities import build_candidates
+        portfolio_total = 3_000_000.0
+        holding_value = portfolio_total * cur_weight_pct / 100.0
+        metrics = {
+            symbol: {
+                "last_price": 100.0,
+                "bid": 99.0,
+                "ask": 101.0,
+                "spread_pct": 0.5,
+                "operations_count": 20,
+                "volume_amount": 500_000.0,
+            }
+        }
+        series = {symbol: [("2026-03-01", 105.0), ("2026-03-10", 100.0), ("2026-03-20", 100.0)]}
+        return build_candidates(
+            as_of="2026-03-20",
+            mode="both",
+            budget_ars=200_000.0,
+            top_n=10,
+            portfolio_total_ars=portfolio_total,
+            holdings_value_by_symbol={symbol: holding_value},
+            latest_metrics=metrics,
+            series_by_symbol=series,
+            evidence_by_symbol={symbol: []},
+            holdings_context_by_symbol={symbol: {"gain_pct": 5.0, "age_days": 30}},
+            target_weights_by_symbol=target_weights,
+        )
+
+    def test_spy_at_target_no_concentration_max(self):
+        """SPY at 30.8% with target 32% should NOT trigger CONCENTRATION_MAX."""
+        candidates = self._minimal_build("SPY", 30.8, target_weights={"SPY": 32.0})
+        for c in candidates:
+            if c.symbol == "SPY":
+                self.assertNotIn("CONCENTRATION_MAX", c.risk_flags_json,
+                    msg=f"SPY at 30.8% with target 32% incorrectly flagged CONCENTRATION_MAX: {c.reason_summary}")
+
+    def test_spy_far_above_target_triggers_concentration_max(self):
+        """SPY at 40% with target 32% (40 > 32+5=37) should trigger CONCENTRATION_MAX."""
+        candidates = self._minimal_build("SPY", 40.0, target_weights={"SPY": 32.0})
+        sell_candidates = [c for c in candidates if c.symbol == "SPY" and c.signal_side == "sell"]
+        # At 40% weight, the buy should be rejected via CONCENTRATION_MAX
+        buy_candidates = [c for c in candidates if c.symbol == "SPY" and c.signal_side == "buy"]
+        for c in buy_candidates:
+            self.assertIn("CONCENTRATION_MAX", c.risk_flags_json)
+
+    def test_overweight_by_3pp_adds_overweight_flag(self):
+        """ACWI at 20% with target 17% (overweight by 3pp) adds OVERWEIGHT_TARGET, not CONCENTRATION_MAX."""
+        candidates = self._minimal_build("ACWI", 20.0, target_weights={"ACWI": 17.0})
+        for c in candidates:
+            if c.symbol == "ACWI" and c.signal_side == "buy":
+                self.assertNotIn("CONCENTRATION_MAX", c.risk_flags_json)
+                self.assertIn("OVERWEIGHT_TARGET", c.risk_flags_json)
+
+
+class TestEngineSignalsToEvidence(unittest.TestCase):
+    """Tests for engine_signals_to_evidence() in the adapter."""
+
+    def _make_regime(self, regime, score=70.0):
+        from iol_engines.signals import RegimeSignal
+        return RegimeSignal(
+            as_of="2026-03-20",
+            regime=regime,
+            confidence=0.8,
+            regime_score=score,
+            favored_asset_classes=["equity"] if regime == "bull" else ["gold", "cash"],
+            defensive_weight_adjustment=0.0 if regime == "bull" else -0.1,
+            breadth_score=60.0,
+            volatility_regime="normal",
+        )
+
+    def _make_macro(self, global_risk_on=50.0, ar_stress=50.0):
+        from iol_engines.signals import MacroSignal
+        return MacroSignal(as_of="2026-03-20", argentina_macro_stress=ar_stress, global_risk_on=global_risk_on)
+
+    def _make_sm(self, symbol, direction, conviction=75.0):
+        from iol_engines.signals import SmartMoneySignal
+        return SmartMoneySignal(
+            as_of="2026-03-20",
+            symbol=symbol,
+            net_institutional_direction=direction,
+            conviction_score=conviction,
+        )
+
+    def test_bull_regime_generates_bullish_for_equity(self):
+        from iol_engines.opportunity.adapter import engine_signals_to_evidence
+        rows = engine_signals_to_evidence(
+            regime=self._make_regime("bull"),
+            macro=None,
+            smart_money=None,
+            as_of="2026-03-20",
+            portfolio_symbols=["SPY", "ACWI", "GLD"],
+        )
+        spy_rows = [r for r in rows if r["symbol"] == "SPY"]
+        self.assertTrue(len(spy_rows) >= 1)
+        import json as _json
+        for r in spy_rows:
+            notes = _json.loads(r["notes"])
+            self.assertEqual(notes["stance"], "bullish")
+            self.assertEqual(notes["source_tier"], "official")
+
+    def test_bear_regime_generates_bearish_for_equity(self):
+        from iol_engines.opportunity.adapter import engine_signals_to_evidence
+        rows = engine_signals_to_evidence(
+            regime=self._make_regime("bear"),
+            macro=None,
+            smart_money=None,
+            as_of="2026-03-20",
+            portfolio_symbols=["SPY", "GLD"],
+        )
+        spy_rows = [r for r in rows if r["symbol"] == "SPY"]
+        self.assertTrue(len(spy_rows) >= 1)
+        import json as _json
+        for r in spy_rows:
+            self.assertEqual(_json.loads(r["notes"])["stance"], "bearish")
+
+    def test_bear_regime_bullish_for_defensive(self):
+        from iol_engines.opportunity.adapter import engine_signals_to_evidence
+        rows = engine_signals_to_evidence(
+            regime=self._make_regime("crisis"),
+            macro=None,
+            smart_money=None,
+            as_of="2026-03-20",
+            portfolio_symbols=["GLD", "SPY"],
+        )
+        import json as _json
+        gld_rows = [r for r in rows if r["symbol"] == "GLD"]
+        stances = [_json.loads(r["notes"])["stance"] for r in gld_rows]
+        self.assertIn("bullish", stances)
+
+    def test_smart_money_accumulate_generates_bullish(self):
+        from iol_engines.opportunity.adapter import engine_signals_to_evidence
+        rows = engine_signals_to_evidence(
+            regime=None,
+            macro=None,
+            smart_money=[self._make_sm("SPY", "accumulate", conviction=80.0)],
+            as_of="2026-03-20",
+            portfolio_symbols=["SPY"],
+        )
+        spy_rows = [r for r in rows if r["symbol"] == "SPY"]
+        self.assertEqual(len(spy_rows), 1)
+        import json as _json
+        self.assertEqual(_json.loads(spy_rows[0]["notes"])["stance"], "bullish")
+        self.assertEqual(spy_rows[0]["confidence"], "high")
+
+    def test_smart_money_distribute_generates_bearish(self):
+        from iol_engines.opportunity.adapter import engine_signals_to_evidence
+        rows = engine_signals_to_evidence(
+            regime=None,
+            macro=None,
+            smart_money=[self._make_sm("GLD", "distribute", conviction=75.0)],
+            as_of="2026-03-20",
+            portfolio_symbols=["GLD"],
+        )
+        gld_rows = [r for r in rows if r["symbol"] == "GLD"]
+        self.assertEqual(len(gld_rows), 1)
+        import json as _json
+        self.assertEqual(_json.loads(gld_rows[0]["notes"])["stance"], "bearish")
+
+    def test_low_conviction_smart_money_ignored(self):
+        from iol_engines.opportunity.adapter import engine_signals_to_evidence
+        rows = engine_signals_to_evidence(
+            regime=None,
+            macro=None,
+            smart_money=[self._make_sm("SPY", "accumulate", conviction=45.0)],
+            as_of="2026-03-20",
+            portfolio_symbols=["SPY"],
+        )
+        self.assertEqual(len(rows), 0)
+
+    def test_high_ar_stress_bearish_for_sovereign(self):
+        from iol_engines.opportunity.adapter import engine_signals_to_evidence
+        rows = engine_signals_to_evidence(
+            regime=None,
+            macro=self._make_macro(ar_stress=80.0),
+            smart_money=None,
+            as_of="2026-03-20",
+            portfolio_symbols=["TO26", "AL30", "SPY"],
+        )
+        import json as _json
+        ar_rows = [r for r in rows if r["symbol"] in ("TO26", "AL30")]
+        self.assertTrue(len(ar_rows) >= 1)
+        for r in ar_rows:
+            self.assertEqual(_json.loads(r["notes"])["stance"], "bearish")
+
+    def test_no_signals_returns_empty(self):
+        from iol_engines.opportunity.adapter import engine_signals_to_evidence
+        rows = engine_signals_to_evidence(
+            regime=None, macro=None, smart_money=None,
+            as_of="2026-03-20", portfolio_symbols=["SPY", "GLD"],
+        )
+        self.assertEqual(rows, [])
+
+
 if __name__ == "__main__":
     unittest.main()

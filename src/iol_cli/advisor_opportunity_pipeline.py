@@ -11,7 +11,6 @@ from .advisor_opportunity_support import (
     OPP_UNIVERSES,
     SOURCE_POLICIES,
     VARIANT_SELECTORS,
-    latest_snapshot_date,
     load_evidence_rows_grouped,
     load_holdings_context_from_db,
     load_holdings_map_from_context,
@@ -26,6 +25,7 @@ from .opportunities import (
     panel_rows,
     parse_iso_date,
     price_series_by_symbol,
+    resolve_conflicts,
     snapshot_row_from_panel,
     snapshot_row_from_quote,
     summarize_run_metrics,
@@ -33,6 +33,10 @@ from .opportunities import (
 from .util import normalize_country, normalize_market
 from iol_advisor.continuous import active_variant, ensure_default_model_variants, resolve_variant_selection
 from iol_advisor.service import find_reusable_opportunity_run
+from iol_engines.macro.engine import MacroMomentumEngine
+from iol_engines.regime.engine import MarketRegimeEngine
+from iol_engines.smart_money.engine import SmartMoneyEngine
+from iol_engines.opportunity.adapter import engine_signals_to_evidence
 
 
 def snapshot_universe_impl(
@@ -44,13 +48,7 @@ def snapshot_universe_impl(
 ) -> Dict[str, Any]:
     universe_v = normalize_enum(universe, "--universe", OPP_UNIVERSES)
     db_path = resolve_db_path(cli_ctx.config.db_path)
-    conn = connect(db_path)
-    init_db(conn)
-    try:
-        latest_snap = latest_snapshot_date(conn)
-    finally:
-        conn.close()
-    as_of_v = parse_iso_date(as_of, default=latest_snap or date.today().isoformat())
+    as_of_v = parse_iso_date(as_of, default=date.today().isoformat())
 
     ctx_payload = build_advisor_context_from_db_path(db_path=db_path, as_of=as_of_v, limit=200, history_days=3650)
     holdings_map = load_holdings_map_from_context(ctx_payload)
@@ -176,8 +174,7 @@ def run_opportunity_pipeline_impl(
     init_db(conn)
     try:
         ensure_default_model_variants(conn)
-        latest_snap = latest_snapshot_date(conn)
-        as_of_v = parse_iso_date(as_of, default=latest_snap or date.today().isoformat())
+        as_of_v = parse_iso_date(as_of, default=date.today().isoformat())
         if variant in VARIANT_SELECTORS and variant == "both":
             selected = resolve_variant_selection(conn, "both")
             if not selected:
@@ -481,6 +478,47 @@ def run_opportunity_pipeline_impl(
         series_by_symbol_final = {sym: row for sym, row in series_by_symbol.items() if sym in rerank_symbols}
         evidence_map_final = {sym: evidence_map.get(sym, []) for sym in rerank_symbols}
 
+        # ── Load structural target weights (for conflict resolution) ─────────
+        target_weights_by_symbol: Dict[str, float] = {}
+        try:
+            conn = connect(db_path)
+            init_db(conn)
+            try:
+                rows_tw = conn.execute(
+                    "SELECT symbol, target_pct FROM portfolio_target_weights"
+                ).fetchall()
+                target_weights_by_symbol = {str(r["symbol"]).upper(): float(r["target_pct"]) for r in rows_tw}
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+        # ── Load engine signals and inject as synthetic evidence ─────────────
+        try:
+            conn = connect(db_path)
+            init_db(conn)
+            try:
+                regime_signal = MarketRegimeEngine().load_latest(conn, as_of_v)
+                macro_signal = MacroMomentumEngine().load_latest(conn, as_of_v)
+                sm_signals = SmartMoneyEngine().load_latest(conn, as_of_v) or []
+            finally:
+                conn.close()
+            engine_evidence = engine_signals_to_evidence(
+                regime=regime_signal,
+                macro=macro_signal,
+                smart_money=sm_signals,
+                as_of=as_of_v,
+                portfolio_symbols=list(rerank_symbols),
+            )
+            for row in engine_evidence:
+                sym = str(row.get("symbol") or "").strip().upper()
+                if sym:
+                    evidence_map_final.setdefault(sym, []).append(row)
+            if engine_evidence:
+                apply_web_overlay = True  # engine evidence counts as expert overlay
+        except Exception:
+            pass  # engine signals are best-effort; never block the pipeline
+
         final_candidates = build_candidates(
             as_of=as_of_v,
             mode=mode_v,
@@ -503,7 +541,12 @@ def run_opportunity_pipeline_impl(
             weights=dict(cfg.get("weights") or {}),
             thresholds=dict(cfg.get("thresholds") or {}),
             score_version=score_version,
+            target_weights_by_symbol=target_weights_by_symbol or None,
+            min_actionable_score=45.0,
         )
+        # ── Resolve buy/sell conflicts for the same symbol ───────────────────
+        final_candidates = resolve_conflicts(final_candidates, target_weights_by_symbol or None)
+
         final_symbols = {str(c.symbol).strip().upper() for c in final_candidates}
         prelim_non_operable = [
             c
