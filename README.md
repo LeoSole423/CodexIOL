@@ -86,6 +86,8 @@ docker exec -it iol-scheduler tail -n 50 /var/log/cron.log
 Nota: los comandos `iol ...` de esta seccion asumen que estas dentro del contenedor.
 Si estas en host, antepone `docker exec -it iol-cli` (o usa `iolc`).
 
+Guia especializada de bots de simulacion: `docs/simulation-bots.md`.
+
 ```
 iol portfolio --country argentina
 
