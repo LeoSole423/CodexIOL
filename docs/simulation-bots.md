@@ -149,6 +149,26 @@ Interpreta:
 
 En feriados o domingos, `open_ready=0` para una fecha futura puede ser normal. Despues de un snapshot de mercado abierto, `open_ready` deberia subir y `fallback_needed` deberia bajar.
 
+## Auditoria Semanal
+
+`iol simulate audit --json` es la fuente principal para la automatizacion semanal `simulation-accuracy-report`. Agrega en un solo JSON la cobertura de datos, precision H1/H5, regimen, portfolio real, health daily/swing/event, costos netos, T+1/OHLCV y flags de calidad.
+
+```powershell
+docker exec iol-cli iol simulate audit --json
+docker exec iol-cli iol simulate audit --as-of 2026-05-22 --json
+docker exec iol-cli iol simulate audit --as-of 2026-05-22 --symbols --json
+```
+
+Diferencia entre comandos:
+
+| Comando | Uso |
+| --- | --- |
+| `iol simulate list --json` | Ver runs daily recientes y anomalias del listado CLI. |
+| `iol simulate swing list --json` | Ver runs swing recientes y anomalias del listado CLI. |
+| `iol simulate event list --json` | Ver runs event recientes y anomalias del listado CLI. |
+| `iol simulate t1-health --json` | Diagnosticar pendientes T+1 y cobertura de `symbol_daily_ohlcv.open`. |
+| `iol simulate audit --json` | Generar el paquete semanal agregado para precision, costos netos y salud operativa. |
+
 ## Pipeline Diario Seguro
 
 Despues del cierre de mercado:
@@ -161,6 +181,7 @@ docker exec iol-cli iol simulate live-step --bots all --json
 docker exec iol-cli iol simulate swing live-step --bots all --json
 docker exec iol-cli iol simulate event live-step --bots all --json
 docker exec iol-cli iol simulate t1-health --json
+docker exec iol-cli iol simulate audit --json
 ```
 
 No ejecutes:
@@ -364,6 +385,7 @@ docker exec iol-cli iol simulate t1-health --json
 docker exec iol-cli iol simulate list --limit 50 --json
 docker exec iol-cli iol simulate swing list --limit 50 --json
 docker exec iol-cli iol simulate event list --limit 50 --json
+docker exec iol-cli iol simulate audit --json
 ```
 
 El reporte semanal debe separar:
