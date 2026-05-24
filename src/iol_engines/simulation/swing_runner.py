@@ -249,6 +249,19 @@ def _finalize_run(
 
 
 def _mark_other_swing_live_runs_stale(conn: sqlite3.Connection, keep_run_id: int, bot_name: str) -> None:
+    stale_ids = [
+        int(r[0])
+        for r in conn.execute(
+            """
+            SELECT id FROM swing_simulation_runs
+            WHERE mode = 'live'
+              AND status = 'running'
+              AND bot_name = ?
+              AND id <> ?
+            """,
+            (bot_name, int(keep_run_id)),
+        ).fetchall()
+    ]
     conn.execute(
         """
         UPDATE swing_simulation_runs
@@ -260,6 +273,12 @@ def _mark_other_swing_live_runs_stale(conn: sqlite3.Connection, keep_run_id: int
         """,
         (bot_name, int(keep_run_id)),
     )
+    if stale_ids:
+        placeholders = ",".join("?" for _ in stale_ids)
+        conn.execute(
+            f"UPDATE swing_pending_orders SET status='cancelled' WHERE status='pending' AND run_id IN ({placeholders})",
+            stale_ids,
+        )
 
 
 def _swing_live_metrics(
@@ -744,6 +763,7 @@ def run_swing_live_step(
             ).fetchone()
             if enforce_cost_model_version and version_row and version_row[0] != cost_model.version:
                 conn.execute("UPDATE swing_simulation_runs SET status='stale' WHERE id=?", (run_id,))
+                conn.execute("UPDATE swing_pending_orders SET status='cancelled' WHERE run_id=? AND status='pending'", (run_id,))
                 run_id = _create_run_row(
                     conn, bot_name, f"{period}-01", as_of, initial_cash_ars,
                     mode="live", cost_model_version=cost_model.version,

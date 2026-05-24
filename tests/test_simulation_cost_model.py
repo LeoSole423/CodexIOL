@@ -1,7 +1,9 @@
 import pytest
+import sqlite3
 
 from iol_engines.simulation.cost_model import ExecutionCostModel
 from iol_engines.simulation.portfolio_sim import SimulatedPortfolio
+from iol_engines.simulation.report import add_estimated_gross_return_fields, execution_quality_summary
 
 
 def test_gold_stock_costs_include_commission_market_fee_and_iva():
@@ -101,3 +103,52 @@ def test_simulated_portfolio_sell_returns_net_pnl():
     assert sell.realized_pnl_ars is not None
     assert sell.realized_pnl_ars < (110.0 - 100.0) * buy.quantity
     assert "GGAL" not in portfolio.holdings
+
+
+def test_execution_quality_summary_reports_sources_and_liquidity():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE trades (
+            run_id INTEGER,
+            gross_amount_ars REAL,
+            net_amount_ars REAL,
+            total_cost_ars REAL,
+            cost_model_json TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO trades VALUES (1, ?, ?, ?, ?)",
+        [
+            (1000.0, 1000.0, 6.65, '{"price_source":"symbol_daily_ohlcv.open","liquidity_warning":null}'),
+            (500.0, 500.0, 3.0, '{"price_source":"fallback_last_price","liquidity_warning":"missing_volume_amount"}'),
+            (250.0, 250.0, None, None),
+        ],
+    )
+
+    summary = execution_quality_summary(conn, "trades", 1)
+
+    assert summary["trades"] == 3
+    assert summary["trades_with_costs"] == 2
+    assert summary["cost_coverage_pct"] == pytest.approx(66.67)
+    assert summary["total_costs_ars"] == pytest.approx(9.65)
+    assert summary["cost_drag_pct_gross"] == pytest.approx(0.5514)
+    assert summary["price_source_counts"]["symbol_daily_ohlcv.open"] == 1
+    assert summary["price_source_counts"]["fallback_last_price"] == 1
+    assert summary["price_source_counts"]["missing_price_source"] == 1
+    assert summary["liquidity_warning_counts"]["missing_volume_amount"] == 1
+
+
+def test_estimated_gross_return_adds_cost_drag_to_net_return():
+    row = {
+        "initial_cash": 100_000.0,
+        "total_return_pct": -1.25,
+        "total_costs_ars": 500.0,
+    }
+
+    add_estimated_gross_return_fields(row, initial_key="initial_cash")
+
+    assert row["cost_return_drag_pct_points"] == pytest.approx(0.5)
+    assert row["estimated_gross_return_pct"] == pytest.approx(-0.75)

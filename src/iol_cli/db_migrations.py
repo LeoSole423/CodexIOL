@@ -104,6 +104,27 @@ MIGRATION_COLUMNS = {
 
 _CREATE_IF_MISSING = [
     """
+    CREATE TABLE IF NOT EXISTS simulation_pending_orders (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id       INTEGER NOT NULL,
+        signal_date  TEXT NOT NULL,
+        symbol       TEXT NOT NULL,
+        side         TEXT NOT NULL CHECK(side IN ('buy','sell')),
+        action       TEXT,
+        amount_ars   REAL,
+        quantity     REAL,
+        signal_price REAL NOT NULL,
+        reason       TEXT,
+        engine_source TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','executed','cancelled')),
+        execute_date  TEXT,
+        execute_price REAL,
+        created_at   TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES simulation_runs(id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS swing_pending_orders (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id       INTEGER NOT NULL,
@@ -119,6 +140,27 @@ _CREATE_IF_MISSING = [
         execute_price REAL,
         created_at   TEXT NOT NULL,
         FOREIGN KEY(run_id) REFERENCES swing_simulation_runs(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS event_pending_orders (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id       INTEGER NOT NULL,
+        signal_date  TEXT NOT NULL,
+        symbol       TEXT NOT NULL,
+        side         TEXT NOT NULL CHECK(side IN ('buy','sell')),
+        action       TEXT NOT NULL,
+        amount_ars   REAL,
+        quantity     REAL,
+        signal_price REAL NOT NULL,
+        trigger_event_type TEXT NOT NULL,
+        trigger_event_description TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','executed','cancelled')),
+        execute_date  TEXT,
+        execute_price REAL,
+        created_at   TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES event_simulation_runs(id)
     )
     """,
 ]

@@ -1045,6 +1045,11 @@ def _print_run_summary(r: dict) -> None:
     console.print(f"  Final ARS:   {r.get('final_value_ars', 0):,.0f}")
     if ret is not None:
         console.print(f"  Return:      [{ret_color}]{ret:+.1f}%[/{ret_color}]")
+    if r.get("estimated_gross_return_pct") is not None:
+        console.print(
+            f"  Gross est.:  {r['estimated_gross_return_pct']:+.2f}% "
+            f"(cost drag {r.get('cost_return_drag_pct_points', 0):.2f}pp)"
+        )
     if r.get("sharpe_ratio") is not None:
         console.print(f"  Sharpe:      {r['sharpe_ratio']:.3f}")
     if r.get("max_drawdown_pct") is not None:
@@ -1054,9 +1059,15 @@ def _print_run_summary(r: dict) -> None:
         console.print(f"  Win rate:    {m['win_rate_pct']:.1f}%")
     if r.get("cost_model_version"):
         console.print(f"  Cost model:  {r['cost_model_version']}")
-    if r.get("total_costs_ars"):
+    if r.get("trades", r.get("total_trades", 0)) is not None:
         console.print(f"  Costs ARS:   {r['total_costs_ars']:,.0f}")
         console.print(f"  Avg cost/tr: {r.get('avg_cost_per_trade_ars', 0):,.0f}")
+        console.print(f"  Cost drag:   {r.get('cost_drag_pct_gross', 0):.3f}% of gross")
+        console.print(f"  Cost cov:    {r.get('cost_coverage_pct', 0):.1f}%")
+    if r.get("price_source_counts"):
+        console.print(f"  Price src:   {r['price_source_counts']}")
+    if r.get("liquidity_warning_counts"):
+        console.print(f"  Liquidity:   {r['liquidity_warning_counts']}")
     if r.get("error_message"):
         console.print(f"  [red]Error: {r['error_message']}[/red]")
 
@@ -1071,6 +1082,8 @@ def _print_trades_table(trades: list) -> None:
     table.add_column("ARS", justify="right", width=12)
     table.add_column("Price", justify="right", width=10)
     table.add_column("Costs", justify="right", width=10)
+    table.add_column("Source", width=18)
+    table.add_column("Liq", width=18)
     table.add_column("Portfolio After", justify="right", width=16)
 
     _ACTION_COLORS = {"buy": "green", "trim": "yellow", "exit": "red"}
@@ -1083,6 +1096,8 @@ def _print_trades_table(trades: list) -> None:
             f"{t.get('amount_ars', 0):,.0f}",
             f"{t.get('price', 0):,.2f}",
             f"{t.get('total_cost_ars', 0):,.0f}" if t.get("total_cost_ars") else "-",
+            str(t.get("price_source") or "-"),
+            str(t.get("liquidity_warning") or "-"),
             f"{t.get('portfolio_value_after', 0):,.0f}",
         )
 
@@ -1092,6 +1107,8 @@ def _print_trades_table(trades: list) -> None:
 # ── Swing helpers ─────────────────────────────────────────────────────────────
 
 def _load_swing_run(conn, run_id: int) -> Optional[dict]:
+    from iol_engines.simulation.report import add_estimated_gross_return_fields, execution_quality_summary
+
     row = conn.execute(
         """
         SELECT id, bot_name, date_from, date_to, initial_cash, final_value,
@@ -1107,12 +1124,8 @@ def _load_swing_run(conn, run_id: int) -> Optional[dict]:
             "total_return_pct", "sharpe_ratio", "max_drawdown_pct", "win_rate_pct",
             "avg_hold_days", "total_trades", "mode", "created_at", "cost_model_version"]
     result = dict(zip(cols, row))
-    costs = conn.execute(
-        "SELECT COALESCE(SUM(total_cost_ars), 0), COUNT(*) FROM swing_simulation_trades WHERE run_id = ?",
-        (run_id,),
-    ).fetchone()
-    result["total_costs_ars"] = float(costs[0] or 0.0)
-    result["avg_cost_per_trade_ars"] = float(costs[0] or 0.0) / int(costs[1] or 1)
+    result.update(execution_quality_summary(conn, "swing_simulation_trades", run_id))
+    add_estimated_gross_return_fields(result, initial_key="initial_cash")
     return result
 
 
@@ -1126,6 +1139,11 @@ def _print_swing_run_summary(r: dict) -> None:
     console.print(f"  Final ARS:   {r.get('final_value', 0) or 0:,.0f}")
     if ret is not None:
         console.print(f"  Return:      [{ret_color}]{ret:+.1f}%[/{ret_color}]")
+    if r.get("estimated_gross_return_pct") is not None:
+        console.print(
+            f"  Gross est.:  {r['estimated_gross_return_pct']:+.2f}% "
+            f"(cost drag {r.get('cost_return_drag_pct_points', 0):.2f}pp)"
+        )
     if r.get("sharpe_ratio") is not None:
         console.print(f"  Sharpe:      {r['sharpe_ratio']:.3f}")
     if r.get("max_drawdown_pct") is not None:
@@ -1138,9 +1156,15 @@ def _print_swing_run_summary(r: dict) -> None:
         console.print(f"  Trades:      {r['total_trades']}")
     if r.get("cost_model_version"):
         console.print(f"  Cost model:  {r['cost_model_version']}")
-    if r.get("total_costs_ars"):
+    if r.get("trades", r.get("total_trades", 0)) is not None:
         console.print(f"  Costs ARS:   {r['total_costs_ars']:,.0f}")
         console.print(f"  Avg cost/tr: {r.get('avg_cost_per_trade_ars', 0):,.0f}")
+        console.print(f"  Cost drag:   {r.get('cost_drag_pct_gross', 0):.3f}% of gross")
+        console.print(f"  Cost cov:    {r.get('cost_coverage_pct', 0):.1f}%")
+    if r.get("price_source_counts"):
+        console.print(f"  Price src:   {r['price_source_counts']}")
+    if r.get("liquidity_warning_counts"):
+        console.print(f"  Liquidity:   {r['liquidity_warning_counts']}")
 
 
 def _print_swing_trades_table(trades: list) -> None:
@@ -1182,6 +1206,8 @@ def _print_swing_trades_table(trades: list) -> None:
 # ── Event helpers ─────────────────────────────────────────────────────────────
 
 def _load_event_run(conn, run_id: int) -> Optional[dict]:
+    from iol_engines.simulation.report import add_estimated_gross_return_fields, execution_quality_summary
+
     row = conn.execute(
         """
         SELECT id, bot_name, date_from, date_to, initial_cash, final_value,
@@ -1197,12 +1223,8 @@ def _load_event_run(conn, run_id: int) -> Optional[dict]:
             "total_return_pct", "sharpe_ratio", "max_drawdown_pct", "win_rate_pct",
             "total_events_triggered", "total_trades", "mode", "created_at", "cost_model_version"]
     result = dict(zip(cols, row))
-    costs = conn.execute(
-        "SELECT COALESCE(SUM(total_cost_ars), 0), COUNT(*) FROM event_simulation_trades WHERE run_id = ?",
-        (run_id,),
-    ).fetchone()
-    result["total_costs_ars"] = float(costs[0] or 0.0)
-    result["avg_cost_per_trade_ars"] = float(costs[0] or 0.0) / int(costs[1] or 1)
+    result.update(execution_quality_summary(conn, "event_simulation_trades", run_id))
+    add_estimated_gross_return_fields(result, initial_key="initial_cash")
     return result
 
 
@@ -1216,6 +1238,11 @@ def _print_event_run_summary(r: dict) -> None:
     console.print(f"  Final ARS:   {r.get('final_value', 0) or 0:,.0f}")
     if ret is not None:
         console.print(f"  Return:      [{ret_color}]{ret:+.1f}%[/{ret_color}]")
+    if r.get("estimated_gross_return_pct") is not None:
+        console.print(
+            f"  Gross est.:  {r['estimated_gross_return_pct']:+.2f}% "
+            f"(cost drag {r.get('cost_return_drag_pct_points', 0):.2f}pp)"
+        )
     if r.get("sharpe_ratio") is not None:
         console.print(f"  Sharpe:      {r['sharpe_ratio']:.3f}")
     if r.get("max_drawdown_pct") is not None:
@@ -1228,9 +1255,15 @@ def _print_event_run_summary(r: dict) -> None:
         console.print(f"  Trades:      {r['total_trades']}")
     if r.get("cost_model_version"):
         console.print(f"  Cost model:  {r['cost_model_version']}")
-    if r.get("total_costs_ars"):
+    if r.get("trades", r.get("total_trades", 0)) is not None:
         console.print(f"  Costs ARS:   {r['total_costs_ars']:,.0f}")
         console.print(f"  Avg cost/tr: {r.get('avg_cost_per_trade_ars', 0):,.0f}")
+        console.print(f"  Cost drag:   {r.get('cost_drag_pct_gross', 0):.3f}% of gross")
+        console.print(f"  Cost cov:    {r.get('cost_coverage_pct', 0):.1f}%")
+    if r.get("price_source_counts"):
+        console.print(f"  Price src:   {r['price_source_counts']}")
+    if r.get("liquidity_warning_counts"):
+        console.print(f"  Liquidity:   {r['liquidity_warning_counts']}")
 
 
 def _print_event_trades_table(trades: list) -> None:

@@ -658,6 +658,28 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(run_id) REFERENCES event_simulation_runs(id)
     )
     """,
+    # ── Event Pending Orders (T+1 execution queue) ───────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS event_pending_orders (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id       INTEGER NOT NULL,
+        signal_date  TEXT NOT NULL,
+        symbol       TEXT NOT NULL,
+        side         TEXT NOT NULL CHECK(side IN ('buy','sell')),
+        action       TEXT NOT NULL,
+        amount_ars   REAL,
+        quantity     REAL,
+        signal_price REAL NOT NULL,
+        trigger_event_type TEXT NOT NULL,
+        trigger_event_description TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','executed','cancelled')),
+        execute_date  TEXT,
+        execute_price REAL,
+        created_at   TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES event_simulation_runs(id)
+    )
+    """,
     # ── Simulation Framework ────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS simulation_bot_configs (
@@ -712,6 +734,28 @@ SCHEMA_STATEMENTS = [
         execution_price REAL,
         instrument_type TEXT,
         cost_model_json TEXT,
+        FOREIGN KEY(run_id) REFERENCES simulation_runs(id)
+    )
+    """,
+    # ── Daily Pending Orders (T+1 execution queue) ───────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS simulation_pending_orders (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id       INTEGER NOT NULL,
+        signal_date  TEXT NOT NULL,
+        symbol       TEXT NOT NULL,
+        side         TEXT NOT NULL CHECK(side IN ('buy','sell')),
+        action       TEXT,
+        amount_ars   REAL,
+        quantity     REAL,
+        signal_price REAL NOT NULL,
+        reason       TEXT,
+        engine_source TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','executed','cancelled')),
+        execute_date  TEXT,
+        execute_price REAL,
+        created_at   TEXT NOT NULL,
         FOREIGN KEY(run_id) REFERENCES simulation_runs(id)
     )
     """,

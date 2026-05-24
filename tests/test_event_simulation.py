@@ -38,8 +38,9 @@ def _insert_macro_snapshot(conn, as_of: str, argentina_stress: float, global_ris
             (as_of, argentina_macro_stress, global_risk_on,
              inflation_mom_pct, bcra_rate_pct, fed_rate_pct,
              us_cpi_yoy_pct, usd_ars_official, usd_ars_blue,
-             cedear_fx_premium_pct, sentiment_score)
-        VALUES (?, ?, ?, 5.0, 100.0, 5.0, 3.0, 1000.0, 1200.0, 20.0, 0.0)
+             cedear_fx_premium_pct, sentiment_score, created_at_utc)
+        VALUES (?, ?, ?, 5.0, 100.0, 5.0, 3.0, 1000.0, 1200.0, 20.0, 0.0,
+                '2025-01-01T00:00:00')
         """,
         (as_of, argentina_stress, global_risk_on),
     )
@@ -328,6 +329,98 @@ class TestEventRunner(unittest.TestCase):
             conn.close()
             tmp.cleanup()
 
+    def test_live_step_queues_event_signal_and_executes_next_day_open(self):
+        from iol_engines.simulation.event_runner import run_event_live_step
+
+        tmp, conn = _mk_db()
+        try:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO market_symbol_snapshots
+                    (snapshot_date, symbol, market, last_price, volume_amount, source)
+                VALUES (?, 'AAPL', 'bcba', ?, 1000000, 'test')
+                """,
+                [("2025-01-02", 100.0), ("2025-01-03", 112.0)],
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO symbol_daily_ohlcv
+                    (symbol, trade_date, open, high, low, close, source, updated_at)
+                VALUES ('AAPL', '2025-01-03', 110.0, 113.0, 109.0, 112.0, 'test', '2025-01-03T00:00:00Z')
+                """
+            )
+            _insert_macro_snapshot(conn, "2025-01-01", 50.0, 50.0)
+            _insert_macro_snapshot(conn, "2025-01-02", 50.0, 75.0)
+            conn.execute(
+                """
+                INSERT INTO advisor_opportunity_runs
+                    (created_at_utc, as_of, mode, universe, budget_ars, top_n, status, config_json)
+                VALUES ('2025-01-02T00:00:00Z', '2025-01-02', 'both', 'test', 100000, 10, 'done', '{}')
+                """
+            )
+            opp_run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                """
+                INSERT INTO advisor_opportunity_candidates
+                    (run_id, symbol, candidate_type, signal_side, signal_family,
+                     score_total, score_risk, score_value, score_momentum, score_catalyst,
+                     suggested_amount_ars, reason_summary, filters_passed, candidate_status)
+                VALUES (?, 'AAPL', 'test', 'buy', 'momentum', 80, 80, 80, 80, 80,
+                        10000, 'test buy', 1, 'operable')
+                """,
+                (opp_run_id,),
+            )
+            conn.commit()
+
+            ids_day_1 = run_event_live_step(
+                conn, ["event-adaptive"], "2025-01-02", initial_cash_ars=100_000.0, verbose=False
+            )
+            live_run_id = ids_day_1[0]
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM event_simulation_trades WHERE run_id=?", (live_run_id,)).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM event_pending_orders WHERE run_id=? AND signal_date='2025-01-02'",
+                    (live_run_id,),
+                ).fetchone()[0],
+                1,
+            )
+
+            run_event_live_step(
+                conn, ["event-adaptive"], "2025-01-03", initial_cash_ars=100_000.0, verbose=False
+            )
+            trade = conn.execute(
+                "SELECT price, trigger_event_type, cost_model_json FROM event_simulation_trades WHERE run_id=? ORDER BY id LIMIT 1",
+                (live_run_id,),
+            ).fetchone()
+            self.assertIsNotNone(trade)
+            self.assertEqual(trade["price"], 110.0)
+            self.assertEqual(trade["trigger_event_type"], "risk_on")
+            self.assertIn("symbol_daily_ohlcv.open", trade["cost_model_json"])
+            status = conn.execute(
+                "SELECT status, execute_date FROM event_pending_orders WHERE run_id=? AND signal_date='2025-01-02'",
+                (live_run_id,),
+            ).fetchone()
+            self.assertEqual(status["status"], "executed")
+            self.assertEqual(status["execute_date"], "2025-01-03")
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM event_pending_orders WHERE run_id=? AND status='pending'",
+                    (live_run_id,),
+                ).fetchone()[0],
+                0,
+            )
+            total_trades = conn.execute(
+                "SELECT total_trades FROM event_simulation_runs WHERE id=?",
+                (live_run_id,),
+            ).fetchone()
+            self.assertEqual(total_trades["total_trades"], 1)
+        finally:
+            conn.close()
+            tmp.cleanup()
+
     def test_db_schema_has_event_tables(self):
         tmp, conn = _mk_db()
         try:
@@ -336,6 +429,7 @@ class TestEventRunner(unittest.TestCase):
             ).fetchall()}
             self.assertIn("event_simulation_runs", tables)
             self.assertIn("event_simulation_trades", tables)
+            self.assertIn("event_pending_orders", tables)
         finally:
             conn.close()
             tmp.cleanup()

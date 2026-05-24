@@ -118,6 +118,36 @@ def _persist_trade(
     )
 
 
+def _persist_event_pending_order(
+    conn: sqlite3.Connection,
+    run_id: int,
+    signal_date: str,
+    order: Dict[str, Any],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO event_pending_orders
+            (run_id, signal_date, symbol, side, action, amount_ars, quantity,
+             signal_price, trigger_event_type, trigger_event_description,
+             status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        """,
+        (
+            run_id,
+            signal_date,
+            order["symbol"],
+            order["side"],
+            order["action"],
+            order.get("amount_ars"),
+            order.get("quantity"),
+            order["signal_price"],
+            order["event_type"],
+            order.get("event_description"),
+            datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        ),
+    )
+
+
 _BENCHMARK_SYMBOL = "SPY"
 
 
@@ -139,6 +169,95 @@ def _load_open_price(conn: sqlite3.Connection, symbol: str, date: str) -> Option
         (symbol, date),
     ).fetchone()
     return float(row[0]) if row and row[0] else None
+
+
+def _execute_event_pending_order(
+    conn: sqlite3.Connection,
+    run_id: int,
+    date: str,
+    order: Dict[str, Any],
+    portfolio: SimulatedPortfolio,
+    prices: Dict[str, float],
+    metadata: Dict[str, Dict[str, object]],
+    trade_pnls: List[float],
+    total_traded_ref: List[float],
+    total_trades_ref: List[int],
+) -> bool:
+    symbol = str(order.get("symbol") or "")
+    if not symbol:
+        return False
+    open_price = _load_open_price(conn, symbol, date)
+    price_source = "symbol_daily_ohlcv.open" if open_price else "fallback_last_price"
+    exec_price = open_price or prices.get(symbol)
+    if not exec_price:
+        return False
+
+    meta = metadata.get(symbol, {})
+    instrument_type = portfolio.cost_model.instrument_type_for(symbol, meta.get("instrument_type"))
+    volume_amount = meta.get("volume_amount") if isinstance(meta.get("volume_amount"), (int, float)) else None
+    side = str(order.get("side") or "buy")
+    action = str(order.get("action") or ("buy" if side == "buy" else "trim"))
+
+    if side == "buy":
+        fill = portfolio.buy(
+            symbol,
+            float(order.get("amount_ars") or 0.0),
+            float(exec_price),
+            instrument_type=instrument_type,
+            price_source=price_source,
+            volume_amount=volume_amount,
+        )
+    else:
+        quantity = float(order.get("quantity") or 0.0)
+        if quantity > 0:
+            fill = portfolio.sell_quantity(
+                symbol,
+                quantity,
+                float(exec_price),
+                instrument_type=instrument_type,
+                price_source=price_source,
+                volume_amount=volume_amount,
+            )
+        else:
+            fill = portfolio.sell(
+                symbol,
+                float(order.get("amount_ars") or 0.0),
+                float(exec_price),
+                instrument_type=instrument_type,
+                price_source=price_source,
+                volume_amount=volume_amount,
+            )
+
+    if fill.quantity <= 0:
+        return False
+    pnl = float(fill.realized_pnl_ars or 0.0) if side == "sell" else None
+    if pnl is not None:
+        trade_pnls.append(pnl)
+    total_traded_ref[0] += fill.gross_amount_ars
+    total_trades_ref[0] += 1
+    pv = portfolio.mark_to_market(prices)
+    _persist_trade(
+        conn,
+        run_id,
+        symbol,
+        date,
+        action,
+        fill.quantity,
+        float(exec_price),
+        fill.net_cash_impact_ars if side == "buy" else fill.gross_amount_ars,
+        pnl,
+        str(order.get("event_type") or ""),
+        str(order.get("event_description") or ""),
+        pv,
+        fill=fill,
+    )
+    if order.get("id") is not None:
+        conn.execute(
+            "UPDATE event_pending_orders SET status='executed', execute_date=?, execute_price=? WHERE id=?",
+            (date, float(exec_price), int(order["id"])),
+        )
+    conn.commit()
+    return True
 
 
 def _finalize_run(
@@ -185,6 +304,19 @@ def _finalize_run(
 
 
 def _mark_other_event_live_runs_stale(conn: sqlite3.Connection, keep_run_id: int, bot_name: str) -> None:
+    stale_ids = [
+        int(r[0])
+        for r in conn.execute(
+            """
+            SELECT id FROM event_simulation_runs
+            WHERE mode = 'live'
+              AND status = 'running'
+              AND bot_name = ?
+              AND id <> ?
+            """,
+            (bot_name, int(keep_run_id)),
+        ).fetchall()
+    ]
     conn.execute(
         """
         UPDATE event_simulation_runs
@@ -196,6 +328,12 @@ def _mark_other_event_live_runs_stale(conn: sqlite3.Connection, keep_run_id: int
         """,
         (bot_name, int(keep_run_id)),
     )
+    if stale_ids:
+        placeholders = ",".join("?" for _ in stale_ids)
+        conn.execute(
+            f"UPDATE event_pending_orders SET status='cancelled' WHERE status='pending' AND run_id IN ({placeholders})",
+            stale_ids,
+        )
 
 
 def _event_live_metrics(
@@ -235,7 +373,7 @@ def _execution_context(
     metadata: Dict[str, Dict[str, object]],
     symbol: str,
     *,
-    price_source: str = "market_symbol_snapshots",
+    price_source: str = "same_day_snapshot",
 ) -> Dict[str, Any]:
     meta = metadata.get(symbol, {})
     volume = meta.get("volume_amount")
@@ -260,30 +398,67 @@ def _apply_reaction(
     trade_pnls: List[float],
     total_traded_ref: List[float],
     total_trades_ref: List[int],
+    pending_orders: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Execute a single reaction rule triggered by an event."""
     total_value = portfolio.mark_to_market(prices)
     metadata = load_execution_metadata_for_date(conn, date)
+
+    def pending_buy_amount() -> float:
+        if pending_orders is None:
+            return 0.0
+        return sum(float(o.get("amount_ars") or 0.0) for o in pending_orders if o.get("side") == "buy")
+
+    def pending_buy_symbols() -> set[str]:
+        if pending_orders is None:
+            return set()
+        return {str(o.get("symbol")) for o in pending_orders if o.get("side") == "buy"}
+
+    def queue_order(
+        *,
+        symbol: str,
+        side: str,
+        action: str,
+        price: float,
+        amount_ars: Optional[float] = None,
+        quantity: Optional[float] = None,
+    ) -> bool:
+        if pending_orders is None:
+            return False
+        pending_orders.append({
+            "symbol": symbol,
+            "side": side,
+            "action": action,
+            "amount_ars": amount_ars,
+            "quantity": quantity,
+            "signal_price": price,
+            "event_type": event.event_type,
+            "event_description": event.description,
+        })
+        return True
 
     if rule.reaction == "buy_top_candidates":
         candidates = [
             (sym, score) for sym, score in opp_scores
             if sym in prices
             and score >= config.min_engine_score
-            and portfolio.n_positions < config.max_positions
+            and sym not in pending_buy_symbols()
+            and portfolio.n_positions + len(pending_buy_symbols()) < config.max_positions
         ][:rule.top_n]
         cash_to_deploy = total_value * rule.magnitude_pct
         per_position = cash_to_deploy / max(len(candidates), 1)
         min_cash = total_value * config.cash_reserve_pct
 
         for sym, _ in candidates:
-            if portfolio.n_positions >= config.max_positions:
+            if portfolio.n_positions + len(pending_buy_symbols()) >= config.max_positions:
                 break
             price = prices.get(sym)
             if not price:
                 continue
-            amount = min(per_position, portfolio.cash_ars - min_cash)
+            amount = min(per_position, portfolio.cash_ars - min_cash - pending_buy_amount())
             if amount < 500:
+                continue
+            if queue_order(symbol=sym, side="buy", action="buy", price=price, amount_ars=amount):
                 continue
             fill = portfolio.buy(sym, amount, price, **_execution_context(portfolio, metadata, sym))
             if fill.quantity <= 0:
@@ -304,6 +479,12 @@ def _apply_reaction(
             trim_amount = pos_val * rule.magnitude_pct
             if trim_amount < 100:
                 continue
+            pos = portfolio.holdings.get(sym)
+            if not pos:
+                continue
+            quantity = min(pos.quantity, trim_amount / price)
+            if queue_order(symbol=sym, side="sell", action="trim", price=price, quantity=quantity):
+                continue
             fill = portfolio.sell(sym, trim_amount, price, **_execution_context(portfolio, metadata, sym))
             if fill.quantity <= 0:
                 continue
@@ -321,6 +502,9 @@ def _apply_reaction(
             if not price:
                 continue
             pos_val = portfolio.position_value(sym, price)
+            pos = portfolio.holdings.get(sym)
+            if pos and queue_order(symbol=sym, side="sell", action="exit", price=price, quantity=pos.quantity):
+                continue
             fill = portfolio.sell(sym, pos_val, price, **_execution_context(portfolio, metadata, sym))
             if fill.quantity <= 0:
                 continue
@@ -351,6 +535,17 @@ def _apply_reaction(
                 continue
             pos_val = portfolio.position_value(sym, price)
             liquidate = min(pos_val, remaining_deficit)
+            pos = portfolio.holdings.get(sym)
+            action = "exit" if liquidate >= pos_val * 0.95 else "trim"
+            if pos and queue_order(
+                symbol=sym,
+                side="sell",
+                action=action,
+                price=price,
+                quantity=min(pos.quantity, liquidate / price),
+            ):
+                remaining_deficit -= liquidate
+                continue
             fill = portfolio.sell(sym, liquidate, price, **_execution_context(portfolio, metadata, sym))
             if fill.quantity <= 0:
                 continue
@@ -360,7 +555,6 @@ def _apply_reaction(
             total_trades_ref[0] += 1
             remaining_deficit -= liquidate
             pv = portfolio.mark_to_market(prices)
-            action = "exit" if liquidate >= pos_val * 0.95 else "trim"
             _persist_trade(conn, run_id, sym, date, action, fill.quantity, fill.effective_price,
                            fill.gross_amount_ars, pnl, event.event_type, event.description, pv, fill=fill)
 
@@ -370,8 +564,10 @@ def _apply_reaction(
             return
         price = prices[sym]
         min_cash = total_value * config.cash_reserve_pct
-        amount = min(total_value * rule.magnitude_pct, portfolio.cash_ars - min_cash)
-        if amount < 500 or portfolio.n_positions >= config.max_positions:
+        amount = min(total_value * rule.magnitude_pct, portfolio.cash_ars - min_cash - pending_buy_amount())
+        if amount < 500 or portfolio.n_positions + len(pending_buy_symbols()) >= config.max_positions:
+            return
+        if queue_order(symbol=sym, side="buy", action="buy", price=price, amount_ars=amount):
             return
         fill = portfolio.buy(sym, amount, price, **_execution_context(portfolio, metadata, sym))
         if fill.quantity <= 0:
@@ -394,6 +590,16 @@ def _apply_reaction(
         sell_amount = pos_val * rule.magnitude_pct
         if sell_amount < 100:
             return
+        pos = portfolio.holdings.get(sym)
+        action = "exit" if rule.magnitude_pct >= 0.95 else "trim"
+        if pos and queue_order(
+            symbol=sym,
+            side="sell",
+            action=action,
+            price=price,
+            quantity=min(pos.quantity, sell_amount / price),
+        ):
+            return
         fill = portfolio.sell(sym, sell_amount, price, **_execution_context(portfolio, metadata, sym))
         if fill.quantity <= 0:
             return
@@ -401,7 +607,6 @@ def _apply_reaction(
         trade_pnls.append(pnl)
         total_traded_ref[0] += fill.gross_amount_ars
         total_trades_ref[0] += 1
-        action = "exit" if rule.magnitude_pct >= 0.95 else "trim"
         pv = portfolio.mark_to_market(prices)
         _persist_trade(conn, run_id, sym, date, action, fill.quantity, fill.effective_price,
                        fill.gross_amount_ars, pnl, event.event_type, event.description, pv, fill=fill)
@@ -465,6 +670,7 @@ def run_event_backtest(
     total_trades_ref = [0]
     total_events = 0
     cost_basis: Dict[str, float] = {}
+    pending_orders: List[Dict[str, Any]] = []
 
     # Track last event date for cooldown
     last_event_date: Optional[str] = None
@@ -479,6 +685,17 @@ def run_event_backtest(
         if not prices:
             curve.append((date, portfolio.mark_to_market({})))
             continue
+
+        metadata = load_execution_metadata_for_date(conn, date)
+        carry_forward: List[Dict[str, Any]] = []
+        for order in list(pending_orders):
+            executed = _execute_event_pending_order(
+                conn, run_id, date, order, portfolio, prices, metadata,
+                trade_pnls, total_traded_ref, total_trades_ref,
+            )
+            if not executed:
+                carry_forward.append(order)
+        pending_orders[:] = carry_forward
 
         opp_scores = _load_opportunity_scores(conn, date)
         total_value = portfolio.mark_to_market(prices)
@@ -508,6 +725,7 @@ def run_event_backtest(
                             portfolio, rule, event, prices, opp_scores, config,
                             conn, run_id, date, cost_basis, trade_pnls,
                             total_traded_ref, total_trades_ref,
+                            pending_orders=pending_orders,
                         )
 
         if i % 20 == 0:
@@ -600,6 +818,7 @@ def run_event_live_step(
             ).fetchone()
             if enforce_cost_model_version and version_row and version_row[0] != cost_model.version:
                 conn.execute("UPDATE event_simulation_runs SET status='stale' WHERE id=?", (run_id,))
+                conn.execute("UPDATE event_pending_orders SET status='cancelled' WHERE run_id=? AND status='pending'", (run_id,))
                 run_id = _create_run_row(
                     conn, bot_name, f"{period}-01", as_of, initial_cash_ars,
                     mode="live", cost_model_version=cost_model.version,
@@ -623,14 +842,15 @@ def run_event_live_step(
         cost_basis: Dict[str, float] = {}
         trade_rows = conn.execute(
             """
-            SELECT symbol, action, quantity, price, amount_ars
+            SELECT symbol, action, quantity, price, amount_ars, net_amount_ars,
+                   total_cost_ars, cost_model_json
             FROM event_simulation_trades
             WHERE run_id = ?
             ORDER BY rowid ASC
             """,
             (run_id,),
         ).fetchall()
-        for sym, action, qty, price, amount in trade_rows:
+        for sym, action, qty, price, amount, net_amount, total_cost, cost_json in trade_rows:
             if action == "buy" and price:
                 qty_f = float(qty or 0.0)
                 amount_f = float(amount or 0.0)
@@ -645,9 +865,85 @@ def run_event_live_step(
                     portfolio.cash_ars -= amount_f
                     cost_basis[sym] = portfolio.holdings[sym].avg_price
             elif action in ("trim", "exit") and price:
-                portfolio.sell(sym, float(amount), float(price))
+                qty_f = float(qty or 0.0)
+                if qty_f <= 0 or sym not in portfolio.holdings:
+                    continue
+                try:
+                    fill_data = json.loads(cost_json or "{}")
+                except Exception:
+                    fill_data = {}
+                cash_in = (
+                    float(fill_data.get("net_cash_impact_ars"))
+                    if fill_data.get("net_cash_impact_ars") is not None
+                    else float(net_amount or 0.0) - float(total_cost or 0.0)
+                )
+                if cash_in <= 0:
+                    cash_in = float(amount or 0.0) - float(total_cost or 0.0)
+                pos = portfolio.holdings[sym]
+                remaining = pos.quantity - qty_f
+                if remaining < 0.0001:
+                    del portfolio.holdings[sym]
+                    cost_basis.pop(sym, None)
+                else:
+                    portfolio.holdings[sym] = Position(sym, remaining, pos.avg_price)
+                    cost_basis[sym] = pos.avg_price
+                portfolio.cash_ars += cash_in
 
-        # Check cooldown
+        already_today = conn.execute(
+            """
+            SELECT 1 FROM event_simulation_trades WHERE run_id=? AND trade_date=?
+            UNION ALL
+            SELECT 1 FROM event_pending_orders WHERE run_id=? AND signal_date=?
+            LIMIT 1
+            """,
+            (run_id, as_of, run_id, as_of),
+        ).fetchone()
+        if already_today:
+            log(f"  [dim]{bot_name}[/dim] - event step already processed for {as_of}, skipping.")
+            run_ids.append(run_id)
+            continue
+
+        total_events_triggered = 0
+        total_trades_ref = [0]
+        trade_pnls: List[float] = []
+        total_traded_ref = [0.0]
+        pending_rows = conn.execute(
+            """
+            SELECT id, symbol, side, action, amount_ars, quantity, signal_price,
+                   trigger_event_type, trigger_event_description
+            FROM event_pending_orders
+            WHERE run_id=? AND status='pending'
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+        pending_orders: List[Dict[str, Any]] = [
+            {
+                "id": row["id"],
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "action": row["action"],
+                "amount_ars": row["amount_ars"],
+                "quantity": row["quantity"],
+                "signal_price": row["signal_price"],
+                "event_type": row["trigger_event_type"],
+                "event_description": row["trigger_event_description"],
+            }
+            for row in pending_rows
+        ]
+        metadata = load_execution_metadata_for_date(conn, as_of)
+        carry_forward: List[Dict[str, Any]] = []
+        for order in list(pending_orders):
+            executed = _execute_event_pending_order(
+                conn, run_id, as_of, order, portfolio, prices, metadata,
+                trade_pnls, total_traded_ref, total_trades_ref,
+            )
+            if not executed:
+                carry_forward.append(order)
+        pending_orders[:] = carry_forward
+
+        # Check cooldown after pending executions so a T+1 fill prevents
+        # immediately re-queuing the same still-latest engine event.
         last_event_row = conn.execute(
             """
             SELECT MAX(trade_date) FROM event_simulation_trades
@@ -660,11 +956,6 @@ def run_event_live_step(
             last_event_date is not None
             and _days_between(last_event_date, as_of) < config.hold_after_event_days
         )
-
-        total_events_triggered = 0
-        total_trades_ref = [0]
-        trade_pnls: List[float] = []
-        total_traded_ref = [0.0]
 
         if not in_cooldown:
             rules_by_event: Dict[str, List[EventReactionRule]] = {}
@@ -681,7 +972,15 @@ def run_event_live_step(
                         portfolio, rule, event, prices, opp_scores, config,
                         conn, run_id, as_of, cost_basis, trade_pnls,
                         total_traded_ref, total_trades_ref,
+                        pending_orders=pending_orders,
                     )
+
+        queued_today = 0
+        for order in pending_orders:
+            if order.get("id") is None:
+                _persist_event_pending_order(conn, run_id, as_of, order)
+                queued_today += 1
+        conn.commit()
 
         final_val = portfolio.mark_to_market(prices)
 
@@ -723,6 +1022,7 @@ def run_event_live_step(
             "regime_score": round(float(_reg[1]), 1) if _reg else 50.0,
             "macro_stress": round(float(_mac[0]), 1) if _mac else 50.0,
             "events_triggered": total_events_triggered,
+            "pending_tomorrow": queued_today,
             "entries": step_entries,
             "exits": step_exits,
             "portfolio_value_ars": round(final_val, 2),

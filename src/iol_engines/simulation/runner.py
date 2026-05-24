@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .bot_config import BotConfig, get_preset
 from .metrics import EquityCurve, build_metrics_dict
 from .portfolio_sim import (
+    Position,
     SimulatedPortfolio,
     load_execution_metadata_for_date,
     load_prices_for_date,
@@ -90,6 +91,14 @@ def _load_engine_signals(
     macro = MacroMomentumEngine().load_latest(conn, as_of)
     smart_money = SmartMoneyEngine().load_latest(conn, as_of) or []
     return regime, macro, smart_money
+
+
+def _load_open_price(conn: sqlite3.Connection, symbol: str, date: str) -> Optional[float]:
+    row = conn.execute(
+        "SELECT open FROM symbol_daily_ohlcv WHERE symbol=? AND trade_date=?",
+        (symbol, date),
+    ).fetchone()
+    return float(row[0]) if row and row[0] else None
 
 
 def _rescore_with_engines(
@@ -231,6 +240,120 @@ def _persist_trade(
     )
 
 
+def _persist_pending_order(
+    conn: sqlite3.Connection,
+    run_id: int,
+    signal_date: str,
+    order: Dict[str, Any],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO simulation_pending_orders
+            (run_id, signal_date, symbol, side, action, amount_ars, quantity,
+             signal_price, reason, engine_source, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        """,
+        (
+            run_id,
+            signal_date,
+            order["symbol"],
+            order["side"],
+            order.get("action"),
+            order.get("amount_ars"),
+            order.get("quantity"),
+            order["signal_price"],
+            order.get("reason"),
+            order.get("engine_source"),
+            datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        ),
+    )
+
+
+def _execute_pending_order(
+    conn: sqlite3.Connection,
+    run_id: int,
+    date: str,
+    order: Dict[str, Any],
+    portfolio: SimulatedPortfolio,
+    prices: Dict[str, float],
+    metadata: Dict[str, Dict[str, object]],
+    trade_pnls: List[float],
+    total_traded_ref: List[float],
+) -> bool:
+    symbol = str(order.get("symbol") or "")
+    if not symbol:
+        return False
+    open_price = _load_open_price(conn, symbol, date)
+    price_source = "symbol_daily_ohlcv.open" if open_price else "fallback_last_price"
+    exec_price = open_price or prices.get(symbol)
+    if not exec_price:
+        return False
+
+    meta = metadata.get(symbol, {})
+    instrument_type = portfolio.cost_model.instrument_type_for(symbol, meta.get("instrument_type"))
+    volume_amount = meta.get("volume_amount") if isinstance(meta.get("volume_amount"), (int, float)) else None
+    side = str(order.get("side") or "buy")
+    action = str(order.get("action") or ("buy" if side == "buy" else "trim"))
+
+    if side == "buy":
+        fill = portfolio.buy(
+            symbol,
+            float(order.get("amount_ars") or 0.0),
+            float(exec_price),
+            instrument_type=instrument_type,
+            price_source=price_source,
+            volume_amount=volume_amount,
+        )
+    else:
+        quantity = float(order.get("quantity") or 0.0)
+        if quantity > 0:
+            fill = portfolio.sell_quantity(
+                symbol,
+                quantity,
+                float(exec_price),
+                instrument_type=instrument_type,
+                price_source=price_source,
+                volume_amount=volume_amount,
+            )
+        else:
+            fill = portfolio.sell(
+                symbol,
+                float(order.get("amount_ars") or 0.0),
+                float(exec_price),
+                instrument_type=instrument_type,
+                price_source=price_source,
+                volume_amount=volume_amount,
+            )
+
+    if fill.quantity <= 0:
+        return False
+    if side == "sell":
+        trade_pnls.append(float(fill.realized_pnl_ars or 0.0))
+    pv = portfolio.mark_to_market(prices)
+    _persist_trade(
+        conn,
+        run_id,
+        date,
+        symbol,
+        action,
+        fill.quantity,
+        float(exec_price),
+        fill.gross_amount_ars,
+        pv,
+        str(order.get("reason") or ""),
+        str(order.get("engine_source") or "simulation_t1"),
+        fill=fill,
+    )
+    total_traded_ref[0] += fill.gross_amount_ars
+    if order.get("id") is not None:
+        conn.execute(
+            "UPDATE simulation_pending_orders SET status='executed', execute_date=?, execute_price=? WHERE id=?",
+            (date, float(exec_price), int(order["id"])),
+        )
+    conn.commit()
+    return True
+
+
 def _finalize_run(
     conn: sqlite3.Connection,
     run_id: int,
@@ -246,6 +369,11 @@ def _finalize_run(
 ) -> None:
     metrics = build_metrics_dict(curve, trade_pnls, total_traded)
     final_value = curve[-1][1] if curve else 0.0
+    total_trades = conn.execute(
+        "SELECT COUNT(*) FROM simulation_trades WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()[0]
+    metrics["total_trades"] = int(total_trades or 0)
     conn.execute(
         """
         UPDATE simulation_runs SET
@@ -270,7 +398,7 @@ def _finalize_run(
             metrics["sharpe_ratio"],
             metrics["max_drawdown_pct"],
             metrics["win_rate_pct"],
-            len(trade_pnls),
+            metrics["total_trades"],
             json.dumps(metrics),
             error,
             1 if engine_driven else 0,
@@ -300,10 +428,23 @@ def _execute_trading_day(
     smart_money: List[Any] = None,
     use_engines: bool = True,
     engine_source: str = "simulation",
+    pending_orders: Optional[List[Dict[str, Any]]] = None,
 ) -> float:
     """Execute one trading day. Returns portfolio value after mark-to-market."""
     prices = load_prices_for_date(conn, date)
     metadata = load_execution_metadata_for_date(conn, date)
+
+    if pending_orders is not None:
+        carry_forward: List[Dict[str, Any]] = []
+        for order in list(pending_orders):
+            executed = _execute_pending_order(
+                conn, run_id, date, order, portfolio, prices, metadata,
+                trade_pnls, total_traded_ref,
+            )
+            if not executed:
+                carry_forward.append(order)
+        pending_orders[:] = carry_forward
+
     total_value = portfolio.mark_to_market(prices)
     curve.append((date, total_value))
 
@@ -349,12 +490,27 @@ def _execute_trading_day(
             if pos_value <= 0:
                 continue
             amount = pos_value if action_type == "exit" else pos_value * 0.33
+            quantity = portfolio.holdings[symbol].quantity if action_type == "exit" else amount / price
+
+            if pending_orders is not None:
+                pending_orders.append({
+                    "symbol": symbol,
+                    "side": "sell",
+                    "action": action_type,
+                    "amount_ars": amount,
+                    "quantity": quantity,
+                    "signal_price": price,
+                    "reason": reason,
+                    "engine_source": engine_source,
+                })
+                continue
 
             fill = portfolio.sell(
                 symbol,
                 amount,
                 price,
                 instrument_type=instrument_type,
+                price_source="same_day_snapshot",
                 volume_amount=volume_amount if isinstance(volume_amount, (int, float)) else None,
             )
             if fill.quantity <= 0:
@@ -369,6 +525,10 @@ def _execute_trading_day(
         else:
             max_by_weight = total_value * config.max_position_pct
             existing = portfolio.position_value(symbol, price)
+            pending_buy_count = (
+                len({o["symbol"] for o in pending_orders if o.get("side") == "buy"})
+                if pending_orders is not None else 0
+            )
             room = max_by_weight - existing
             if room <= 0:
                 continue
@@ -385,11 +545,28 @@ def _execute_trading_day(
             if amount < 100:
                 continue
 
+            if pending_orders is not None:
+                pending_orders.append({
+                    "symbol": symbol,
+                    "side": "buy",
+                    "action": "buy",
+                    "amount_ars": amount,
+                    "quantity": None,
+                    "signal_price": price,
+                    "reason": reason,
+                    "engine_source": engine_source,
+                })
+                deployed += amount
+                if portfolio.n_positions + pending_buy_count + 1 >= config.max_positions:
+                    break
+                continue
+
             fill = portfolio.buy(
                 symbol,
                 amount,
                 price,
                 instrument_type=instrument_type,
+                price_source="same_day_snapshot",
                 volume_amount=volume_amount if isinstance(volume_amount, (int, float)) else None,
             )
             if fill.quantity <= 0:
@@ -455,6 +632,7 @@ def run_backtest(
     trade_pnls: List[float] = []
     total_traded_ref = [0.0]
     cost_basis: Dict[str, float] = {}
+    pending_orders: List[Dict[str, Any]] = []
 
     # For regime context summary
     regime_scores: List[float] = []
@@ -477,6 +655,7 @@ def run_backtest(
                 trade_pnls, cost_basis, total_traded_ref,
                 regime=regime, macro=macro, smart_money=smart_money,
                 use_engines=use_engines,
+                pending_orders=pending_orders,
             )
 
             if i % 20 == 0:
@@ -541,6 +720,7 @@ def _find_or_create_live_run(
         ).fetchone()
         if cost_model_version and existing_version and existing_version[0] != cost_model_version:
             conn.execute("UPDATE simulation_runs SET status='stale' WHERE id=?", (row[0],))
+            conn.execute("UPDATE simulation_pending_orders SET status='cancelled' WHERE run_id=? AND status='pending'", (row[0],))
             conn.commit()
         else:
         # Re-open as running if it was marked done
@@ -559,6 +739,21 @@ def _find_or_create_live_run(
 
 
 def _mark_other_daily_live_runs_stale(conn: sqlite3.Connection, keep_run_id: int, bot_name: str) -> None:
+    stale_ids = [
+        int(r[0])
+        for r in conn.execute(
+            """
+            SELECT id FROM simulation_runs
+            WHERE mode = 'live'
+              AND status = 'running'
+              AND id <> ?
+              AND bot_config_id IN (
+                  SELECT id FROM simulation_bot_configs WHERE name = ?
+              )
+            """,
+            (int(keep_run_id), bot_name),
+        ).fetchall()
+    ]
     conn.execute(
         """
         UPDATE simulation_runs
@@ -572,6 +767,12 @@ def _mark_other_daily_live_runs_stale(conn: sqlite3.Connection, keep_run_id: int
         """,
         (int(keep_run_id), bot_name),
     )
+    if stale_ids:
+        placeholders = ",".join("?" for _ in stale_ids)
+        conn.execute(
+            f"UPDATE simulation_pending_orders SET status='cancelled' WHERE status='pending' AND run_id IN ({placeholders})",
+            stale_ids,
+        )
 
 
 def _daily_live_metrics(
@@ -613,7 +814,7 @@ def _reconstruct_portfolio(
     """Replay existing trades for run_id to rebuild in-memory portfolio state."""
     trades = conn.execute(
         """
-        SELECT symbol, action, quantity, price, amount_ars
+        SELECT symbol, action, quantity, price, amount_ars, total_cost_ars, cost_model_json
         FROM simulation_trades
         WHERE run_id = ?
         ORDER BY id ASC
@@ -624,14 +825,42 @@ def _reconstruct_portfolio(
     portfolio = SimulatedPortfolio(cash_ars=initial_cash_ars, cost_model=cost_model or ExecutionCostModel())
     cost_basis: Dict[str, float] = {}
 
-    for symbol, action, quantity, price, amount_ars in trades:
-        if price and price > 0:
-            if action == "buy":
-                portfolio.buy(symbol, amount_ars, price)
-                if symbol in portfolio.holdings:
-                    cost_basis[symbol] = portfolio.holdings[symbol].avg_price
-            elif action in ("trim", "exit"):
-                portfolio.sell(symbol, amount_ars, price)
+    for symbol, action, quantity, price, amount_ars, total_cost_ars, cost_json in trades:
+        qty = float(quantity or 0.0)
+        if qty <= 0:
+            continue
+        meta: Dict[str, Any] = {}
+        try:
+            meta = json.loads(cost_json or "{}")
+        except Exception:
+            meta = {}
+        if action == "buy":
+            cash_impact = meta.get("net_cash_impact_ars")
+            if cash_impact is None:
+                cash_impact = float(amount_ars or 0.0) + float(total_cost_ars or 0.0)
+            existing = portfolio.holdings.get(symbol)
+            if existing:
+                total_qty = existing.quantity + qty
+                total_basis = existing.cost_basis + float(cash_impact)
+                portfolio.holdings[symbol] = Position(symbol, total_qty, total_basis / total_qty)
+            else:
+                portfolio.holdings[symbol] = Position(symbol, qty, float(cash_impact) / qty)
+            portfolio.cash_ars -= float(cash_impact)
+            cost_basis[symbol] = portfolio.holdings[symbol].avg_price
+        elif action in ("trim", "exit"):
+            cash_impact = meta.get("net_cash_impact_ars")
+            if cash_impact is None:
+                cash_impact = max(0.0, float(amount_ars or 0.0) - float(total_cost_ars or 0.0))
+            pos = portfolio.holdings.get(symbol)
+            if pos:
+                remaining = pos.quantity - qty
+                if remaining <= 0.0001:
+                    del portfolio.holdings[symbol]
+                    cost_basis.pop(symbol, None)
+                else:
+                    portfolio.holdings[symbol] = Position(symbol, remaining, pos.avg_price)
+                    cost_basis[symbol] = pos.avg_price
+            portfolio.cash_ars += float(cash_impact)
 
     return portfolio, cost_basis
 
@@ -677,8 +906,7 @@ def run_live_step(
 
     candidates = _load_opportunity_candidates(conn, as_of)
     if not candidates:
-        log(f"[yellow]No opportunity candidates for {as_of} — skipping live step.[/yellow]")
-        return []
+        log(f"[yellow]No opportunity candidates for {as_of} — pending executions only.[/yellow]")
 
     for bot_name in bot_names:
         try:
@@ -692,15 +920,45 @@ def run_live_step(
         )
         portfolio, cost_basis = _reconstruct_portfolio(conn, run_id, initial_cash_ars, cost_model)
 
-        # Check if we already executed a step today for this run
+        # Check if we already executed or queued a step today for this run.
         already_today = conn.execute(
-            "SELECT 1 FROM simulation_trades WHERE run_id=? AND trade_date=? LIMIT 1",
-            (run_id, as_of),
+            """
+            SELECT 1 FROM simulation_trades WHERE run_id=? AND trade_date=?
+            UNION ALL
+            SELECT 1 FROM simulation_pending_orders WHERE run_id=? AND signal_date=?
+            LIMIT 1
+            """,
+            (run_id, as_of, run_id, as_of),
         ).fetchone()
         if already_today:
-            log(f"  [dim]{bot_name}[/dim] — step already executed for {as_of}, skipping.")
+            log(f"  [dim]{bot_name}[/dim] - step already processed for {as_of}, skipping.")
             run_ids.append(run_id)
             continue
+
+        pending_rows = conn.execute(
+            """
+            SELECT id, symbol, side, action, amount_ars, quantity, signal_price,
+                   reason, engine_source
+            FROM simulation_pending_orders
+            WHERE run_id=? AND status='pending'
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+        pending_orders: List[Dict[str, Any]] = [
+            {
+                "id": row["id"],
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "action": row["action"],
+                "amount_ars": row["amount_ars"],
+                "quantity": row["quantity"],
+                "signal_price": row["signal_price"],
+                "reason": row["reason"],
+                "engine_source": row["engine_source"],
+            }
+            for row in pending_rows
+        ]
 
         curve_so_far: EquityCurve = []
         trade_pnls: List[float] = []
@@ -712,7 +970,15 @@ def run_live_step(
             regime=regime, macro=macro, smart_money=smart_money,
             use_engines=True,
             engine_source="live_engine",
+            pending_orders=pending_orders,
         )
+
+        queued_today = 0
+        for order in pending_orders:
+            if order.get("id") is None:
+                _persist_pending_order(conn, run_id, as_of, order)
+                queued_today += 1
+        conn.commit()
 
         # Update the run's date_to and metrics
         final_val = portfolio.mark_to_market(prices)
@@ -759,7 +1025,7 @@ def run_live_step(
         log(
             f"  [cyan]{bot_name}[/cyan] #{run_id}  "
             f"value=[yellow]ARS {final_val:,.0f}[/yellow]  "
-            f"positions={portfolio.n_positions}"
+            f"positions={portfolio.n_positions}  pending_tomorrow={queued_today}"
         )
         run_ids.append(run_id)
 
