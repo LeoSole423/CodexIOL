@@ -561,6 +561,102 @@ def _enrich_with_quotes(
     return assets + extra
 
 
+def _market_for_symbol(conn, symbol: str, default: str = "bCBA") -> str:
+    row = conn.execute(
+        """
+        SELECT market FROM market_symbol_snapshots
+        WHERE symbol=? AND market IS NOT NULL AND market <> ''
+        ORDER BY snapshot_date DESC LIMIT 1
+        """,
+        (symbol,),
+    ).fetchone()
+    if row and row[0]:
+        return str(row[0])
+    row = conn.execute(
+        """
+        SELECT market FROM portfolio_assets
+        WHERE symbol=? AND market IS NOT NULL AND market <> ''
+        ORDER BY snapshot_date DESC LIMIT 1
+        """,
+        (symbol,),
+    ).fetchone()
+    return str(row[0]) if row and row[0] else default
+
+
+def _dedupe_watchlist(*watchlists: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    merged: List[Tuple[str, str]] = []
+    seen = set()
+    for watchlist in watchlists:
+        for symbol, market in watchlist or []:
+            sym = str(symbol or "").strip().upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            merged.append((sym, str(market or "bCBA").strip() or "bCBA"))
+    return merged
+
+
+def _collect_simulation_ohlcv_watchlist(conn, max_candidates: int = 40) -> List[Tuple[str, str]]:
+    """Return symbols whose next simulated execution may need a T+1 open price."""
+    symbols: List[str] = []
+
+    for table, run_table in (
+        ("simulation_pending_orders", "simulation_runs"),
+        ("swing_pending_orders", "swing_simulation_runs"),
+        ("event_pending_orders", "event_simulation_runs"),
+    ):
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT p.symbol
+            FROM {table} p
+            JOIN {run_table} r ON r.id = p.run_id
+            WHERE p.status='pending' AND r.status='running'
+            """
+        ).fetchall()
+        symbols.extend(str(r[0]).strip().upper() for r in rows if r[0])
+
+    rows = conn.execute(
+        """
+        SELECT DISTINCT t.symbol
+        FROM swing_simulation_trades t
+        JOIN swing_simulation_runs r ON r.id = t.run_id
+        WHERE r.status='running' AND t.exit_date IS NULL
+        """
+    ).fetchall()
+    symbols.extend(str(r[0]).strip().upper() for r in rows if r[0])
+
+    latest_run = conn.execute(
+        """
+        SELECT id FROM advisor_opportunity_runs
+        WHERE status IN ('done', 'ok')
+        ORDER BY as_of DESC, id DESC LIMIT 1
+        """
+    ).fetchone()
+    if latest_run:
+        rows = conn.execute(
+            """
+            SELECT symbol
+            FROM advisor_opportunity_candidates
+            WHERE run_id = ?
+              AND symbol IS NOT NULL
+              AND candidate_status NOT IN ('suppressed', 'rejected')
+            ORDER BY score_total DESC
+            LIMIT ?
+            """,
+            (latest_run[0], int(max_candidates)),
+        ).fetchall()
+        symbols.extend(str(r[0]).strip().upper() for r in rows if r[0])
+
+    result: List[Tuple[str, str]] = []
+    seen = set()
+    for symbol in symbols:
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        result.append((symbol, _market_for_symbol(conn, symbol)))
+    return result
+
+
 def _update_market_data(
     conn,
     assets: List[Dict[str, Any]],
@@ -750,8 +846,13 @@ def run_snapshot(
         )
         _log_run(conn, snapshot_day.isoformat(), retrieved_at, source, "ok", None)
         # Enrich portfolio assets with real OHLCV + volume, and add watchlist symbols
+        ohlcv_watchlist = _dedupe_watchlist(
+            getattr(config, "ohlcv_watchlist", []),
+            getattr(config, "opp_watchlist", []),
+            _collect_simulation_ohlcv_watchlist(conn),
+        )
         assets_for_ohlcv = _enrich_with_quotes(
-            client, list(assets), getattr(config, "ohlcv_watchlist", [])
+            client, list(assets), ohlcv_watchlist
         )
         _update_market_data(
             conn,
