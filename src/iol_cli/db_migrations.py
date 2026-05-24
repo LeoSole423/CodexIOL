@@ -166,9 +166,39 @@ _CREATE_IF_MISSING = [
 ]
 
 
+_DATA_CLEANUPS = [
+    """
+    UPDATE simulation_pending_orders
+    SET status='cancelled'
+    WHERE status='pending'
+      AND run_id IN (
+          SELECT id FROM simulation_runs WHERE status='stale'
+      )
+    """,
+    """
+    UPDATE swing_pending_orders
+    SET status='cancelled'
+    WHERE status='pending'
+      AND run_id IN (
+          SELECT id FROM swing_simulation_runs WHERE status='stale'
+      )
+    """,
+    """
+    UPDATE event_pending_orders
+    SET status='cancelled'
+    WHERE status='pending'
+      AND run_id IN (
+          SELECT id FROM event_simulation_runs WHERE status='stale'
+      )
+    """,
+]
+
+
 def apply_migrations(conn, ensure_columns) -> None:
     for table, columns in MIGRATION_COLUMNS.items():
         ensure_columns(conn, table, columns)
     for ddl in _CREATE_IF_MISSING:
         conn.execute(ddl)
+    for statement in _DATA_CLEANUPS:
+        conn.execute(statement)
     conn.commit()
