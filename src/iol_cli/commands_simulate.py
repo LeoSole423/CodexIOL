@@ -131,6 +131,152 @@ def _event_run_anomalies(conn: sqlite3.Connection, row: Dict[str, Any]) -> List[
     return flags
 
 
+def _t1_pending_rows(conn: sqlite3.Connection, family: str) -> List[Dict[str, Any]]:
+    specs = {
+        "daily": (
+            "simulation_pending_orders",
+            "simulation_runs",
+            "simulation_runs",
+            "symbol, side, action, amount_ars, quantity, signal_price",
+        ),
+        "swing": (
+            "swing_pending_orders",
+            "swing_simulation_runs",
+            "swing_simulation_runs",
+            "symbol, side, NULL AS action, amount_ars, quantity, signal_price",
+        ),
+        "event": (
+            "event_pending_orders",
+            "event_simulation_runs",
+            "event_simulation_runs",
+            "symbol, side, action, amount_ars, quantity, signal_price",
+        ),
+    }
+    pending_table, run_table, _, select_cols = specs[family]
+    rows = conn.execute(
+        f"""
+        SELECT p.id, p.run_id, r.status AS run_status, p.status AS order_status,
+               p.signal_date, {select_cols}
+        FROM {pending_table} p
+        JOIN {run_table} r ON r.id = p.run_id
+        WHERE p.status='pending'
+        ORDER BY r.status, p.signal_date, p.id
+        """
+    ).fetchall()
+    return [
+        {
+            "family": family,
+            "id": row["id"],
+            "run_id": row["run_id"],
+            "run_status": row["run_status"],
+            "order_status": row["order_status"],
+            "signal_date": row["signal_date"],
+            "symbol": row["symbol"],
+            "side": row["side"],
+            "action": row["action"],
+            "amount_ars": row["amount_ars"],
+            "quantity": row["quantity"],
+            "signal_price": row["signal_price"],
+        }
+        for row in rows
+    ]
+
+
+def _t1_execution_health(conn: sqlite3.Connection, as_of: str) -> Dict[str, Any]:
+    from iol_cli.snapshot import _collect_simulation_ohlcv_watchlist
+
+    pending_by_family: Dict[str, Dict[str, Any]] = {}
+    active_symbols: Dict[str, set[str]] = {}
+    stale_pending_total = 0
+    active_pending_total = 0
+    all_pending: List[Dict[str, Any]] = []
+    for family in ("daily", "swing", "event"):
+        rows = _t1_pending_rows(conn, family)
+        all_pending.extend(rows)
+        active = [r for r in rows if r["run_status"] == "running"]
+        stale = [r for r in rows if r["run_status"] == "stale"]
+        active_pending_total += len(active)
+        stale_pending_total += len(stale)
+        active_symbols[family] = {str(r["symbol"]).upper() for r in active if r.get("symbol")}
+        pending_by_family[family] = {
+            "active_pending": len(active),
+            "oldest_active_signal_date": min((r["signal_date"] for r in active), default=None),
+            "stale_pending": len(stale),
+            "oldest_stale_signal_date": min((r["signal_date"] for r in stale), default=None),
+        }
+
+    watchlist = _collect_simulation_ohlcv_watchlist(conn)
+    symbols: Dict[str, Dict[str, Any]] = {}
+    for sym, market in watchlist:
+        symbols.setdefault(sym, {"symbol": sym, "market": market, "sources": set()})
+        symbols[sym]["sources"].add("dynamic_ohlcv_watchlist")
+    for family, family_symbols in active_symbols.items():
+        for sym in family_symbols:
+            symbols.setdefault(sym, {"symbol": sym, "market": None, "sources": set()})
+            symbols[sym]["sources"].add(f"{family}_pending")
+
+    for sym, info in symbols.items():
+        open_row = conn.execute(
+            "SELECT open FROM symbol_daily_ohlcv WHERE symbol=? AND trade_date=? AND open IS NOT NULL",
+            (sym, as_of),
+        ).fetchone()
+        latest_open = conn.execute(
+            """
+            SELECT trade_date, open FROM symbol_daily_ohlcv
+            WHERE symbol=? AND open IS NOT NULL
+            ORDER BY trade_date DESC LIMIT 1
+            """,
+            (sym,),
+        ).fetchone()
+        latest_snapshot = conn.execute(
+            """
+            SELECT snapshot_date, last_price FROM market_symbol_snapshots
+            WHERE symbol=? AND last_price IS NOT NULL AND last_price > 0
+            ORDER BY snapshot_date DESC LIMIT 1
+            """,
+            (sym,),
+        ).fetchone()
+        info["has_open_as_of"] = bool(open_row)
+        info["open_as_of"] = float(open_row[0]) if open_row and open_row[0] is not None else None
+        info["latest_open_date"] = latest_open[0] if latest_open else None
+        info["latest_open"] = float(latest_open[1]) if latest_open and latest_open[1] is not None else None
+        info["latest_snapshot_date"] = latest_snapshot[0] if latest_snapshot else None
+        info["latest_last_price"] = float(latest_snapshot[1]) if latest_snapshot and latest_snapshot[1] is not None else None
+        info["would_fallback_on_as_of"] = (not info["has_open_as_of"]) and bool(latest_snapshot)
+        info["missing_price_for_as_of"] = (not info["has_open_as_of"]) and (not latest_snapshot)
+        info["sources"] = sorted(info["sources"])
+
+    symbol_rows = sorted(symbols.values(), key=lambda r: (not r["has_open_as_of"], r["symbol"]))
+    total_symbols = len(symbol_rows)
+    open_ready = sum(1 for r in symbol_rows if r["has_open_as_of"])
+    fallback = sum(1 for r in symbol_rows if r["would_fallback_on_as_of"])
+    missing_price = sum(1 for r in symbol_rows if r["missing_price_for_as_of"])
+    flags: List[str] = []
+    if active_pending_total:
+        flags.append("pending_t1_orders")
+    if stale_pending_total:
+        flags.append("stale_pending_orders")
+    if total_symbols and fallback / total_symbols > 0.25:
+        flags.append("fallback_last_price_high")
+    if missing_price:
+        flags.append("missing_t1_prices")
+
+    return {
+        "as_of": as_of,
+        "pending_by_family": pending_by_family,
+        "active_pending_total": active_pending_total,
+        "stale_pending_total": stale_pending_total,
+        "symbols_needed": total_symbols,
+        "open_ready": open_ready,
+        "open_ready_pct": round(open_ready * 100.0 / total_symbols, 2) if total_symbols else 0.0,
+        "fallback_needed": fallback,
+        "missing_price": missing_price,
+        "flags": flags,
+        "symbols": symbol_rows,
+        "pending_orders": all_pending,
+    }
+
+
 def build_simulate_app(
     *,
     print_json: Callable[[Any], None],
@@ -454,6 +600,80 @@ def build_simulate_app(
                 f"Run IDs: {', '.join(str(r) for r in run_ids)}"
             )
             console.print("View: [bold]iol simulate list[/bold]")
+
+    # ── T+1 health ──────────────────────────────────────────────────────────
+
+    @simulate_app.command("t1-health")
+    def t1_health(
+        ctx: typer.Context,
+        as_of: Optional[str] = typer.Option(None, "--as-of", help="Execution date YYYY-MM-DD"),
+        show_symbols: bool = typer.Option(False, "--symbols", help="Show per-symbol OHLCV readiness"),
+        json_out: bool = typer.Option(False, "--json"),
+    ):
+        """Diagnose T+1 pending orders and OHLCV open-price coverage."""
+        from datetime import date as _date
+        from rich.table import Table
+
+        from iol_cli.db import connect, init_db, resolve_db_path
+
+        target_date = as_of or _date.today().isoformat()
+        db_path = resolve_db_path(ctx.obj.config.db_path)
+        conn = connect(db_path)
+        init_db(conn)
+
+        result = _t1_execution_health(conn, target_date)
+        if json_out:
+            print_json(result)
+            return
+
+        console.rule(f"[bold]T+1 Execution Health - {target_date}[/bold]")
+        console.print(
+            f"  Pending active: [bold]{result['active_pending_total']}[/bold]  "
+            f"stale pending: [bold]{result['stale_pending_total']}[/bold]"
+        )
+        console.print(
+            f"  Symbols needed: [bold]{result['symbols_needed']}[/bold]  "
+            f"open ready: [bold]{result['open_ready']}[/bold] "
+            f"({result['open_ready_pct']:.1f}%)  "
+            f"fallback: [bold]{result['fallback_needed']}[/bold]  "
+            f"missing price: [bold]{result['missing_price']}[/bold]"
+        )
+        console.print(f"  Flags: {_format_anomalies(result['flags'])}")
+
+        family_table = Table(title="Pending Orders By Family", show_lines=False)
+        family_table.add_column("Family", width=10)
+        family_table.add_column("Active", justify="right", width=8)
+        family_table.add_column("Oldest active", width=14)
+        family_table.add_column("Stale", justify="right", width=8)
+        family_table.add_column("Oldest stale", width=14)
+        for family, row in result["pending_by_family"].items():
+            family_table.add_row(
+                family,
+                str(row["active_pending"]),
+                row["oldest_active_signal_date"] or "-",
+                str(row["stale_pending"]),
+                row["oldest_stale_signal_date"] or "-",
+            )
+        console.print(family_table)
+
+        if show_symbols:
+            symbol_table = Table(title="OHLCV Readiness", show_lines=False)
+            symbol_table.add_column("Symbol", width=10)
+            symbol_table.add_column("Open as-of", justify="right", width=12)
+            symbol_table.add_column("Latest open", width=13)
+            symbol_table.add_column("Latest snap", width=13)
+            symbol_table.add_column("Fallback", justify="center", width=9)
+            symbol_table.add_column("Sources", width=28)
+            for row in result["symbols"][:80]:
+                symbol_table.add_row(
+                    row["symbol"],
+                    f"{row['open_as_of']:,.2f}" if row["open_as_of"] is not None else "-",
+                    row["latest_open_date"] or "-",
+                    row["latest_snapshot_date"] or "-",
+                    "yes" if row["would_fallback_on_as_of"] else "no",
+                    ",".join(row["sources"]),
+                )
+            console.print(symbol_table)
 
     # ── compare-all ──────────────────────────────────────────────────────────
 
