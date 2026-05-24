@@ -39,7 +39,6 @@ def simulation_run(
     initial_cash_ars: float = 1_000_000.0,
 ):
     """Start a backtest in the background. Returns run_id immediately."""
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.bot_config import get_preset
     from iol_engines.simulation.runner import run_backtest, _create_run_row
 
@@ -50,9 +49,7 @@ def simulation_run(
 
     # Pre-create the run row synchronously so we can return its id.
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         run_id = _create_run_row(conn, config, date_from, date_to, initial_cash_ars)
         conn.close()
     except Exception as exc:
@@ -60,9 +57,7 @@ def simulation_run(
 
     def _run() -> None:
         try:
-            db_path2 = dbmod.resolve_db_path()
-            conn2 = connect(db_path2)
-            init_db(conn2)
+            conn2 = dbmod.get_conn_rw()
             run_backtest(
                 conn2, config, date_from, date_to, initial_cash_ars,
                 verbose=False, existing_run_id=run_id,
@@ -85,13 +80,10 @@ def simulation_list_runs(
     limit: int = 50,
 ):
     """List recent simulation runs."""
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.report import list_runs
 
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         runs = list_runs(conn, limit=limit, bot_name=bot)
         return {"count": len(runs), "runs": runs}
     except Exception as exc:
@@ -101,13 +93,10 @@ def simulation_list_runs(
 @router.get("/runs/{run_id}")
 def simulation_get_run(run_id: int):
     """Load a single simulation run with full metrics."""
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.report import load_run
 
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         result = load_run(conn, run_id)
         if result is None:
             return JSONResponse(status_code=404, content={"error": f"Run #{run_id} not found"})
@@ -119,13 +108,10 @@ def simulation_get_run(run_id: int):
 @router.get("/runs/{run_id}/trades")
 def simulation_get_trades(run_id: int, limit: int = 200):
     """Load paper trades for a simulation run."""
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.report import load_trades
 
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         trades = load_trades(conn, run_id, limit=limit)
         return {"run_id": run_id, "count": len(trades), "trades": trades}
     except Exception as exc:
@@ -135,7 +121,6 @@ def simulation_get_trades(run_id: int, limit: int = 200):
 @router.get("/compare")
 def simulation_compare(run_ids: str):
     """Compare multiple simulation runs. run_ids is comma-separated, e.g. '1,2,3'."""
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.report import compare_runs
 
     try:
@@ -144,9 +129,7 @@ def simulation_compare(run_ids: str):
         return JSONResponse(status_code=400, content={"error": "run_ids must be comma-separated integers"})
 
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         return compare_runs(conn, ids)
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
@@ -174,7 +157,6 @@ def swing_run(
     date_to: str = "2026-01-01",
     initial_cash_ars: float = 1_000_000.0,
 ):
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.swing_bot_config import get_swing_preset
     from iol_engines.simulation.swing_runner import run_swing_backtest, _create_run_row as _sw_create
 
@@ -184,9 +166,7 @@ def swing_run(
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         run_id = _sw_create(conn, config.name, date_from, date_to, initial_cash_ars)
         conn.close()
     except Exception as exc:
@@ -194,8 +174,7 @@ def swing_run(
 
     def _run() -> None:
         try:
-            c = connect(dbmod.resolve_db_path())
-            init_db(c)
+            c = dbmod.get_conn_rw()
             run_swing_backtest(c, config, date_from, date_to, initial_cash_ars,
                                verbose=False, existing_run_id=run_id)
         except Exception:
@@ -208,11 +187,8 @@ def swing_run(
 
 @router.get("/swing/runs")
 def swing_runs(bot: Optional[str] = None, limit: int = 50):
-    from iol_cli.db import connect, init_db
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         where = "WHERE bot_name = ?" if bot else ""
         params = (bot, limit) if bot else (limit,)
         rows = conn.execute(
@@ -233,11 +209,8 @@ def swing_runs(bot: Optional[str] = None, limit: int = 50):
 @router.get("/swing/runs/{run_id}")
 def swing_run_detail(run_id: int):
     import json as _json
-    from iol_cli.db import connect, init_db
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         row = conn.execute(
             "SELECT id, bot_name, date_from, date_to, initial_cash, final_value, "
             "total_return_pct, sharpe_ratio, max_drawdown_pct, win_rate_pct, "
@@ -262,11 +235,8 @@ def swing_run_detail(run_id: int):
 
 @router.get("/swing/runs/{run_id}/trades")
 def swing_run_trades(run_id: int, limit: int = 200):
-    from iol_cli.db import connect, init_db
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         rows = conn.execute(
             "SELECT id, symbol, entry_date, exit_date, entry_price, exit_price, "
             "quantity, amount_ars, pnl_ars, return_pct, hold_days, exit_reason "
@@ -302,7 +272,6 @@ def event_run(
     date_to: str = "2026-01-01",
     initial_cash_ars: float = 1_000_000.0,
 ):
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.event_bot_config import get_event_preset
     from iol_engines.simulation.event_runner import run_event_backtest, _create_run_row as _ev_create
 
@@ -312,9 +281,7 @@ def event_run(
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         run_id = _ev_create(conn, config.name, date_from, date_to, initial_cash_ars)
         conn.close()
     except Exception as exc:
@@ -322,8 +289,7 @@ def event_run(
 
     def _run() -> None:
         try:
-            c = connect(dbmod.resolve_db_path())
-            init_db(c)
+            c = dbmod.get_conn_rw()
             run_event_backtest(c, config, date_from, date_to, initial_cash_ars,
                                verbose=False, existing_run_id=run_id)
         except Exception:
@@ -336,11 +302,8 @@ def event_run(
 
 @router.get("/event/runs")
 def event_runs(bot: Optional[str] = None, limit: int = 50):
-    from iol_cli.db import connect, init_db
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         where = "WHERE bot_name = ?" if bot else ""
         params = (bot, limit) if bot else (limit,)
         rows = conn.execute(
@@ -361,11 +324,8 @@ def event_runs(bot: Optional[str] = None, limit: int = 50):
 @router.get("/event/runs/{run_id}")
 def event_run_detail(run_id: int):
     import json as _json
-    from iol_cli.db import connect, init_db
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         row = conn.execute(
             "SELECT id, bot_name, date_from, date_to, initial_cash, final_value, "
             "total_return_pct, sharpe_ratio, max_drawdown_pct, win_rate_pct, "
@@ -390,11 +350,8 @@ def event_run_detail(run_id: int):
 
 @router.get("/event/runs/{run_id}/trades")
 def event_run_trades(run_id: int, limit: int = 200):
-    from iol_cli.db import connect, init_db
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         rows = conn.execute(
             "SELECT id, symbol, trade_date, action, quantity, price, amount_ars, "
             "pnl_ars, trigger_event_type, trigger_event_description, portfolio_value_after "
@@ -411,14 +368,11 @@ def event_run_trades(run_id: int, limit: int = 200):
 @router.post("/swing/live-step")
 def swing_live_step(as_of: Optional[str] = None, initial_cash_ars: float = 1_000_000.0):
     from datetime import date as _date
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.swing_bot_config import list_swing_presets
     from iol_engines.simulation.swing_runner import run_swing_live_step
     target = as_of or _date.today().isoformat()
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         bot_names = [c.name for c in list_swing_presets()]
         run_ids = run_swing_live_step(conn, bot_names, target, initial_cash_ars)
         return {"as_of": target, "run_ids": run_ids, "status": "stepped"}
@@ -429,14 +383,11 @@ def swing_live_step(as_of: Optional[str] = None, initial_cash_ars: float = 1_000
 @router.post("/event/live-step")
 def event_live_step(as_of: Optional[str] = None, initial_cash_ars: float = 1_000_000.0):
     from datetime import date as _date
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.event_bot_config import list_event_presets
     from iol_engines.simulation.event_runner import run_event_live_step
     target = as_of or _date.today().isoformat()
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         bot_names = [c.name for c in list_event_presets()]
         run_ids = run_event_live_step(conn, bot_names, target, initial_cash_ars)
         return {"as_of": target, "run_ids": run_ids, "status": "stepped"}
@@ -448,12 +399,9 @@ def event_live_step(as_of: Optional[str] = None, initial_cash_ars: float = 1_000
 def live_summary():
     """Return all running bots (swing + event) with their latest plan_json and engine signals."""
     import json as _json
-    from iol_cli.db import connect, init_db
 
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
 
         swing_rows = conn.execute(
             "SELECT id, bot_name, initial_cash, final_value, total_return_pct, "
@@ -510,14 +458,11 @@ def live_summary():
 @router.get("/event/detect")
 def event_detect(as_of: Optional[str] = None):
     from datetime import date as _date
-    from iol_cli.db import connect, init_db
     from iol_engines.simulation.event_detector import detect_all_events
 
     target = as_of or _date.today().isoformat()
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         events = detect_all_events(conn, target)
         return {
             "as_of": target,

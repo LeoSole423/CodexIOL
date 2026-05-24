@@ -39,6 +39,7 @@ class EventBotConfig:
     position_size_pct: float
     min_engine_score: float
     hold_after_event_days: int  # Cooldown: don't react to new events for N days after last event
+    slippage_pct: float = 0.002  # One-way slippage fraction applied at buy/sell
 
 
 # ── Presets ───────────────────────────────────────────────────────────────────

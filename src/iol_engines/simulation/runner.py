@@ -27,9 +27,11 @@ from .bot_config import BotConfig, get_preset
 from .metrics import EquityCurve, build_metrics_dict
 from .portfolio_sim import (
     SimulatedPortfolio,
+    load_execution_metadata_for_date,
     load_prices_for_date,
     load_trading_dates,
 )
+from .cost_model import COST_MODEL_VERSION, ExecutionCostModel, ExecutionFill
 
 
 # Only re-run engine signal lookup every N trading days (they are date-keyed
@@ -145,6 +147,7 @@ def _create_run_row(
     date_to: str,
     initial_cash: float,
     mode: str = "backtest",
+    cost_model_version: Optional[str] = None,
 ) -> int:
     """Insert a simulation_runs row with status='running' and return its id."""
     cur = conn.cursor()
@@ -170,8 +173,8 @@ def _create_run_row(
         """
         INSERT INTO simulation_runs
             (created_at_utc, bot_config_id, date_from, date_to, status,
-             initial_value_ars, mode)
-        VALUES (?, ?, ?, ?, 'running', ?, ?)
+             initial_value_ars, mode, cost_model_version)
+        VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
         """,
         (
             datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -180,6 +183,7 @@ def _create_run_row(
             date_to,
             initial_cash,
             mode,
+            cost_model_version,
         ),
     )
     conn.commit()
@@ -198,16 +202,32 @@ def _persist_trade(
     portfolio_value: float,
     reason: str,
     engine_source: str = "simulation",
+    fill: Optional[ExecutionFill] = None,
 ) -> None:
+    fill_values = (
+        fill.gross_amount_ars if fill else None,
+        fill.net_amount_ars if fill else None,
+        fill.commission_ars if fill else None,
+        fill.market_fee_ars if fill else None,
+        fill.iva_ars if fill else None,
+        fill.slippage_ars if fill else None,
+        fill.total_cost_ars if fill else None,
+        fill.effective_price if fill else None,
+        fill.instrument_type if fill else None,
+        fill.to_json() if fill else None,
+    )
     conn.execute(
         """
         INSERT INTO simulation_trades
             (run_id, trade_date, symbol, action, quantity, price,
-             amount_ars, portfolio_value_after, reason, engine_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             amount_ars, portfolio_value_after, reason, engine_source,
+             gross_amount_ars, net_amount_ars, commission_ars, market_fee_ars,
+             iva_ars, slippage_ars, total_cost_ars, execution_price,
+             instrument_type, cost_model_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (run_id, date, symbol, action, quantity, price, amount_ars, portfolio_value,
-         reason, engine_source),
+         reason, engine_source, *fill_values),
     )
 
 
@@ -234,6 +254,8 @@ def _finalize_run(
             total_return_pct = ?,
             sharpe_ratio = ?,
             max_drawdown_pct = ?,
+            win_rate_pct = ?,
+            total_trades = ?,
             metrics_json = ?,
             error_message = ?,
             engine_driven = ?,
@@ -247,6 +269,8 @@ def _finalize_run(
             metrics["total_return_pct"],
             metrics["sharpe_ratio"],
             metrics["max_drawdown_pct"],
+            metrics["win_rate_pct"],
+            len(trade_pnls),
             json.dumps(metrics),
             error,
             1 if engine_driven else 0,
@@ -279,6 +303,7 @@ def _execute_trading_day(
 ) -> float:
     """Execute one trading day. Returns portfolio value after mark-to-market."""
     prices = load_prices_for_date(conn, date)
+    metadata = load_execution_metadata_for_date(conn, date)
     total_value = portfolio.mark_to_market(prices)
     curve.append((date, total_value))
 
@@ -311,6 +336,9 @@ def _execute_trading_day(
         score = float(c.get("score_total") or 0)
         reason = c.get("reason_summary") or ""
         price = prices.get(symbol)
+        meta = metadata.get(symbol, {})
+        instrument_type = portfolio.cost_model.instrument_type_for(symbol, meta.get("instrument_type"))
+        volume_amount = meta.get("volume_amount")
 
         if price is None or price <= 0:
             continue
@@ -322,14 +350,20 @@ def _execute_trading_day(
                 continue
             amount = pos_value if action_type == "exit" else pos_value * 0.33
 
-            cb = cost_basis.get(symbol, price)
-            trade_pnls.append((price - cb) * (amount / price))
-
-            qty = portfolio.sell(symbol, amount, price)
+            fill = portfolio.sell(
+                symbol,
+                amount,
+                price,
+                instrument_type=instrument_type,
+                volume_amount=volume_amount if isinstance(volume_amount, (int, float)) else None,
+            )
+            if fill.quantity <= 0:
+                continue
+            trade_pnls.append(float(fill.realized_pnl_ars or 0.0))
             pv = portfolio.mark_to_market(prices)
-            _persist_trade(conn, run_id, date, symbol, action_type, qty, price, amount, pv,
-                           reason, engine_source)
-            total_traded_ref[0] += amount
+            _persist_trade(conn, run_id, date, symbol, action_type, fill.quantity, price,
+                           fill.gross_amount_ars, pv, reason, engine_source, fill=fill)
+            total_traded_ref[0] += fill.gross_amount_ars
             conn.commit()
 
         else:
@@ -351,13 +385,21 @@ def _execute_trading_day(
             if amount < 100:
                 continue
 
-            qty = portfolio.buy(symbol, amount, price)
-            cost_basis[symbol] = price
-            deployed += amount
+            fill = portfolio.buy(
+                symbol,
+                amount,
+                price,
+                instrument_type=instrument_type,
+                volume_amount=volume_amount if isinstance(volume_amount, (int, float)) else None,
+            )
+            if fill.quantity <= 0:
+                continue
+            cost_basis[symbol] = portfolio.holdings[symbol].avg_price
+            deployed += fill.net_cash_impact_ars
             pv = portfolio.mark_to_market(prices)
-            _persist_trade(conn, run_id, date, symbol, "buy", qty, price, amount, pv,
-                           reason, engine_source)
-            total_traded_ref[0] += amount
+            _persist_trade(conn, run_id, date, symbol, "buy", fill.quantity, price,
+                           fill.gross_amount_ars, pv, reason, engine_source, fill=fill)
+            total_traded_ref[0] += fill.gross_amount_ars
             conn.commit()
 
             if portfolio.n_positions >= config.max_positions:
@@ -378,6 +420,7 @@ def run_backtest(
     verbose: bool = True,
     existing_run_id: Optional[int] = None,
     use_engines: bool = True,
+    cost_model: Optional[ExecutionCostModel] = None,
 ) -> int:
     """Run a full backtest. Returns the simulation_runs.id.
 
@@ -390,8 +433,10 @@ def run_backtest(
             from rich.console import Console
             Console().print(msg)
 
+    cost_model = cost_model or ExecutionCostModel()
     run_id = existing_run_id or _create_run_row(
-        conn, config, date_from, date_to, initial_cash_ars, mode="backtest"
+        conn, config, date_from, date_to, initial_cash_ars, mode="backtest",
+        cost_model_version=cost_model.version,
     )
     log(
         f"[bold]Backtest run #{run_id}[/bold] bot=[cyan]{config.name}[/cyan] "
@@ -400,12 +445,12 @@ def run_backtest(
 
     trading_dates = load_trading_dates(conn, date_from, date_to)
     if not trading_dates:
-        _finalize_run(conn, run_id, SimulatedPortfolio(initial_cash_ars), [], [], 0.0,
+        _finalize_run(conn, run_id, SimulatedPortfolio(initial_cash_ars, cost_model=cost_model), [], [], 0.0,
                       error="No market data found in date range")
         log("[red]No market data found.[/red]")
         return run_id
 
-    portfolio = SimulatedPortfolio(cash_ars=initial_cash_ars)
+    portfolio = SimulatedPortfolio(cash_ars=initial_cash_ars, cost_model=cost_model)
     curve: EquityCurve = []
     trade_pnls: List[float] = []
     total_traded_ref = [0.0]
@@ -473,6 +518,7 @@ def _find_or_create_live_run(
     config: BotConfig,
     as_of: str,
     initial_cash_ars: float,
+    cost_model_version: Optional[str] = None,
 ) -> int:
     """Find an active live run for this bot in the current month, or create one."""
     period = as_of[:7]  # YYYY-MM
@@ -489,18 +535,80 @@ def _find_or_create_live_run(
     )
     row = cur.fetchone()
     if row:
+        existing_version = conn.execute(
+            "SELECT cost_model_version FROM simulation_runs WHERE id = ?",
+            (row[0],),
+        ).fetchone()
+        if cost_model_version and existing_version and existing_version[0] != cost_model_version:
+            conn.execute("UPDATE simulation_runs SET status='stale' WHERE id=?", (row[0],))
+            conn.commit()
+        else:
         # Re-open as running if it was marked done
-        conn.execute("UPDATE simulation_runs SET status='running' WHERE id=?", (row[0],))
-        conn.commit()
-        return row[0]
+            conn.execute("UPDATE simulation_runs SET status='running' WHERE id=?", (row[0],))
+            _mark_other_daily_live_runs_stale(conn, int(row[0]), config.name)
+            conn.commit()
+            return row[0]
 
-    return _create_run_row(conn, config, f"{period}-01", as_of, initial_cash_ars, mode="live")
+    run_id = _create_run_row(
+        conn, config, f"{period}-01", as_of, initial_cash_ars, mode="live",
+        cost_model_version=cost_model_version,
+    )
+    _mark_other_daily_live_runs_stale(conn, run_id, config.name)
+    conn.commit()
+    return run_id
+
+
+def _mark_other_daily_live_runs_stale(conn: sqlite3.Connection, keep_run_id: int, bot_name: str) -> None:
+    conn.execute(
+        """
+        UPDATE simulation_runs
+        SET status = 'stale'
+        WHERE mode = 'live'
+          AND status = 'running'
+          AND id <> ?
+          AND bot_config_id IN (
+              SELECT id FROM simulation_bot_configs WHERE name = ?
+          )
+        """,
+        (int(keep_run_id), bot_name),
+    )
+
+
+def _daily_live_metrics(
+    conn: sqlite3.Connection,
+    run_id: int,
+    date_from: str,
+    as_of: str,
+    initial_cash_ars: float,
+    final_value: float,
+) -> Dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT trade_date, amount_ars, portfolio_value_after
+        FROM simulation_trades
+        WHERE run_id = ?
+        ORDER BY trade_date, id
+        """,
+        (int(run_id),),
+    ).fetchall()
+    curve: EquityCurve = [(date_from, float(initial_cash_ars))]
+    total_traded = 0.0
+    for row in rows:
+        total_traded += float(row["amount_ars"] or 0.0)
+        if row["portfolio_value_after"] is not None:
+            curve.append((str(row["trade_date"]), float(row["portfolio_value_after"])))
+    if not curve or curve[-1][0] != as_of or abs(curve[-1][1] - final_value) > 0.01:
+        curve.append((as_of, float(final_value)))
+    metrics = build_metrics_dict(curve, [], total_traded)
+    metrics["total_trades"] = len(rows)
+    return metrics
 
 
 def _reconstruct_portfolio(
     conn: sqlite3.Connection,
     run_id: int,
     initial_cash_ars: float,
+    cost_model: Optional[ExecutionCostModel] = None,
 ) -> Tuple[SimulatedPortfolio, Dict[str, float]]:
     """Replay existing trades for run_id to rebuild in-memory portfolio state."""
     trades = conn.execute(
@@ -513,14 +621,15 @@ def _reconstruct_portfolio(
         (run_id,),
     ).fetchall()
 
-    portfolio = SimulatedPortfolio(cash_ars=initial_cash_ars)
+    portfolio = SimulatedPortfolio(cash_ars=initial_cash_ars, cost_model=cost_model or ExecutionCostModel())
     cost_basis: Dict[str, float] = {}
 
     for symbol, action, quantity, price, amount_ars in trades:
         if price and price > 0:
             if action == "buy":
                 portfolio.buy(symbol, amount_ars, price)
-                cost_basis[symbol] = price
+                if symbol in portfolio.holdings:
+                    cost_basis[symbol] = portfolio.holdings[symbol].avg_price
             elif action in ("trim", "exit"):
                 portfolio.sell(symbol, amount_ars, price)
 
@@ -534,6 +643,7 @@ def run_live_step(
     initial_cash_ars: float = 1_000_000.0,
     *,
     verbose: bool = True,
+    cost_model: Optional[ExecutionCostModel] = None,
 ) -> List[int]:
     """Execute one paper-trading step for each bot. Called daily by the scheduler.
 
@@ -550,6 +660,7 @@ def run_live_step(
             Console().print(msg)
 
     run_ids = []
+    cost_model = cost_model or ExecutionCostModel()
 
     # Load today's engine signals once (shared across all bots)
     regime, macro, smart_money = _load_engine_signals(conn, as_of)
@@ -576,8 +687,10 @@ def run_live_step(
             log(f"[red]Unknown bot preset: {bot_name}[/red]")
             continue
 
-        run_id = _find_or_create_live_run(conn, config, as_of, initial_cash_ars)
-        portfolio, cost_basis = _reconstruct_portfolio(conn, run_id, initial_cash_ars)
+        run_id = _find_or_create_live_run(
+            conn, config, as_of, initial_cash_ars, cost_model_version=cost_model.version
+        )
+        portfolio, cost_basis = _reconstruct_portfolio(conn, run_id, initial_cash_ars, cost_model)
 
         # Check if we already executed a step today for this run
         already_today = conn.execute(
@@ -604,6 +717,13 @@ def run_live_step(
         # Update the run's date_to and metrics
         final_val = portfolio.mark_to_market(prices)
         regime_score = regime.regime_score if regime else None
+        run_row = conn.execute(
+            "SELECT date_from, initial_value_ars FROM simulation_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        run_date_from = str(run_row["date_from"] if run_row else as_of)
+        run_initial = float(run_row["initial_value_ars"] if run_row and run_row["initial_value_ars"] else initial_cash_ars)
+        metrics = _daily_live_metrics(conn, run_id, run_date_from, as_of, run_initial, final_val)
         conn.execute(
             """
             UPDATE simulation_runs SET
@@ -611,15 +731,27 @@ def run_live_step(
                 status = 'running',
                 final_value_ars = ?,
                 total_return_pct = ?,
+                sharpe_ratio = ?,
+                max_drawdown_pct = ?,
+                win_rate_pct = ?,
+                total_trades = ?,
+                metrics_json = ?,
                 engine_driven = 1,
-                avg_regime_score = ?
+                avg_regime_score = ?,
+                cost_model_version = ?
             WHERE id = ?
             """,
             (
                 as_of,
                 round(final_val, 2),
-                (final_val - initial_cash_ars) / initial_cash_ars * 100,
+                metrics["total_return_pct"],
+                metrics["sharpe_ratio"],
+                metrics["max_drawdown_pct"],
+                metrics["win_rate_pct"],
+                metrics["total_trades"],
+                json.dumps(metrics),
                 regime_score,
+                cost_model.version,
                 run_id,
             ),
         )

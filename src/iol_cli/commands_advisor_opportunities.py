@@ -2,6 +2,11 @@ from typing import Any, Callable, Optional
 
 import typer
 
+from .advisor_opportunity_support import (
+    load_opportunity_watchlist,
+    remove_opportunity_watchlist,
+    upsert_opportunity_watchlist,
+)
 from .db import connect, init_db, resolve_db_path
 from .opportunities import report_markdown
 from iol_advisor.continuous import (
@@ -235,3 +240,58 @@ def register_advisor_opportunity_commands(
             )
         finally:
             conn.close()
+
+    @advisor_opp_app.command("watchlist-list")
+    def advisor_opportunities_watchlist_list(ctx: typer.Context):
+        """List all symbols in the opportunity watchlist."""
+        db_path = resolve_db_path(ctx.obj.config.db_path)
+        conn = connect(db_path)
+        init_db(conn)
+        try:
+            rows = load_opportunity_watchlist(conn)
+        finally:
+            conn.close()
+        print_json([{"symbol": s, "market": m} for s, m in rows])
+
+    @advisor_opp_app.command("watchlist-add")
+    def advisor_opportunities_watchlist_add(
+        ctx: typer.Context,
+        symbol: str = typer.Argument(..., help="Symbol to add (e.g. ETSY)"),
+        market: str = typer.Option("bcba", "--market", help="Market (default: bcba)"),
+        notes: Optional[str] = typer.Option(None, "--notes", help="Optional notes"),
+    ):
+        """Add a symbol to the opportunity watchlist."""
+        from datetime import date as _date
+        db_path = resolve_db_path(ctx.obj.config.db_path)
+        conn = connect(db_path)
+        init_db(conn)
+        try:
+            inserted = upsert_opportunity_watchlist(
+                conn, [(symbol.strip().upper(), market.strip().lower())], added_at=_date.today().isoformat()
+            )
+            if notes and inserted:
+                conn.execute(
+                    "UPDATE opportunity_watchlist SET notes = ? WHERE symbol = ? AND market = ?",
+                    (notes, symbol.strip().upper(), market.strip().lower()),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        print_json({"ok": True, "symbol": symbol.strip().upper(), "market": market.strip().lower(), "inserted": inserted > 0})
+
+    @advisor_opp_app.command("watchlist-remove")
+    def advisor_opportunities_watchlist_remove(
+        ctx: typer.Context,
+        symbol: str = typer.Argument(..., help="Symbol to remove"),
+        market: str = typer.Option("bcba", "--market", help="Market (default: bcba)"),
+    ):
+        """Remove a symbol from the opportunity watchlist."""
+        db_path = resolve_db_path(ctx.obj.config.db_path)
+        conn = connect(db_path)
+        init_db(conn)
+        try:
+            removed = remove_opportunity_watchlist(conn, symbol, market)
+            conn.commit()
+        finally:
+            conn.close()
+        print_json({"ok": True, "symbol": symbol.strip().upper(), "market": market.strip().lower(), "removed": removed})

@@ -36,5 +36,11 @@ def ensure_columns(conn: sqlite3.Connection, table: str, columns: dict) -> None:
     existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table})").fetchall()}
     for name, ddl in columns.items():
         if name not in existing:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            try:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                existing.add(name)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+                existing.add(name)
     conn.commit()

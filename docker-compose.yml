@@ -22,7 +22,10 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    command: ["sh", "/app/scripts/scheduler_entrypoint.sh"]
+    command:
+      - sh
+      - -c
+      - "tr -d '\r' < /app/scripts/scheduler_entrypoint.sh > /tmp/scheduler_entrypoint.sh && exec sh /tmp/scheduler_entrypoint.sh"
   web:
     build: .
     container_name: iol-web

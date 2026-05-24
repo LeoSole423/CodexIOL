@@ -15,12 +15,16 @@ from .advisor_opportunity_support import (
     load_holdings_context_from_db,
     load_holdings_map_from_context,
     load_market_snapshot_rows,
+    load_ohlcv_volume_averages,
+    load_opportunity_watchlist,
+    upsert_opportunity_watchlist,
     normalize_enum,
     pick_symbols_for_web_link,
 )
 from .db import connect, init_db, resolve_db_path
 from .opportunities import (
     build_candidates,
+    compute_rolling_liquidity_by_symbol,
     latest_metrics_by_symbol,
     panel_rows,
     parse_iso_date,
@@ -54,6 +58,19 @@ def snapshot_universe_impl(
     holdings_map = load_holdings_map_from_context(ctx_payload)
     symbols = set(holdings_map.keys())
 
+    # Seed stable watchlist: upsert from config, then load all DB entries.
+    now_iso = date.today().isoformat()
+    conn = connect(db_path)
+    init_db(conn)
+    try:
+        upsert_opportunity_watchlist(conn, cli_ctx.config.opp_watchlist, added_at=now_iso)
+        conn.commit()
+        db_watchlist = load_opportunity_watchlist(conn)
+    finally:
+        conn.close()
+    for sym, _mkt in db_watchlist:
+        symbols.add(sym)
+
     client = get_client_fn(cli_ctx)
     panel_data: List[Dict[str, Any]] = []
     if universe_v == "bcba_cedears":
@@ -78,6 +95,10 @@ def snapshot_universe_impl(
             rows_to_upsert.append(snapshot_row_from_quote(as_of_v, sym, quote, market="bcba"))
         except Exception as exc:
             quote_errors.append({"symbol": sym, "error": str(exc)})
+
+    pipeline_warnings: List[str] = []
+    if len(panel_data) == 0 and db_watchlist:
+        pipeline_warnings.append("UNIVERSE_PARTIAL_PANEL")
 
     conn = connect(db_path)
     init_db(conn)
@@ -123,6 +144,8 @@ def snapshot_universe_impl(
         "rows_upserted": len(rows_to_upsert),
         "symbols_considered": len(symbols),
         "panel_rows": len(panel_data),
+        "watchlist_symbols": len(db_watchlist),
+        "pipeline_warnings": pipeline_warnings,
         "quote_errors": quote_errors,
     }
 
@@ -370,8 +393,16 @@ def run_opportunity_pipeline_impl(
             market_rows = load_market_snapshot_rows(conn, as_of_v)
             evidence_map = load_evidence_rows_grouped(conn, as_of_v, lookback_days=int(web_lookback_days))
             holdings_context = load_holdings_context_from_db(conn, as_of_v)
+            ohlcv_vol_avgs = load_ohlcv_volume_averages(conn, as_of_v, n_days=20)
         finally:
             conn.close()
+
+        liquidity_avgs = compute_rolling_liquidity_by_symbol(market_rows, as_of_v, n_days=20)
+        # Supplement avg_volume_amount with ohlcv when market_snapshots are sparse.
+        for sym, avg_vol in ohlcv_vol_avgs.items():
+            entry = liquidity_avgs.setdefault(sym, {})
+            if entry.get("avg_volume_amount") is None:
+                entry["avg_volume_amount"] = avg_vol
 
         latest_metrics = latest_metrics_by_symbol(market_rows, as_of_v)
         if not latest_metrics:
@@ -400,6 +431,7 @@ def run_opportunity_pipeline_impl(
             weights=dict(cfg.get("weights") or {}),
             thresholds=dict(cfg.get("thresholds") or {}),
             score_version=score_version,
+            liquidity_averages_by_symbol=liquidity_avgs,
         )
 
         pipeline_warnings: List[str] = []
@@ -543,6 +575,7 @@ def run_opportunity_pipeline_impl(
             score_version=score_version,
             target_weights_by_symbol=target_weights_by_symbol or None,
             min_actionable_score=45.0,
+            liquidity_averages_by_symbol=liquidity_avgs,
         )
         # ── Resolve buy/sell conflicts for the same symbol ───────────────────
         final_candidates = resolve_conflicts(final_candidates, target_weights_by_symbol or None)

@@ -14,7 +14,8 @@ def load_run(conn: sqlite3.Connection, run_id: int) -> Optional[Dict[str, Any]]:
         SELECT r.id, r.date_from, r.date_to, r.status, r.initial_value_ars,
                r.final_value_ars, r.total_return_pct, r.sharpe_ratio,
                r.max_drawdown_pct, r.metrics_json, r.error_message,
-               r.created_at_utc,
+               r.win_rate_pct, r.total_trades, r.mode, r.created_at_utc,
+               r.cost_model_version,
                c.name AS bot_name, c.description AS bot_description, c.config_json
         FROM simulation_runs r
         JOIN simulation_bot_configs c ON c.id = r.bot_config_id
@@ -27,6 +28,16 @@ def load_run(conn: sqlite3.Connection, run_id: int) -> Optional[Dict[str, Any]]:
         return None
     cols = [d[0] for d in cur.description]
     d = dict(zip(cols, row))
+    costs = conn.execute(
+        """
+        SELECT COALESCE(SUM(total_cost_ars), 0), COUNT(*)
+        FROM simulation_trades
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    d["total_costs_ars"] = float(costs[0] or 0.0)
+    d["avg_cost_per_trade_ars"] = float(costs[0] or 0.0) / int(costs[1] or 1)
     d["metrics"] = json.loads(d.pop("metrics_json") or "{}")
     d["bot_config"] = json.loads(d.pop("config_json") or "{}")
     return d
@@ -45,7 +56,7 @@ def list_runs(
         f"""
         SELECT r.id, r.date_from, r.date_to, r.status, r.initial_value_ars,
                r.final_value_ars, r.total_return_pct, r.sharpe_ratio,
-               r.max_drawdown_pct, r.created_at_utc,
+               r.max_drawdown_pct, r.win_rate_pct, r.total_trades, r.mode, r.created_at_utc,
                c.name AS bot_name
         FROM simulation_runs r
         JOIN simulation_bot_configs c ON c.id = r.bot_config_id
@@ -103,7 +114,8 @@ def load_trades(
     cur.execute(
         """
         SELECT trade_date, symbol, action, quantity, price, amount_ars,
-               portfolio_value_after, reason
+               portfolio_value_after, reason, total_cost_ars, execution_price,
+               instrument_type
         FROM simulation_trades
         WHERE run_id = ?
         ORDER BY trade_date, id

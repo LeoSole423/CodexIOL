@@ -29,14 +29,11 @@ def _resolve_date(as_of: Optional[str]) -> str:
 @router.get("/regime")
 def engines_regime(as_of: Optional[str] = None):
     """Return the latest cached market regime signal."""
-    from iol_cli.db import connect, init_db, resolve_db_path as cli_resolve
     from iol_engines.regime.engine import MarketRegimeEngine
 
     target = _resolve_date(as_of)
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         sig = MarketRegimeEngine().load_latest(conn, target)
         if sig is None:
             return {"as_of": target, "signal": None, "message": "No regime signal yet. Run: iol engines regime run"}
@@ -48,14 +45,11 @@ def engines_regime(as_of: Optional[str] = None):
 @router.get("/macro")
 def engines_macro(as_of: Optional[str] = None):
     """Return the latest cached macro momentum signal."""
-    from iol_cli.db import connect, init_db
     from iol_engines.macro.engine import MacroMomentumEngine
 
     target = _resolve_date(as_of)
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         sig = MacroMomentumEngine().load_latest(conn, target)
         if sig is None:
             return {"as_of": target, "signal": None, "message": "No macro signal yet. Run: iol engines macro run"}
@@ -71,14 +65,11 @@ def engines_smart_money(
     min_conviction: float = 0,
 ):
     """Return cached institutional 13F conviction signals."""
-    from iol_cli.db import connect, init_db
     from iol_engines.smart_money.engine import SmartMoneyEngine
 
     target = _resolve_date(as_of)
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         engine = SmartMoneyEngine()
         if symbol:
             sig = engine.load_latest(conn, target, symbol=symbol.upper())
@@ -101,14 +92,11 @@ def engines_smart_money(
 @router.get("/strategy")
 def engines_strategy(as_of: Optional[str] = None):
     """Return the latest cached strategy action plan."""
-    from iol_cli.db import connect, init_db
     from iol_engines.strategy.engine import PortfolioStrategyEngine
 
     target = _resolve_date(as_of)
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         plan = PortfolioStrategyEngine().load_latest(conn, target)
         if plan is None:
             return {
@@ -128,13 +116,10 @@ def engines_accuracy(
     update: bool = True,
 ):
     """Return signal accuracy metrics for each engine over the last N days."""
-    from iol_cli.db import connect, init_db
     from iol_engines.analysis.accuracy import compute_signal_outcomes, get_accuracy_report
 
     try:
-        db_path = dbmod.resolve_db_path()
-        conn = connect(db_path)
-        init_db(conn)
+        conn = dbmod.get_conn_rw()
         if update:
             compute_signal_outcomes(conn)
         report = get_accuracy_report(conn, days=days, engine=engine)
@@ -152,16 +137,13 @@ def engines_run_all(
     skip_external: bool = False,
 ):
     """Trigger full engine pipeline in the background. Returns immediately."""
-    from iol_cli.db import connect, init_db
     from iol_engines.registry import run_full_engine_pipeline
 
     target = _resolve_date(as_of)
 
     def _run() -> None:
         try:
-            db_path = dbmod.resolve_db_path()
-            conn = connect(db_path)
-            init_db(conn)
+            conn = dbmod.get_conn_rw()
             run_full_engine_pipeline(
                 target,
                 conn,

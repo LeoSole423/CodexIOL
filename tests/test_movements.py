@@ -45,12 +45,15 @@ class TestNormOrderSide:
 
     def test_amortizacion_is_bond_amortization(self):
         assert self._norm("pago de amortizacion") == "bond_amortization"
+        assert self._norm("bond_amortization") == "bond_amortization"
 
     def test_dividendos_is_dividend(self):
         assert self._norm("pago de dividendos") == "dividend"
+        assert self._norm("dividend") == "dividend"
 
     def test_renta_is_coupon(self):
         assert self._norm("pago de renta") == "coupon"
+        assert self._norm("coupon") == "coupon"
 
     def test_fees_unchanged(self):
         assert self._norm("comision") == "fee"
@@ -61,6 +64,18 @@ class TestNormOrderSide:
     def test_unknown_returns_none(self):
         assert self._norm("unknown_type") is None
         assert self._norm("") is None
+
+
+class TestSnapshotNormSide:
+    def _norm(self, v):
+        from src.iol_cli.snapshot import _norm_side
+        return _norm_side(v)
+
+    def test_non_trade_cash_income_is_not_ignored(self):
+        assert self._norm("pago de renta") == "coupon"
+        assert self._norm("Pago de Renta") == "coupon"
+        assert self._norm("pago de dividendos") == "dividend"
+        assert self._norm("pago de amortizacion") == "bond_amortization"
 
 
 # ---------------------------------------------------------------------------

@@ -400,20 +400,72 @@ def _infer_sector_bucket(symbol: str, rows: Sequence[Dict[str, Any]]) -> str:
     return best_sector
 
 
+def compute_rolling_liquidity_by_symbol(
+    rows: Sequence[Dict[str, Any]],
+    as_of: str,
+    n_days: int = 20,
+) -> Dict[str, Dict[str, Any]]:
+    """Single-pass N-day liquidity averages for all symbols in *rows*.
+
+    Returns {symbol: {avg_spread_pct, avg_operations_count, avg_volume_amount, days_with_data}}.
+    Each average is None when fewer than 3 observations exist (sparse data fallback).
+    """
+    cutoff = (date.fromisoformat(as_of) - timedelta(days=int(n_days))).isoformat()
+    spreads: Dict[str, List[float]] = {}
+    ops_acc: Dict[str, List[float]] = {}
+    vols: Dict[str, List[float]] = {}
+    seen: Dict[str, set] = {}
+    for r in rows:
+        d = str(r.get("snapshot_date") or "")
+        s = str(r.get("symbol") or "")
+        if not s or not d or d > as_of or d < cutoff:
+            continue
+        seen.setdefault(s, set()).add(d)
+        v = _safe_float(r.get("spread_pct"))
+        if v is not None:
+            spreads.setdefault(s, []).append(v)
+        v = _safe_float(r.get("operations_count"))
+        if v is not None:
+            ops_acc.setdefault(s, []).append(v)
+        v = _safe_float(r.get("volume_amount"))
+        if v is not None:
+            vols.setdefault(s, []).append(v)
+
+    def _avg(lst: List[float]) -> Optional[float]:
+        return sum(lst) / float(len(lst)) if len(lst) >= 3 else None
+
+    all_syms = set(seen)
+    return {
+        sym: {
+            "avg_spread_pct": _avg(spreads.get(sym, [])),
+            "avg_operations_count": _avg(ops_acc.get(sym, [])),
+            "avg_volume_amount": _avg(vols.get(sym, [])),
+            "days_with_data": len(seen.get(sym, set())),
+        }
+        for sym in all_syms
+    }
+
+
 def _liquidity_score(
     *,
     spread_pct: Optional[float],
     operations_count: Optional[float],
     volume_amount: Optional[float],
+    avg_spread_pct: Optional[float] = None,
+    avg_operations_count: Optional[float] = None,
+    avg_volume_amount: Optional[float] = None,
 ) -> float:
+    eff_spread = avg_spread_pct if avg_spread_pct is not None else spread_pct
+    eff_ops = avg_operations_count if avg_operations_count is not None else operations_count
+    eff_vol = avg_volume_amount if avg_volume_amount is not None else volume_amount
     score = 50.0
-    if spread_pct is not None:
-        score += clamp((2.5 - float(spread_pct)) * 12.0, -20.0, 20.0)
-    if operations_count is not None:
-        ops = max(0.0, float(operations_count))
+    if eff_spread is not None:
+        score += clamp((2.5 - float(eff_spread)) * 12.0, -20.0, 20.0)
+    if eff_ops is not None:
+        ops = max(0.0, float(eff_ops))
         score += clamp((ops - 5.0) * 0.8, -15.0, 20.0)
-    if volume_amount is not None:
-        vol = max(0.0, float(volume_amount))
+    if eff_vol is not None:
+        vol = max(0.0, float(eff_vol))
         score += clamp((vol / 100000.0) * 10.0, -10.0, 20.0)
     return clamp(score, 0.0, 100.0)
 
@@ -466,10 +518,16 @@ def evidence_stats(rows: Sequence[Dict[str, Any]], as_of: str) -> Dict[str, Any]
     catalyst = clamp(catalyst_raw * 15.0, 0.0, 100.0)
 
     # "Unresolved conflict": same non-empty conflict_key with distinct claims in last 45d.
+    # Only applies to engine-generated or manually-curated evidence (conflict_key set explicitly).
+    # Auto-ingested sources (news/sec/reuters) use conflict_key=None to avoid false positives
+    # from multiple distinct events (e.g. different SEC filing types) being treated as conflicts.
+    _AUTO_SOURCE_SUFFIXES = (":news", ":sec", ":reuters")
     by_key: Dict[str, set] = {}
     for r in recent_45:
         k = str(r.get("conflict_key") or "").strip()
         if not k:
+            continue
+        if any(k.endswith(s) for s in _AUTO_SOURCE_SUFFIXES):
             continue
         claim = str(r.get("claim") or "").strip()
         if not claim:
@@ -851,6 +909,7 @@ def build_candidates(
     score_version: str = "baseline_v1",
     target_weights_by_symbol: Optional[Dict[str, float]] = None,
     min_actionable_score: float = 0.0,
+    liquidity_averages_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[OpportunityCandidate]:
     mode_n = (mode or "").strip().lower()
     weight_cfg = dict(weights or {"risk": 0.35, "value": 0.20, "momentum": 0.35, "catalyst": 0.10})
@@ -911,10 +970,14 @@ def build_candidates(
         spread = _safe_float(m.get("spread_pct"))
         ops = _safe_float(m.get("operations_count"))
         volume_amount = _safe_float(m.get("volume_amount"))
+        liq_avgs = (liquidity_averages_by_symbol or {}).get(symbol) or {}
         liq_score = _liquidity_score(
             spread_pct=spread,
             operations_count=ops,
             volume_amount=volume_amount,
+            avg_spread_pct=liq_avgs.get("avg_spread_pct"),
+            avg_operations_count=liq_avgs.get("avg_operations_count"),
+            avg_volume_amount=liq_avgs.get("avg_volume_amount"),
         )
 
         if bid is not None and ask is not None and bid > 0 and ask > 0:

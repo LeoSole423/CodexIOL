@@ -166,7 +166,7 @@ def fetch_google_news_rss(
                     topic="market_news",
                     run_stage=run_stage,
                 ),
-                "conflict_key": f"{sym}:news",
+                "conflict_key": None,
             }
         )
     return out, None
@@ -258,7 +258,7 @@ def fetch_sec_filings(
                     run_stage=run_stage,
                     sic_description=sic_description or None,
                 ),
-                "conflict_key": f"{sym}:sec",
+                "conflict_key": None,
             }
         )
     return out, None
@@ -315,7 +315,7 @@ def fetch_reuters_rss(
                     topic="market_outlook",
                     run_stage=run_stage,
                 ),
-                "conflict_key": f"{sym}:reuters",
+                "conflict_key": None,
             }
         )
         if len(out) >= int(per_source_limit):

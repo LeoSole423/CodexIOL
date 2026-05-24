@@ -196,6 +196,15 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS opportunity_watchlist (
+        symbol      TEXT NOT NULL,
+        market      TEXT NOT NULL DEFAULT 'bcba',
+        added_at    TEXT NOT NULL,
+        notes       TEXT,
+        PRIMARY KEY (symbol, market)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS portfolio_target_weights (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         symbol TEXT NOT NULL,
@@ -525,7 +534,12 @@ SCHEMA_STATEMENTS = [
         avg_hold_days REAL,
         total_trades INTEGER,
         mode TEXT NOT NULL DEFAULT 'backtest',
-        created_at TEXT NOT NULL
+        status TEXT NOT NULL DEFAULT 'running',
+        created_at TEXT NOT NULL,
+        benchmark_symbol TEXT DEFAULT 'SPY',
+        benchmark_return_pct REAL,
+        cost_model_version TEXT,
+        plan_json TEXT
     )
     """,
     """
@@ -545,6 +559,16 @@ SCHEMA_STATEMENTS = [
         exit_reason TEXT,
         entry_signals_json TEXT,
         exit_signals_json TEXT,
+        gross_amount_ars REAL,
+        net_amount_ars REAL,
+        commission_ars REAL,
+        market_fee_ars REAL,
+        iva_ars REAL,
+        slippage_ars REAL,
+        total_cost_ars REAL,
+        execution_price REAL,
+        instrument_type TEXT,
+        cost_model_json TEXT,
         FOREIGN KEY(run_id) REFERENCES swing_simulation_runs(id)
     )
     """,
@@ -564,6 +588,25 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(run_id) REFERENCES swing_simulation_runs(id)
     )
     """,
+    # ── Swing Pending Orders (T+1 execution queue) ───────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS swing_pending_orders (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id       INTEGER NOT NULL,
+        signal_date  TEXT NOT NULL,
+        symbol       TEXT NOT NULL,
+        side         TEXT NOT NULL CHECK(side IN ('buy','sell')),
+        amount_ars   REAL,
+        quantity     REAL,
+        signal_price REAL NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','executed','cancelled')),
+        execute_date  TEXT,
+        execute_price REAL,
+        created_at   TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES swing_simulation_runs(id)
+    )
+    """,
     # ── Event-Driven Simulation ───────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS event_simulation_runs (
@@ -580,7 +623,12 @@ SCHEMA_STATEMENTS = [
         total_events_triggered INTEGER,
         total_trades INTEGER,
         mode TEXT NOT NULL DEFAULT 'backtest',
-        created_at TEXT NOT NULL
+        status TEXT NOT NULL DEFAULT 'running',
+        created_at TEXT NOT NULL,
+        benchmark_symbol TEXT DEFAULT 'SPY',
+        benchmark_return_pct REAL,
+        cost_model_version TEXT,
+        plan_json TEXT
     )
     """,
     """
@@ -597,6 +645,16 @@ SCHEMA_STATEMENTS = [
         trigger_event_type TEXT NOT NULL,
         trigger_event_description TEXT,
         portfolio_value_after REAL,
+        gross_amount_ars REAL,
+        net_amount_ars REAL,
+        commission_ars REAL,
+        market_fee_ars REAL,
+        iva_ars REAL,
+        slippage_ars REAL,
+        total_cost_ars REAL,
+        execution_price REAL,
+        instrument_type TEXT,
+        cost_model_json TEXT,
         FOREIGN KEY(run_id) REFERENCES event_simulation_runs(id)
     )
     """,
@@ -623,8 +681,11 @@ SCHEMA_STATEMENTS = [
         total_return_pct REAL,
         sharpe_ratio REAL,
         max_drawdown_pct REAL,
+        win_rate_pct REAL,
+        total_trades INTEGER,
         metrics_json TEXT,
         error_message TEXT,
+        cost_model_version TEXT,
         FOREIGN KEY(bot_config_id) REFERENCES simulation_bot_configs(id)
     )
     """,
@@ -641,6 +702,16 @@ SCHEMA_STATEMENTS = [
         portfolio_value_after REAL,
         reason TEXT,
         engine_source TEXT,
+        gross_amount_ars REAL,
+        net_amount_ars REAL,
+        commission_ars REAL,
+        market_fee_ars REAL,
+        iva_ars REAL,
+        slippage_ars REAL,
+        total_cost_ars REAL,
+        execution_price REAL,
+        instrument_type TEXT,
+        cost_model_json TEXT,
         FOREIGN KEY(run_id) REFERENCES simulation_runs(id)
     )
     """,
@@ -763,6 +834,7 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_engine_outcomes_engine_asof ON engine_signal_outcomes(engine_name, as_of)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_engine_outcomes_engine_asof ON engine_signal_outcomes(engine_name, as_of)",
     # market data ohlcv indexes
+    "CREATE INDEX IF NOT EXISTS idx_opp_watchlist_symbol ON opportunity_watchlist(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_date ON symbol_daily_ohlcv(symbol, trade_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_ticks_symbol_date ON symbol_intraday_ticks(symbol, trade_date, tick_time)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_ticks_symbol_time ON symbol_intraday_ticks(symbol, tick_time)",

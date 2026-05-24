@@ -92,16 +92,19 @@ iol data query "SELECT snapshot_date, total_value FROM portfolio_snapshots"
 
 ## Variables de entorno
 
-Copiar `.env.example` → `.env`. Variables requeridas:
+Copiar `.env.example` → `.env`. Variables principales:
 
 ```bash
 IOL_USERNAME=            # Credenciales InvertirOnline
 IOL_PASSWORD=
 IOL_API_URL=https://api.invertironline.com
 IOL_DB_PATH=data/iol_history.db
-IOL_SEC_CONTACT_EMAIL=   # Para SEC EDGAR (smart money engine)
 IOL_MARKET_TZ=America/Argentina/Buenos_Aires
+IOL_SEC_CONTACT_EMAIL=   # Para SEC EDGAR (smart money engine)
+IOL_OPP_WATCHLIST=       # Símbolos evaluados siempre por el motor de oportunidades (CSV "SYM:market")
 ```
+
+Ver `.env.example` para variables opcionales (timeouts, comisiones, OHLCV watchlist, user agent, etc.).
 
 Frontend en Docker usa `API_BASE_URL=http://web:8000` (servicio interno).
 
@@ -156,7 +159,14 @@ Corren en secuencia con caché en DB para evitar re-fetch innecesario:
 | 4 | Opportunity | adapter | Pondera señales anteriores |
 | 5 | Strategy | siempre fresco | Solo lecturas de DB |
 
-Endpoints: `GET /api/engines/signals`, `GET /api/engines/plan`
+Endpoints:
+
+- `GET /api/engines/regime`
+- `GET /api/engines/macro`
+- `GET /api/engines/smart-money`
+- `GET /api/engines/strategy`
+- `GET /api/engines/accuracy`
+- `POST /api/engines/run-all`
 
 ---
 
@@ -166,8 +176,15 @@ Tablas principales (ver `src/iol_cli/db_schema.py` para definición completa):
 
 - `portfolio_snapshots`, `portfolio_assets`, `portfolio_transactions`
 - `advisor_alerts`, `advisor_events`, `advisor_opportunities_runs`, `advisor_opportunities_scores`
-- `engine_regime_snapshots`, `engine_macro_snapshots`, `engine_smart_money_signals`, `engine_strategy_plans`
+- `opportunity_watchlist` — símbolos siempre evaluados por el motor de oportunidades (fallback estable al panel IOL)
+- `engine_regime_snapshots`, `engine_macro_snapshots`, `engine_smart_money_snapshots`, `engine_strategy_runs`
 - `manual_cashflow_adjustments`, `cashflow_auto_detected`, `reconciliation_proposals`
+
+Notas de esquema para consultas SQL directas:
+
+- `portfolio_assets` se vincula con `portfolio_snapshots` por `snapshot_date`; no existe `snapshot_id`.
+- Los valores monetarios persistidos en DB usan `total_value`. `total_value_ars` es un nombre del context pack/reporte, no una columna SQL.
+- La composición por activo se calcula como `portfolio_assets.total_value * 100 / portfolio_snapshots.total_value`; no existe una columna persistida `pct_portfolio`.
 
 **En tests:** usar `create_temp_sqlite_db()` de `tests/tests_support.py`. No mockear la DB.
 

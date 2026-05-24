@@ -31,9 +31,9 @@ INTERVAL_MIN=${IOL_SNAPSHOT_INTERVAL_MIN:-5}
   ENGINE_MIN=$(( (CRON_MIN + 15) % 60 ))
   ENGINE_HOUR_OFFSET=$(( (CRON_MIN + 15) / 60 ))
   ENGINE_HOUR=$(( CRON_HOUR + ENGINE_HOUR_OFFSET ))
-  # Mon: full pipeline including Smart Money (13F weekly refresh); Tue-Fri: skip for speed.
-  echo "${ENGINE_MIN} ${ENGINE_HOUR} * * 1 root iol engines run-all >> /var/log/cron.log 2>&1"
-  echo "${ENGINE_MIN} ${ENGINE_HOUR} * * 2-5 root iol engines run-all --skip-smart-money >> /var/log/cron.log 2>&1"
+  # Engine refresh: staleness-driven — registry decides whether to re-fetch 13F based on _SMART_MONEY_STALE_DAYS.
+  # Running without --skip-smart-money every day so a missed Monday (holiday/failure) auto-recovers next day.
+  echo "${ENGINE_MIN} ${ENGINE_HOUR} * * 1-5 root iol engines run-all >> /var/log/cron.log 2>&1"
   # Pivot detection: run 2 min after engine refresh (post-close only)
   PIVOT_MIN=$(( (ENGINE_MIN + 2) % 60 ))
   PIVOT_HOUR_OFFSET=$(( (ENGINE_MIN + 2) / 60 ))

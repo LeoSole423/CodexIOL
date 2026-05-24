@@ -37,6 +37,9 @@ class SwingBotConfig:
     exit_score_threshold: float   # If engine score drops below this, exit
     rsi_overbought: float = 78.0  # Exit if RSI exceeds this
 
+    # Execution cost model
+    slippage_pct: float = 0.002   # One-way slippage fraction applied at buy/sell
+
 
 # ── Presets ───────────────────────────────────────────────────────────────────
 
@@ -57,6 +60,7 @@ SWING_BOT_PRESETS: Dict[str, SwingBotConfig] = {
         max_macro_stress=60.0,
         exit_score_threshold=35.0,
         rsi_overbought=78.0,
+        slippage_pct=0.0015,  # Trades high-liquidity stocks only
     ),
     "swing-balanced": SwingBotConfig(
         name="swing-balanced",
@@ -74,6 +78,7 @@ SWING_BOT_PRESETS: Dict[str, SwingBotConfig] = {
         max_macro_stress=70.0,
         exit_score_threshold=28.0,
         rsi_overbought=80.0,
+        slippage_pct=0.0020,
     ),
     "swing-aggressive": SwingBotConfig(
         name="swing-aggressive",
@@ -91,6 +96,7 @@ SWING_BOT_PRESETS: Dict[str, SwingBotConfig] = {
         max_macro_stress=80.0,
         exit_score_threshold=20.0,
         rsi_overbought=82.0,
+        slippage_pct=0.0030,  # Accepts less liquid candidates
     ),
 }
 

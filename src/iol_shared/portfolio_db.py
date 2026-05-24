@@ -307,11 +307,11 @@ def _norm_order_side(v: Any) -> Optional[str]:
         return "buy"
     if s in ("sell", "venta", "rescate fci"):
         return "sell"
-    if s in ("pago de amortizacion",):
+    if s in ("bond_amortization", "pago de amortizacion"):
         return "bond_amortization"
-    if s in ("pago de dividendos",):
+    if s in ("dividend", "pago de dividendos"):
         return "dividend"
-    if s in ("pago de renta",):
+    if s in ("coupon", "pago de renta"):
         return "coupon"
     if s in (
         "comision",
@@ -339,21 +339,58 @@ def _symbol_base_for_dedupe(v: Any) -> str:
     return re.sub(r"\s+(US\$|USD)$", "", s).strip()
 
 
-def _order_amount(row: sqlite3.Row) -> Optional[float]:
+def _row_get(row: sqlite3.Row, key: str) -> Any:
+    try:
+        if key in row.keys():
+            return row[key]
+    except Exception:
+        return None
+    return None
+
+
+def _norm_order_currency(v: Any) -> Optional[str]:
+    s = str(v or "").strip().lower()
+    if not s:
+        return None
+    s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+    s = " ".join(s.replace("_", " ").split())
+    if s in ("ars", "peso argentino", "pesos", "$"):
+        return "ARS"
+    if s in ("usd", "dolar estadounidense", "dolar", "dolares", "us$", "u$s"):
+        return "USD"
+    return None
+
+
+def _order_currency(row: sqlite3.Row) -> str:
+    ccy = _norm_order_currency(_row_get(row, "currency"))
+    if ccy:
+        return ccy
+    symbol = str(_row_get(row, "symbol") or "").strip().upper()
+    if re.search(r"\s+(US\$|USD)$", symbol):
+        return "USD"
+    return "ARS"
+
+
+def _order_amount(row: sqlite3.Row, *, fx_ars_per_usd: Optional[float] = None) -> Optional[float]:
     op_amount = row["operated_amount"]
     qty = row["quantity"]
     price = row["price"]
+    amount = None
     if op_amount is not None:
         try:
-            return float(op_amount)
+            amount = float(op_amount)
         except Exception:
             return None
-    if qty is not None and price is not None:
+    elif qty is not None and price is not None:
         try:
-            return float(qty) * float(price)
+            amount = float(qty) * float(price)
         except Exception:
             return None
-    return None
+    if amount is None:
+        return None
+    if fx_ars_per_usd is not None and _order_currency(row) == "USD":
+        return float(amount) * float(fx_ars_per_usd)
+    return float(amount)
 
 
 def ensure_manual_cashflow_table(conn: sqlite3.Connection) -> None:
@@ -471,6 +508,7 @@ def orders_flow_summary(
     dt_from: str,
     dt_to: str,
     currency: str = "peso_Argentino",
+    fx_ars_per_usd: Optional[float] = None,
 ) -> Tuple[Dict[str, float], Dict[str, int]]:
     cols = table_columns(conn, "orders")
     empty_amounts = {
@@ -531,6 +569,7 @@ def orders_flow_summary(
     operated_amount_expr = "operated_amount" if "operated_amount" in cols else "NULL"
     quantity_expr = "quantity" if "quantity" in cols else "NULL"
     price_expr = "price" if "price" in cols else "NULL"
+    currency_expr = "currency" if "currency" in cols else "NULL"
     sql = f"""
         SELECT
             symbol AS symbol,
@@ -538,7 +577,8 @@ def orders_flow_summary(
             {side_expr} AS side,
             {operated_amount_expr} AS operated_amount,
             {quantity_expr} AS quantity,
-            {price_expr} AS price
+            {price_expr} AS price,
+            {currency_expr} AS currency
         FROM orders
         WHERE {" AND ".join(where)}
     """
@@ -562,7 +602,7 @@ def orders_flow_summary(
         side = _norm_order_side(r["side"])
         if side not in ("income", "dividend", "coupon"):
             continue
-        amt = _order_amount(r)
+        amt = _order_amount(r, fx_ars_per_usd=fx_ars_per_usd)
         if amt is None:
             continue
         ts = str(r["event_ts"] or "")[:19]
@@ -580,7 +620,7 @@ def orders_flow_summary(
             ignored += 1
             continue
 
-        amt = _order_amount(r)
+        amt = _order_amount(r, fx_ars_per_usd=fx_ars_per_usd)
         if amt is None:
             if side in ("income", "dividend", "coupon"):
                 ts = str(r["event_ts"] or "")[:19]

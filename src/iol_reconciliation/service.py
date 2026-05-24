@@ -370,7 +370,13 @@ def _build_interval(
 
     dt_from = f"{base_snap.snapshot_date}T23:59:59"
     dt_to = f"{end_snap.snapshot_date}T23:59:59"
-    amounts, stats = shared_db.orders_flow_summary(conn, dt_from, dt_to, currency="peso_Argentino")
+    amounts, stats = shared_db.orders_flow_summary(
+        conn,
+        dt_from,
+        dt_to,
+        currency="peso_Argentino",
+        fx_ars_per_usd=fx_end,
+    )
     if stats.get("unclassified", 0) > 0 or stats.get("amount_missing", 0) > 0:
         warnings.append("ORDERS_INCOMPLETE")
 

@@ -9,12 +9,126 @@ Sub-app tree registered in cli.py:
 """
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional
+import sqlite3
+from datetime import date, timedelta
+from typing import Any, Callable, Dict, List, Optional
 
 import typer
 from rich.console import Console
 
 console = Console()
+
+
+def _iso_days_before(value: Optional[str], days: int) -> str:
+    try:
+        base = date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        base = date.today()
+    return (base - timedelta(days=days)).isoformat()
+
+
+def _format_anomalies(flags: List[str]) -> str:
+    return ", ".join(flags) if flags else "ok"
+
+
+def _cost_model_from_ctx(ctx: typer.Context):
+    from iol_engines.simulation.cost_model import ExecutionCostModel, parse_instrument_overrides
+
+    cfg = ctx.obj.config
+    return ExecutionCostModel.from_config(
+        commission_tier=getattr(cfg, "sim_commission_tier", "gold"),
+        include_iva=getattr(cfg, "sim_include_iva", True),
+        include_market_fees=getattr(cfg, "sim_include_market_fees", True),
+        default_instrument_type=getattr(cfg, "sim_default_instrument_type", "stock"),
+        max_daily_volume_pct=getattr(cfg, "sim_max_daily_volume_pct", 0.02),
+        instrument_overrides=parse_instrument_overrides(getattr(cfg, "sim_instrument_overrides", "")),
+        commission_min=getattr(cfg, "commission_min", 0.0),
+        legacy_commission_rate=getattr(cfg, "commission_rate", 0.0) or None,
+    )
+
+
+def _daily_run_anomalies(conn: sqlite3.Connection, row: Dict[str, Any]) -> List[str]:
+    flags: List[str] = []
+    status = str(row.get("status") or "")
+    if status == "stale":
+        flags.append("stale")
+    if status == "running" and row.get("max_drawdown_pct") is None:
+        flags.append("null_drawdown")
+    if status == "running" and row.get("mode") == "live":
+        period = str(row.get("date_from") or "")[:7]
+        dupes = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM simulation_runs r
+            JOIN simulation_bot_configs c ON c.id = r.bot_config_id
+            WHERE c.name = ? AND r.mode = 'live' AND r.status = 'running'
+              AND r.date_from LIKE ?
+            """,
+            (row.get("bot_name"), f"{period}%"),
+        ).fetchone()[0]
+        if int(dupes or 0) > 1:
+            flags.append("duplicate_running")
+        since = _iso_days_before(row.get("date_to"), 7)
+        trades = conn.execute(
+            "SELECT COUNT(*) FROM simulation_trades WHERE run_id = ? AND trade_date >= ?",
+            (row.get("id"), since),
+        ).fetchone()[0]
+        if int(trades or 0) == 0:
+            flags.append("no_week_trades")
+    return flags
+
+
+def _swing_run_anomalies(conn: sqlite3.Connection, row: Dict[str, Any]) -> List[str]:
+    flags: List[str] = []
+    status = str(row.get("status") or "")
+    if status == "stale":
+        flags.append("stale")
+    if status == "running" and row.get("max_drawdown_pct") is None:
+        flags.append("null_drawdown")
+    if status == "running" and row.get("mode") == "live":
+        period = str(row.get("date_from") or "")[:7]
+        dupes = conn.execute(
+            """
+            SELECT COUNT(*) FROM swing_simulation_runs
+            WHERE bot_name = ? AND mode = 'live' AND status = 'running'
+              AND date_from LIKE ?
+            """,
+            (row.get("bot_name"), f"{period}%"),
+        ).fetchone()[0]
+        if int(dupes or 0) > 1:
+            flags.append("duplicate_running")
+        since = _iso_days_before(row.get("date_to"), 7)
+        steps = conn.execute(
+            "SELECT COUNT(*) FROM swing_simulation_steps WHERE run_id = ? AND step_date >= ?",
+            (row.get("id"), since),
+        ).fetchone()[0]
+        if int(steps or 0) == 0:
+            flags.append("no_week_steps")
+    return flags
+
+
+def _event_run_anomalies(conn: sqlite3.Connection, row: Dict[str, Any]) -> List[str]:
+    flags: List[str] = []
+    status = str(row.get("status") or "")
+    if status == "stale":
+        flags.append("stale")
+    if status == "running" and row.get("max_drawdown_pct") is None:
+        flags.append("null_drawdown")
+    if status == "running" and row.get("total_events_triggered") is None:
+        flags.append("null_event_count")
+    if status == "running" and row.get("mode") == "live":
+        period = str(row.get("date_from") or "")[:7]
+        dupes = conn.execute(
+            """
+            SELECT COUNT(*) FROM event_simulation_runs
+            WHERE bot_name = ? AND mode = 'live' AND status = 'running'
+              AND date_from LIKE ?
+            """,
+            (row.get("bot_name"), f"{period}%"),
+        ).fetchone()[0]
+        if int(dupes or 0) > 1:
+            flags.append("duplicate_running")
+    return flags
 
 
 def build_simulate_app(
@@ -103,6 +217,7 @@ def build_simulate_app(
             date_to,
             initial_cash_ars,
             verbose=not json_out,
+            cost_model=_cost_model_from_ctx(ctx),
         )
 
         result = load_run(conn, run_id)
@@ -140,11 +255,17 @@ def build_simulate_app(
 
         runs = _list(conn, limit=limit, bot_name=bot)
 
+        runs_with_flags = []
+        for r in runs:
+            item = dict(r)
+            item["anomalies"] = _daily_run_anomalies(conn, item)
+            runs_with_flags.append(item)
+
         if json_out:
-            print_json(runs)
+            print_json(runs_with_flags)
             return
 
-        if not runs:
+        if not runs_with_flags:
             console.print("[yellow]No simulation runs found.[/yellow]")
             return
 
@@ -160,8 +281,9 @@ def build_simulate_app(
         table.add_column("Sharpe", justify="right", width=7)
         table.add_column("MaxDD%", justify="right", width=8)
         table.add_column("Final ARS", justify="right", width=14)
+        table.add_column("Anomalies", width=24)
 
-        for r in runs:
+        for r in runs_with_flags:
             ret = r.get("total_return_pct")
             ret_color = "green" if (ret or 0) >= 0 else "red"
             ret_str = f"[{ret_color}]{ret:+.1f}%[/{ret_color}]" if ret is not None else "-"
@@ -175,6 +297,7 @@ def build_simulate_app(
                 f"{r['sharpe_ratio']:.2f}" if r.get("sharpe_ratio") else "-",
                 f"{r['max_drawdown_pct']:.1f}%" if r.get("max_drawdown_pct") else "-",
                 f"{r['final_value_ars']:,.0f}" if r.get("final_value_ars") else "-",
+                _format_anomalies(r["anomalies"]),
             )
 
         console.print(table)
@@ -320,6 +443,7 @@ def build_simulate_app(
             conn, bot_list, target_date,
             initial_cash_ars=initial_cash_ars,
             verbose=not json_out,
+            cost_model=_cost_model_from_ctx(ctx),
         )
 
         if json_out:
@@ -499,7 +623,10 @@ def _build_swing_app(*, print_json) -> typer.Typer:
             raise typer.Exit(code=1)
 
         run_id = run_swing_backtest(conn, config, date_from, date_to, initial_cash_ars,
-                                    verbose=not json_out)
+                                    commission_rate=ctx.obj.config.commission_rate,
+                                    commission_min=ctx.obj.config.commission_min,
+                                    verbose=not json_out,
+                                    cost_model=_cost_model_from_ctx(ctx))
         result = _load_swing_run(conn, run_id)
         if json_out:
             print_json(result)
@@ -526,21 +653,26 @@ def _build_swing_app(*, print_json) -> typer.Typer:
         rows = conn.execute(
             f"""
             SELECT id, bot_name, date_from, date_to, total_return_pct,
-                   sharpe_ratio, max_drawdown_pct, avg_hold_days, total_trades, final_value
+                   sharpe_ratio, max_drawdown_pct, avg_hold_days, total_trades,
+                   final_value, status, mode
             FROM swing_simulation_runs
             {where}
             ORDER BY id DESC LIMIT ?
             """,
             params,
         ).fetchall()
+        cols = ["id", "bot_name", "date_from", "date_to", "total_return_pct",
+                "sharpe_ratio", "max_drawdown_pct", "avg_hold_days", "total_trades",
+                "final_value", "status", "mode"]
+        records = [dict(zip(cols, r)) for r in rows]
+        for record in records:
+            record["anomalies"] = _swing_run_anomalies(conn, record)
 
         if json_out:
-            cols = ["id", "bot_name", "date_from", "date_to", "total_return_pct",
-                    "sharpe_ratio", "max_drawdown_pct", "avg_hold_days", "total_trades", "final_value"]
-            print_json([dict(zip(cols, r)) for r in rows])
+            print_json(records)
             return
 
-        if not rows:
+        if not records:
             console.print("[yellow]No swing runs found.[/yellow]")
             return
 
@@ -555,17 +687,19 @@ def _build_swing_app(*, print_json) -> typer.Typer:
         table.add_column("MaxDD%", justify="right", width=8)
         table.add_column("Avg Hold", justify="right", width=9)
         table.add_column("Trades", justify="right", width=7)
+        table.add_column("Anomalies", width=24)
 
-        for r in rows:
-            ret = r[4]
+        for r in records:
+            ret = r["total_return_pct"]
             ret_color = "green" if (ret or 0) >= 0 else "red"
             ret_str = f"[{ret_color}]{ret:+.1f}%[/{ret_color}]" if ret is not None else "-"
             table.add_row(
-                str(r[0]), r[1], r[2], r[3], ret_str,
-                f"{r[5]:.2f}" if r[5] else "-",
-                f"{r[6]:.1f}%" if r[6] else "-",
-                f"{r[7]:.1f}d" if r[7] else "-",
-                str(r[8]) if r[8] else "-",
+                str(r["id"]), r["bot_name"], r["date_from"], r["date_to"], ret_str,
+                f"{r['sharpe_ratio']:.2f}" if r.get("sharpe_ratio") else "-",
+                f"{r['max_drawdown_pct']:.1f}%" if r.get("max_drawdown_pct") else "-",
+                f"{r['avg_hold_days']:.1f}d" if r.get("avg_hold_days") else "-",
+                str(r["total_trades"]) if r.get("total_trades") else "-",
+                _format_anomalies(r["anomalies"]),
             )
         console.print(table)
 
@@ -632,7 +766,11 @@ def _build_swing_app(*, print_json) -> typer.Typer:
         init_db(conn)
 
         run_ids = run_swing_live_step(conn, bot_list, target_date,
-                                      initial_cash_ars=initial_cash_ars, verbose=not json_out)
+                                      initial_cash_ars=initial_cash_ars,
+                                      commission_rate=ctx.obj.config.commission_rate,
+                                      commission_min=ctx.obj.config.commission_min,
+                                      verbose=not json_out,
+                                      cost_model=_cost_model_from_ctx(ctx))
 
         if json_out:
             print_json({"date": target_date, "bots": bot_list, "run_ids": run_ids})
@@ -700,7 +838,10 @@ def _build_event_app(*, print_json) -> typer.Typer:
             raise typer.Exit(code=1)
 
         run_id = run_event_backtest(conn, config, date_from, date_to, initial_cash_ars,
-                                    verbose=not json_out)
+                                    commission_rate=ctx.obj.config.commission_rate,
+                                    commission_min=ctx.obj.config.commission_min,
+                                    verbose=not json_out,
+                                    cost_model=_cost_model_from_ctx(ctx))
         result = _load_event_run(conn, run_id)
         if json_out:
             print_json(result)
@@ -727,21 +868,26 @@ def _build_event_app(*, print_json) -> typer.Typer:
         rows = conn.execute(
             f"""
             SELECT id, bot_name, date_from, date_to, total_return_pct,
-                   sharpe_ratio, max_drawdown_pct, total_events_triggered, total_trades, final_value
+                   sharpe_ratio, max_drawdown_pct, total_events_triggered, total_trades,
+                   final_value, status, mode
             FROM event_simulation_runs
             {where}
             ORDER BY id DESC LIMIT ?
             """,
             params,
         ).fetchall()
+        cols = ["id", "bot_name", "date_from", "date_to", "total_return_pct",
+                "sharpe_ratio", "max_drawdown_pct", "total_events_triggered",
+                "total_trades", "final_value", "status", "mode"]
+        records = [dict(zip(cols, r)) for r in rows]
+        for record in records:
+            record["anomalies"] = _event_run_anomalies(conn, record)
 
         if json_out:
-            cols = ["id", "bot_name", "date_from", "date_to", "total_return_pct",
-                    "sharpe_ratio", "max_drawdown_pct", "total_events_triggered", "total_trades", "final_value"]
-            print_json([dict(zip(cols, r)) for r in rows])
+            print_json(records)
             return
 
-        if not rows:
+        if not records:
             console.print("[yellow]No event runs found.[/yellow]")
             return
 
@@ -755,16 +901,18 @@ def _build_event_app(*, print_json) -> typer.Typer:
         table.add_column("Sharpe", justify="right", width=7)
         table.add_column("Events", justify="right", width=7)
         table.add_column("Trades", justify="right", width=7)
+        table.add_column("Anomalies", width=24)
 
-        for r in rows:
-            ret = r[4]
+        for r in records:
+            ret = r["total_return_pct"]
             ret_color = "green" if (ret or 0) >= 0 else "red"
             ret_str = f"[{ret_color}]{ret:+.1f}%[/{ret_color}]" if ret is not None else "-"
             table.add_row(
-                str(r[0]), r[1], r[2], r[3], ret_str,
-                f"{r[5]:.2f}" if r[5] else "-",
-                str(r[7]) if r[7] is not None else "-",
-                str(r[8]) if r[8] is not None else "-",
+                str(r["id"]), r["bot_name"], r["date_from"], r["date_to"], ret_str,
+                f"{r['sharpe_ratio']:.2f}" if r.get("sharpe_ratio") else "-",
+                str(r["total_events_triggered"]) if r.get("total_events_triggered") is not None else "-",
+                str(r["total_trades"]) if r.get("total_trades") is not None else "-",
+                _format_anomalies(r["anomalies"]),
             )
         console.print(table)
 
@@ -871,7 +1019,11 @@ def _build_event_app(*, print_json) -> typer.Typer:
         init_db(conn)
 
         run_ids = run_event_live_step(conn, bot_list, target_date,
-                                      initial_cash_ars=initial_cash_ars, verbose=not json_out)
+                                      initial_cash_ars=initial_cash_ars,
+                                      commission_rate=ctx.obj.config.commission_rate,
+                                      commission_min=ctx.obj.config.commission_min,
+                                      verbose=not json_out,
+                                      cost_model=_cost_model_from_ctx(ctx))
 
         if json_out:
             print_json({"date": target_date, "bots": bot_list, "run_ids": run_ids})
@@ -900,6 +1052,11 @@ def _print_run_summary(r: dict) -> None:
     m = r.get("metrics") or {}
     if m.get("win_rate_pct") is not None:
         console.print(f"  Win rate:    {m['win_rate_pct']:.1f}%")
+    if r.get("cost_model_version"):
+        console.print(f"  Cost model:  {r['cost_model_version']}")
+    if r.get("total_costs_ars"):
+        console.print(f"  Costs ARS:   {r['total_costs_ars']:,.0f}")
+        console.print(f"  Avg cost/tr: {r.get('avg_cost_per_trade_ars', 0):,.0f}")
     if r.get("error_message"):
         console.print(f"  [red]Error: {r['error_message']}[/red]")
 
@@ -913,6 +1070,7 @@ def _print_trades_table(trades: list) -> None:
     table.add_column("Action", width=6)
     table.add_column("ARS", justify="right", width=12)
     table.add_column("Price", justify="right", width=10)
+    table.add_column("Costs", justify="right", width=10)
     table.add_column("Portfolio After", justify="right", width=16)
 
     _ACTION_COLORS = {"buy": "green", "trim": "yellow", "exit": "red"}
@@ -924,6 +1082,7 @@ def _print_trades_table(trades: list) -> None:
             f"[{color}]{t.get('action', '')}[/{color}]",
             f"{t.get('amount_ars', 0):,.0f}",
             f"{t.get('price', 0):,.2f}",
+            f"{t.get('total_cost_ars', 0):,.0f}" if t.get("total_cost_ars") else "-",
             f"{t.get('portfolio_value_after', 0):,.0f}",
         )
 
@@ -937,7 +1096,7 @@ def _load_swing_run(conn, run_id: int) -> Optional[dict]:
         """
         SELECT id, bot_name, date_from, date_to, initial_cash, final_value,
                total_return_pct, sharpe_ratio, max_drawdown_pct, win_rate_pct,
-               avg_hold_days, total_trades, mode, created_at
+               avg_hold_days, total_trades, mode, created_at, cost_model_version
         FROM swing_simulation_runs WHERE id = ?
         """,
         (run_id,),
@@ -946,8 +1105,15 @@ def _load_swing_run(conn, run_id: int) -> Optional[dict]:
         return None
     cols = ["id", "bot_name", "date_from", "date_to", "initial_cash", "final_value",
             "total_return_pct", "sharpe_ratio", "max_drawdown_pct", "win_rate_pct",
-            "avg_hold_days", "total_trades", "mode", "created_at"]
-    return dict(zip(cols, row))
+            "avg_hold_days", "total_trades", "mode", "created_at", "cost_model_version"]
+    result = dict(zip(cols, row))
+    costs = conn.execute(
+        "SELECT COALESCE(SUM(total_cost_ars), 0), COUNT(*) FROM swing_simulation_trades WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    result["total_costs_ars"] = float(costs[0] or 0.0)
+    result["avg_cost_per_trade_ars"] = float(costs[0] or 0.0) / int(costs[1] or 1)
+    return result
 
 
 def _print_swing_run_summary(r: dict) -> None:
@@ -970,6 +1136,11 @@ def _print_swing_run_summary(r: dict) -> None:
         console.print(f"  Avg hold:    {r['avg_hold_days']:.1f} days")
     if r.get("total_trades") is not None:
         console.print(f"  Trades:      {r['total_trades']}")
+    if r.get("cost_model_version"):
+        console.print(f"  Cost model:  {r['cost_model_version']}")
+    if r.get("total_costs_ars"):
+        console.print(f"  Costs ARS:   {r['total_costs_ars']:,.0f}")
+        console.print(f"  Avg cost/tr: {r.get('avg_cost_per_trade_ars', 0):,.0f}")
 
 
 def _print_swing_trades_table(trades: list) -> None:
@@ -1015,7 +1186,7 @@ def _load_event_run(conn, run_id: int) -> Optional[dict]:
         """
         SELECT id, bot_name, date_from, date_to, initial_cash, final_value,
                total_return_pct, sharpe_ratio, max_drawdown_pct, win_rate_pct,
-               total_events_triggered, total_trades, mode, created_at
+               total_events_triggered, total_trades, mode, created_at, cost_model_version
         FROM event_simulation_runs WHERE id = ?
         """,
         (run_id,),
@@ -1024,8 +1195,15 @@ def _load_event_run(conn, run_id: int) -> Optional[dict]:
         return None
     cols = ["id", "bot_name", "date_from", "date_to", "initial_cash", "final_value",
             "total_return_pct", "sharpe_ratio", "max_drawdown_pct", "win_rate_pct",
-            "total_events_triggered", "total_trades", "mode", "created_at"]
-    return dict(zip(cols, row))
+            "total_events_triggered", "total_trades", "mode", "created_at", "cost_model_version"]
+    result = dict(zip(cols, row))
+    costs = conn.execute(
+        "SELECT COALESCE(SUM(total_cost_ars), 0), COUNT(*) FROM event_simulation_trades WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    result["total_costs_ars"] = float(costs[0] or 0.0)
+    result["avg_cost_per_trade_ars"] = float(costs[0] or 0.0) / int(costs[1] or 1)
+    return result
 
 
 def _print_event_run_summary(r: dict) -> None:
@@ -1048,6 +1226,11 @@ def _print_event_run_summary(r: dict) -> None:
         console.print(f"  Events triggered: {r['total_events_triggered']}")
     if r.get("total_trades") is not None:
         console.print(f"  Trades:      {r['total_trades']}")
+    if r.get("cost_model_version"):
+        console.print(f"  Cost model:  {r['cost_model_version']}")
+    if r.get("total_costs_ars"):
+        console.print(f"  Costs ARS:   {r['total_costs_ars']:,.0f}")
+        console.print(f"  Avg cost/tr: {r.get('avg_cost_per_trade_ars', 0):,.0f}")
 
 
 def _print_event_trades_table(trades: list) -> None:

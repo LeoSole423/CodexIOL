@@ -20,6 +20,13 @@ class Config:
     market_close_time: str
     store_raw: bool
     ohlcv_watchlist: List[Tuple[str, str]] = field(default_factory=list)
+    opp_watchlist: List[Tuple[str, str]] = field(default_factory=list)
+    sim_commission_tier: str = "gold"
+    sim_include_iva: bool = True
+    sim_include_market_fees: bool = True
+    sim_default_instrument_type: str = "stock"
+    sim_instrument_overrides: str = ""
+    sim_max_daily_volume_pct: float = 0.02
 
     def resolve_base_url(self, base_url_override=None):
         if base_url_override:
@@ -77,6 +84,12 @@ def load_config() -> Config:
     timeout = _get_int("IOL_TIMEOUT", 20)
     commission_rate = _get_float("IOL_COMMISSION_RATE", 0.0)
     commission_min = _get_float("IOL_COMMISSION_MIN", 0.0)
+    sim_commission_tier = os.getenv("IOL_SIM_COMMISSION_TIER", "gold").strip().lower() or "gold"
+    sim_include_iva = _get_bool("IOL_SIM_INCLUDE_IVA", True)
+    sim_include_market_fees = _get_bool("IOL_SIM_INCLUDE_MARKET_FEES", True)
+    sim_default_instrument_type = os.getenv("IOL_SIM_DEFAULT_INSTRUMENT_TYPE", "stock").strip() or "stock"
+    sim_instrument_overrides = os.getenv("IOL_SIM_INSTRUMENT_OVERRIDES", "").strip()
+    sim_max_daily_volume_pct = _get_float("IOL_SIM_MAX_DAILY_VOLUME_PCT", 0.02)
     db_path = os.getenv("IOL_DB_PATH", "data/iol_history.db").strip()
     market_tz = os.getenv("IOL_MARKET_TZ", "America/Argentina/Buenos_Aires").strip()
     market_open_time = os.getenv("IOL_MARKET_OPEN_TIME", "11:00").strip()
@@ -102,6 +115,26 @@ def load_config() -> Config:
             if sym:
                 ohlcv_watchlist.append((sym, mkt))
 
+    # IOL_OPP_WATCHLIST: comma-separated "SYMBOL:MARKET" pairs always considered
+    # by the opportunity engine, regardless of whether they appear in the IOL panel.
+    # Market defaults to "bcba" if omitted.
+    # Example: IOL_OPP_WATCHLIST=ETSY:bcba,COIN:bcba,MELI:bcba
+    opp_watchlist: List[Tuple[str, str]] = []
+    raw_opp_watchlist = os.getenv("IOL_OPP_WATCHLIST", "").strip()
+    if raw_opp_watchlist:
+        for entry in raw_opp_watchlist.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if ":" in entry:
+                sym, mkt = entry.split(":", 1)
+            else:
+                sym, mkt = entry, "bcba"
+            sym = sym.strip().upper()
+            mkt = mkt.strip().lower()
+            if sym:
+                opp_watchlist.append((sym, mkt))
+
     return Config(
         username=username,
         password=password,
@@ -109,10 +142,17 @@ def load_config() -> Config:
         timeout=timeout,
         commission_rate=commission_rate,
         commission_min=commission_min,
+        sim_commission_tier=sim_commission_tier,
+        sim_include_iva=sim_include_iva,
+        sim_include_market_fees=sim_include_market_fees,
+        sim_default_instrument_type=sim_default_instrument_type,
+        sim_instrument_overrides=sim_instrument_overrides,
+        sim_max_daily_volume_pct=sim_max_daily_volume_pct,
         db_path=db_path,
         market_tz=market_tz,
         market_open_time=market_open_time,
         market_close_time=market_close_time,
         store_raw=store_raw,
         ohlcv_watchlist=ohlcv_watchlist,
+        opp_watchlist=opp_watchlist,
     )

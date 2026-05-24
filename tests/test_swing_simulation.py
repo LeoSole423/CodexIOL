@@ -281,6 +281,40 @@ class TestSwingRunner(unittest.TestCase):
             conn.close()
             tmp.cleanup()
 
+    def test_live_step_reuses_monthly_run_stales_duplicates_and_sets_metrics(self):
+        from iol_engines.simulation.swing_runner import _create_run_row, run_swing_live_step
+
+        tmp, conn = _mk_db()
+        try:
+            _insert_prices(conn, "SPY", [("2025-01-02", 100.0)])
+            old_id = _create_run_row(conn, "swing-balanced", "2025-01-01", "2025-01-01", 100_000.0, mode="live")
+            keep_id = _create_run_row(conn, "swing-balanced", "2025-01-01", "2025-01-01", 100_000.0, mode="live")
+
+            run_ids = run_swing_live_step(
+                conn, ["swing-balanced"], "2025-01-02", initial_cash_ars=100_000.0, verbose=False
+            )
+
+            self.assertEqual(run_ids, [keep_id])
+            statuses = {
+                r[0]: r[1]
+                for r in conn.execute(
+                    "SELECT id, status FROM swing_simulation_runs WHERE id IN (?, ?)",
+                    (old_id, keep_id),
+                ).fetchall()
+            }
+            self.assertEqual(statuses[old_id], "stale")
+            self.assertEqual(statuses[keep_id], "running")
+            row = conn.execute(
+                "SELECT max_drawdown_pct, total_trades, win_rate_pct FROM swing_simulation_runs WHERE id = ?",
+                (keep_id,),
+            ).fetchone()
+            self.assertIsNotNone(row[0])
+            self.assertIsNotNone(row[1])
+            self.assertIsNotNone(row[2])
+        finally:
+            conn.close()
+            tmp.cleanup()
+
     def test_db_schema_has_swing_tables(self):
         tmp, conn = _mk_db()
         try:

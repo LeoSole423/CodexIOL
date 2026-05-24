@@ -139,10 +139,14 @@ def _norm_side(side: Any) -> Optional[str]:
     v = " ".join(v.split())
     if v in ("buy", "compra", "suscripcion fci"):
         return "buy"
-    if v in ("sell", "venta", "rescate fci", "pago de amortizacion"):
+    if v in ("sell", "venta", "rescate fci"):
         return "sell"
-    if v in ("pago de dividendos", "pago de renta"):
-        return "ignore"
+    if v in ("pago de amortizacion",):
+        return "bond_amortization"
+    if v in ("pago de dividendos",):
+        return "dividend"
+    if v in ("pago de renta",):
+        return "coupon"
     if v in (
         "comision",
         "comision de mercado",

@@ -26,6 +26,9 @@ IOL_SEC_CONTACT_EMAIL=tu-email@dominio.com
 # Optional override:
 # IOL_SEC_USER_AGENT=CodexIOL/1.0 (tu-email@dominio.com)
 IOL_SEC_USER_AGENT=
+# Símbolos evaluados siempre por el motor de oportunidades (formato SYMBOL:market CSV)
+# IOL_OPP_WATCHLIST=ETSY:bcba,COIN:bcba,MELI:bcba
+IOL_OPP_WATCHLIST=
 ```
 
 ## Docker
@@ -274,7 +277,10 @@ Notas:
 - Las ordenes individuales requieren confirmacion (prompt interactivo o `--confirm CONFIRMAR`).
 - `iol batch run` solo ejecuta si pasas `--confirm CONFIRMAR` (sin eso se comporta como dry-run).
 - Para automatizacion, podes ejecutar sin prompt interactivo usando `--confirm CONFIRMAR` (igual sigue siendo una orden real).
-- `IOL_COMMISSION_RATE` y `IOL_COMMISSION_MIN` se usan solo para simulacion local.
+- `IOL_SIM_COMMISSION_TIER`, `IOL_SIM_INCLUDE_IVA`, `IOL_SIM_INCLUDE_MARKET_FEES`,
+  `IOL_SIM_DEFAULT_INSTRUMENT_TYPE`, `IOL_SIM_INSTRUMENT_OVERRIDES` y
+  `IOL_SIM_MAX_DAILY_VOLUME_PCT` controlan el modelo realista de costos de simulacion.
+  `IOL_COMMISSION_RATE` y `IOL_COMMISSION_MIN` quedan como compatibilidad legacy.
 - `IOL_STORE_RAW=1` guarda JSON crudo en la BD.
 - `reports/latest/Seguimiento.md` es una vista resumida; la fuente de verdad para alertas/eventos es SQLite (`advisor_alerts`, `advisor_events`).
 

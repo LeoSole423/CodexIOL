@@ -43,6 +43,13 @@ htmlcov/
 # Logs
 *.log
 
+# ---- Local agent/tooling artifacts ----
+.claude/
+.playwright-cli/
+output/
+=
+scripts/grant_codex_sandbox_docker_access.ps1
+
 # ---- Editor / OS ----
 .vscode/
 .idea/

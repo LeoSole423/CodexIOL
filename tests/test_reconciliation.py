@@ -137,6 +137,44 @@ class TestReconciliationService(unittest.TestCase):
             conn.close()
             tmp.cleanup()
 
+    def test_usd_dividend_order_with_null_currency_reconciles_as_income(self):
+        tmp, conn, db_path = _mk_db()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO portfolio_snapshots(
+                  snapshot_date,total_value,cash_total_ars,cash_disponible_ars,cash_disponible_usd,retrieved_at
+                )
+                VALUES(?,?,?,?,?,?)
+                """,
+                [
+                    ("2026-04-29", 100000.0, 11000.0, 1000.0, 10.0, "2026-04-29T21:00:00Z"),
+                    ("2026-04-30", 101000.0, 12000.0, 1000.0, 11.0, "2026-04-30T21:00:00Z"),
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT INTO orders(order_number,status,symbol,side,side_norm,operated_amount,currency,operated_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                """,
+                [
+                    (10, "terminada", "SPY US$", "Pago de Dividendos", "dividend", 1.0, None, "2026-04-30T15:00:00"),
+                    (11, "terminada", "SPY", "Pago de Dividendos", "dividend", None, None, "2026-04-30T15:00:00"),
+                ],
+            )
+            conn.commit()
+
+            payload = run_reconciliation(conn, as_of="2026-04-30", days=10, force=True)
+
+            self.assertEqual(payload.get("summary", {}).get("open_intervals"), 0)
+            self.assertEqual(payload.get("proposals") or [], [])
+            interval = (payload.get("intervals") or [])[0]
+            self.assertEqual(interval.get("state"), "resolved_mixed")
+            self.assertAlmostEqual(interval.get("analysis", {}).get("dividend_amount_ars"), 1000.0)
+        finally:
+            conn.close()
+            tmp.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()

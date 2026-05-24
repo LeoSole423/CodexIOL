@@ -286,6 +286,18 @@ def _price_on_or_before(series: Sequence[Tuple[str, float]], target: str) -> Opt
     return latest
 
 
+def _benchmark_on_or_before(
+    benchmark_by_date: Dict[str, Dict[str, float]], target: str
+) -> Optional[float]:
+    latest: Optional[float] = None
+    for snap in sorted(benchmark_by_date):
+        if snap <= target:
+            latest = _safe_float((benchmark_by_date.get(snap) or {}).get("mean_price"))
+        else:
+            break
+    return latest
+
+
 def _series_window(series: Sequence[Tuple[str, float]], start: str, end: str) -> List[Tuple[str, float]]:
     out: List[Tuple[str, float]] = []
     for snap, price in series:
@@ -346,6 +358,142 @@ def _manual_feedback_for_symbol(conn: sqlite3.Connection, symbol: str, as_of: st
     return {"manual_event_labels": sorted(set(labels))}
 
 
+def _persist_signal_outcome(
+    conn: sqlite3.Connection,
+    *,
+    existing_id: Optional[int],
+    candidate_id: int,
+    run_id: int,
+    variant_id: Optional[int],
+    signal_side: str,
+    signal_family: str,
+    symbol: str,
+    as_of: str,
+    horizon: int,
+    eval_status: str,
+    forward_return_pct: Optional[float],
+    excess_return_pct: Optional[float],
+    max_adverse_excursion_pct: Optional[float],
+    max_favorable_excursion_pct: Optional[float],
+    liquidity_penalty: Optional[float],
+    hit: Optional[int],
+    notes: Dict[str, Any],
+) -> None:
+    notes_json = json.dumps(notes, ensure_ascii=True, sort_keys=True)
+    payload = (
+        int(candidate_id),
+        int(run_id),
+        variant_id,
+        signal_side,
+        signal_family,
+        symbol,
+        as_of,
+        int(horizon),
+        eval_status,
+        forward_return_pct,
+        excess_return_pct,
+        max_adverse_excursion_pct,
+        max_favorable_excursion_pct,
+        liquidity_penalty,
+        hit,
+        notes_json,
+    )
+    if existing_id is None:
+        conn.execute(
+            """
+            INSERT INTO advisor_signal_outcomes(
+                candidate_id, run_id, variant_id, signal_side, signal_family, symbol, as_of, horizon,
+                eval_status, forward_return_pct, excess_return_pct, max_adverse_excursion_pct,
+                max_favorable_excursion_pct, liquidity_penalty, hit, notes_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+        return
+    conn.execute(
+        """
+        UPDATE advisor_signal_outcomes SET
+            candidate_id = ?,
+            run_id = ?,
+            variant_id = ?,
+            signal_side = ?,
+            signal_family = ?,
+            symbol = ?,
+            as_of = ?,
+            horizon = ?,
+            eval_status = ?,
+            forward_return_pct = ?,
+            excess_return_pct = ?,
+            max_adverse_excursion_pct = ?,
+            max_favorable_excursion_pct = ?,
+            liquidity_penalty = ?,
+            hit = ?,
+            notes_json = ?
+        WHERE id = ?
+        """,
+        (*payload, int(existing_id)),
+    )
+
+
+def _signal_outcome_coverage(conn: sqlite3.Connection, as_of: str) -> Dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT horizon, eval_status, forward_return_pct, excess_return_pct, hit, notes_json
+        FROM advisor_signal_outcomes
+        WHERE as_of <= ?
+        """,
+        (str(as_of),),
+    ).fetchall()
+    by_horizon: Dict[int, Dict[str, Any]] = {}
+    missing_by_reason: Dict[str, int] = {}
+    for row in rows:
+        horizon = int(row["horizon"] or 0)
+        bucket = by_horizon.setdefault(
+            horizon,
+            {
+                "evaluated": 0,
+                "missing": 0,
+                "hits": 0,
+                "forward_returns": [],
+                "excess_returns": [],
+            },
+        )
+        if row["eval_status"] == "ok":
+            bucket["evaluated"] += 1
+            bucket["hits"] += int(row["hit"] or 0)
+            if row["forward_return_pct"] is not None:
+                bucket["forward_returns"].append(float(row["forward_return_pct"]))
+            if row["excess_return_pct"] is not None:
+                bucket["excess_returns"].append(float(row["excess_return_pct"]))
+        else:
+            bucket["missing"] += 1
+            notes = _loads_json(row["notes_json"], {})
+            reason = str(notes.get("missing_reason") or "unknown")
+            missing_by_reason[reason] = missing_by_reason.get(reason, 0) + 1
+    horizon_summary: Dict[str, Dict[str, Any]] = {}
+    for horizon, bucket in sorted(by_horizon.items()):
+        evaluated = int(bucket["evaluated"])
+        hits = int(bucket["hits"])
+        forward_returns = list(bucket["forward_returns"])
+        excess_returns = list(bucket["excess_returns"])
+        horizon_summary[str(horizon)] = {
+            "evaluated": evaluated,
+            "missing": int(bucket["missing"]),
+            "hit_rate_pct": round(hits * 100.0 / evaluated, 1) if evaluated else 0.0,
+            "avg_forward_return_pct": (
+                round(sum(forward_returns) / len(forward_returns), 4) if forward_returns else None
+            ),
+            "avg_excess_return_pct": (
+                round(sum(excess_returns) / len(excess_returns), 4) if excess_returns else None
+            ),
+        }
+    return {
+        "total_rows": len(rows),
+        "missing_by_reason": dict(sorted(missing_by_reason.items())),
+        "horizons": horizon_summary,
+    }
+
+
 def evaluate_signal_outcomes(
     conn: sqlite3.Connection,
     *,
@@ -371,74 +519,160 @@ def evaluate_signal_outcomes(
         (as_of_v,),
     ).fetchall()
     inserted = 0
+    updated = 0
     skipped = 0
+    skipped_by_reason: Dict[str, int] = {}
+    latest_known = _latest_snapshot_date(conn)
+
+    def mark_skipped(reason: str) -> None:
+        nonlocal skipped
+        skipped += 1
+        skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+
     for row in candidates:
         symbol = str(row["symbol"] or "").strip().upper()
         signal_side = str(row["signal_side"] or "buy").strip().lower()
         signal_family = str(row["signal_family"] or row["candidate_status"] or "new").strip().lower()
         run_as_of = str(row["as_of"] or "")
         series = series_by_symbol.get(symbol) or []
-        if not run_as_of or not series:
-            skipped += 1
+        if not run_as_of:
+            mark_skipped("missing_signal_date")
             continue
         start_price = _price_on_or_before(series, run_as_of)
         if start_price is None or start_price <= 0:
-            skipped += 1
+            for horizon in horizons:
+                existing = conn.execute(
+                    """
+                    SELECT id, eval_status
+                    FROM advisor_signal_outcomes
+                    WHERE candidate_id = ? AND horizon = ?
+                    LIMIT 1
+                    """,
+                    (int(row["id"]), int(horizon)),
+                ).fetchone()
+                if existing and str(existing["eval_status"]) == "ok":
+                    continue
+                target_date = (date.fromisoformat(run_as_of) + timedelta(days=int(horizon))).isoformat()
+                notes = {
+                    "score_version": row["score_version"],
+                    "target_date": target_date,
+                    "latest_known_snapshot_date": latest_known,
+                    "missing_reason": "missing_symbol_price",
+                }
+                _persist_signal_outcome(
+                    conn,
+                    existing_id=int(existing["id"]) if existing else None,
+                    candidate_id=int(row["id"]),
+                    run_id=int(row["run_id"]),
+                    variant_id=_safe_int(row["variant_id"]),
+                    signal_side=signal_side,
+                    signal_family=signal_family,
+                    symbol=symbol,
+                    as_of=run_as_of,
+                    horizon=int(horizon),
+                    eval_status="missing_prices",
+                    forward_return_pct=None,
+                    excess_return_pct=None,
+                    max_adverse_excursion_pct=None,
+                    max_favorable_excursion_pct=None,
+                    liquidity_penalty=None,
+                    hit=None,
+                    notes=notes,
+                )
+                if existing:
+                    updated += 1
+                else:
+                    inserted += 1
             continue
-        benchmark_start = (benchmark_by_date.get(run_as_of) or {}).get("mean_price")
+        benchmark_start = _benchmark_on_or_before(benchmark_by_date, run_as_of)
         for horizon in horizons:
             existing = conn.execute(
                 """
-                SELECT id
+                SELECT id, eval_status
                 FROM advisor_signal_outcomes
                 WHERE candidate_id = ? AND horizon = ?
                 LIMIT 1
                 """,
                 (int(row["id"]), int(horizon)),
             ).fetchone()
-            if existing:
+            if existing and str(existing["eval_status"]) == "ok":
                 continue
             target_date = (date.fromisoformat(run_as_of) + timedelta(days=int(horizon))).isoformat()
-            latest_known = _latest_snapshot_date(conn)
+            existing_id = int(existing["id"]) if existing else None
+            base_notes: Dict[str, Any] = {
+                "score_version": row["score_version"],
+                "target_date": target_date,
+                "latest_known_snapshot_date": latest_known,
+            }
             if latest_known is None or latest_known < target_date:
-                skipped += 1
+                base_notes["missing_reason"] = "insufficient_future_window"
+                _persist_signal_outcome(
+                    conn,
+                    existing_id=existing_id,
+                    candidate_id=int(row["id"]),
+                    run_id=int(row["run_id"]),
+                    variant_id=_safe_int(row["variant_id"]),
+                    signal_side=signal_side,
+                    signal_family=signal_family,
+                    symbol=symbol,
+                    as_of=run_as_of,
+                    horizon=int(horizon),
+                    eval_status="missing_prices",
+                    forward_return_pct=None,
+                    excess_return_pct=None,
+                    max_adverse_excursion_pct=None,
+                    max_favorable_excursion_pct=None,
+                    liquidity_penalty=None,
+                    hit=None,
+                    notes=base_notes,
+                )
+                if existing_id is None:
+                    inserted += 1
+                else:
+                    updated += 1
                 continue
             end_price = _price_on_or_before(series, target_date)
-            benchmark_end = (benchmark_by_date.get(target_date) or {}).get("mean_price")
+            benchmark_end = _benchmark_on_or_before(benchmark_by_date, target_date)
             if end_price is None or benchmark_start is None or benchmark_end is None:
-                conn.execute(
-                    """
-                    INSERT INTO advisor_signal_outcomes(
-                        candidate_id, run_id, variant_id, signal_side, signal_family, symbol, as_of, horizon,
-                        eval_status, forward_return_pct, excess_return_pct, max_adverse_excursion_pct,
-                        max_favorable_excursion_pct, liquidity_penalty, hit, notes_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        int(row["id"]),
-                        int(row["run_id"]),
-                        _safe_int(row["variant_id"]),
-                        signal_side,
-                        signal_family,
-                        symbol,
-                        run_as_of,
-                        int(horizon),
-                        "missing_prices",
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        json.dumps({"score_version": row["score_version"]}, ensure_ascii=True, sort_keys=True),
-                    ),
+                reason = "missing_symbol_price"
+                if benchmark_start is None:
+                    reason = "missing_benchmark_start"
+                elif benchmark_end is None:
+                    reason = "missing_benchmark_end"
+                base_notes["missing_reason"] = reason
+                base_notes["entry_price"] = start_price
+                base_notes["end_price"] = end_price
+                base_notes["benchmark_start"] = benchmark_start
+                base_notes["benchmark_end"] = benchmark_end
+                _persist_signal_outcome(
+                    conn,
+                    existing_id=existing_id,
+                    candidate_id=int(row["id"]),
+                    run_id=int(row["run_id"]),
+                    variant_id=_safe_int(row["variant_id"]),
+                    signal_side=signal_side,
+                    signal_family=signal_family,
+                    symbol=symbol,
+                    as_of=run_as_of,
+                    horizon=int(horizon),
+                    eval_status="missing_prices",
+                    forward_return_pct=None,
+                    excess_return_pct=None,
+                    max_adverse_excursion_pct=None,
+                    max_favorable_excursion_pct=None,
+                    liquidity_penalty=None,
+                    hit=None,
+                    notes=base_notes,
                 )
-                inserted += 1
+                if existing_id is None:
+                    inserted += 1
+                else:
+                    updated += 1
                 continue
             raw_forward = _pct(float(end_price), float(start_price))
             bench_forward = _pct(float(benchmark_end), float(benchmark_start))
             if raw_forward is None or bench_forward is None:
-                skipped += 1
+                mark_skipped("invalid_return")
                 continue
             signed_forward = raw_forward if signal_side == "buy" else -raw_forward
             excess = (raw_forward - bench_forward) if signal_side == "buy" else (bench_forward - raw_forward)
@@ -451,43 +685,50 @@ def evaluate_signal_outcomes(
             hit = 1 if signed_forward > 0.0 and excess > 0.0 else 0
             notes = {
                 "benchmark_forward_pct": bench_forward,
+                "benchmark_start": benchmark_start,
+                "benchmark_end": benchmark_end,
                 "entry_price": start_price,
                 "end_price": end_price,
                 "score_version": row["score_version"],
+                "target_date": target_date,
                 "holding_context": _loads_json(row["holding_context_json"], {}),
                 "score_features": _loads_json(row["score_features_json"], {}),
             }
             notes.update(_manual_feedback_for_symbol(conn, symbol, run_as_of))
-            conn.execute(
-                """
-                INSERT INTO advisor_signal_outcomes(
-                    candidate_id, run_id, variant_id, signal_side, signal_family, symbol, as_of, horizon,
-                    eval_status, forward_return_pct, excess_return_pct, max_adverse_excursion_pct,
-                    max_favorable_excursion_pct, liquidity_penalty, hit, notes_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(row["id"]),
-                    int(row["run_id"]),
-                    _safe_int(row["variant_id"]),
-                    signal_side,
-                    signal_family,
-                    symbol,
-                    run_as_of,
-                    int(horizon),
-                    "ok",
-                    float(signed_forward),
-                    float(excess),
-                    float(mae),
-                    float(mfe),
-                    float(liquidity_penalty),
-                    int(hit),
-                    json.dumps(notes, ensure_ascii=True, sort_keys=True),
-                ),
+            _persist_signal_outcome(
+                conn,
+                existing_id=existing_id,
+                candidate_id=int(row["id"]),
+                run_id=int(row["run_id"]),
+                variant_id=_safe_int(row["variant_id"]),
+                signal_side=signal_side,
+                signal_family=signal_family,
+                symbol=symbol,
+                as_of=run_as_of,
+                horizon=int(horizon),
+                eval_status="ok",
+                forward_return_pct=float(signed_forward),
+                excess_return_pct=float(excess),
+                max_adverse_excursion_pct=float(mae),
+                max_favorable_excursion_pct=float(mfe),
+                liquidity_penalty=float(liquidity_penalty),
+                hit=int(hit),
+                notes=notes,
             )
-            inserted += 1
+            if existing_id is None:
+                inserted += 1
+            else:
+                updated += 1
     conn.commit()
-    return {"as_of": as_of_v, "inserted": inserted, "skipped": skipped, "horizons": list(horizons)}
+    return {
+        "as_of": as_of_v,
+        "inserted": inserted,
+        "updated": updated,
+        "skipped": skipped,
+        "skipped_by_reason": dict(sorted(skipped_by_reason.items())),
+        "horizons": list(horizons),
+        "coverage": _signal_outcome_coverage(conn, as_of_v),
+    }
 
 
 def _scorecard_rows(

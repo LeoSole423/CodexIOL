@@ -101,6 +101,65 @@ class TestAdvisorOpportunities(unittest.TestCase):
         finally:
             conn.close()
 
+    def _insert_minimal_candidate(self, conn, *, as_of="2026-02-10", symbol="AAPL"):
+        cur = conn.execute(
+            """
+            INSERT INTO advisor_opportunity_runs(
+              created_at_utc, as_of, mode, universe, budget_ars, top_n,
+              variant_id, score_version, status, config_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                f"{as_of}T21:00:00Z",
+                as_of,
+                "both",
+                "test",
+                100000.0,
+                5,
+                None,
+                "test_v1",
+                "ok",
+                "{}",
+            ),
+        )
+        run_id = int(cur.lastrowid)
+        cand = conn.execute(
+            """
+            INSERT INTO advisor_opportunity_candidates(
+              run_id, symbol, candidate_type, signal_side, signal_family, score_version,
+              score_total, score_risk, score_value, score_momentum, score_catalyst,
+              entry_low, entry_high, suggested_weight_pct, suggested_amount_ars,
+              reason_summary, risk_flags_json, filters_passed, candidate_status,
+              liquidity_score, holding_context_json, score_features_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                run_id,
+                symbol,
+                "new",
+                "buy",
+                "entry",
+                "test_v1",
+                80.0,
+                70.0,
+                70.0,
+                80.0,
+                75.0,
+                90.0,
+                110.0,
+                10.0,
+                10000.0,
+                "test",
+                "[]",
+                1,
+                "operable",
+                80.0,
+                "{}",
+                "{}",
+            ),
+        )
+        return run_id, int(cand.lastrowid)
+
     def test_allocate_with_caps_respects_caps_and_total(self):
         alloc = allocate_with_caps({"A": 1.0, "B": 1.0}, {"A": 40.0, "B": 100.0})
         self.assertLessEqual(alloc["A"], 40.0 + 1e-9)
@@ -860,6 +919,65 @@ class TestAdvisorOpportunities(unittest.TestCase):
             self.assertEqual(str(row["eval_status"]), "ok")
             self.assertIsNotNone(row["forward_return_pct"])
             self.assertIsNotNone(row["excess_return_pct"])
+        finally:
+            conn.close()
+
+    def test_evaluate_outcomes_records_insufficient_future_window_reason(self):
+        from iol_advisor.continuous import evaluate_signal_outcomes
+
+        conn = self._conn()
+        try:
+            self._insert_minimal_candidate(conn, as_of="2026-02-10", symbol="AAPL")
+            conn.execute(
+                """
+                INSERT INTO market_symbol_snapshots(
+                  snapshot_date,symbol,market,last_price,source
+                ) VALUES(?,?,?,?,?)
+                """,
+                ("2026-02-10", "AAPL", "bcba", 100.0, "quote"),
+            )
+            conn.commit()
+
+            payload = evaluate_signal_outcomes(conn, as_of="2026-02-10", horizons=(1,))
+            self.assertEqual(payload["coverage"]["missing_by_reason"]["insufficient_future_window"], 1)
+
+            row = conn.execute(
+                "SELECT eval_status, notes_json FROM advisor_signal_outcomes WHERE symbol='AAPL'"
+            ).fetchone()
+            self.assertEqual(row["eval_status"], "missing_prices")
+            self.assertEqual(json.loads(row["notes_json"])["missing_reason"], "insufficient_future_window")
+        finally:
+            conn.close()
+
+    def test_evaluate_outcomes_uses_benchmark_price_on_or_before_dates(self):
+        from iol_advisor.continuous import evaluate_signal_outcomes
+
+        conn = self._conn()
+        try:
+            self._insert_minimal_candidate(conn, as_of="2026-02-10", symbol="AAPL")
+            conn.executemany(
+                """
+                INSERT INTO market_symbol_snapshots(
+                  snapshot_date,symbol,market,last_price,source
+                ) VALUES(?,?,?,?,?)
+                """,
+                [
+                    ("2026-02-09", "AAPL", "bcba", 100.0, "quote"),
+                    ("2026-02-12", "AAPL", "bcba", 104.0, "quote"),
+                ],
+            )
+            conn.commit()
+
+            payload = evaluate_signal_outcomes(conn, as_of="2026-02-12", horizons=(1,))
+            self.assertEqual(payload["coverage"]["missing_by_reason"], {})
+            row = conn.execute(
+                "SELECT eval_status, forward_return_pct, excess_return_pct, notes_json FROM advisor_signal_outcomes WHERE symbol='AAPL'"
+            ).fetchone()
+            self.assertEqual(row["eval_status"], "ok")
+            self.assertIsNotNone(row["forward_return_pct"])
+            notes = json.loads(row["notes_json"])
+            self.assertEqual(notes["benchmark_start"], 100.0)
+            self.assertEqual(notes["benchmark_end"], 100.0)
         finally:
             conn.close()
 

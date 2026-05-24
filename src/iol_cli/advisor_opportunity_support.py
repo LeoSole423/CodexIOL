@@ -81,6 +81,68 @@ def load_holdings_context_from_db(conn, as_of: str) -> Dict[str, Dict[str, Any]]
     return out
 
 
+def load_opportunity_watchlist(conn) -> List[tuple]:
+    """Return [(symbol, market), ...] from the opportunity_watchlist table."""
+    rows = conn.execute(
+        "SELECT symbol, market FROM opportunity_watchlist ORDER BY symbol"
+    ).fetchall()
+    return [(str(r["symbol"]), str(r["market"])) for r in rows]
+
+
+def upsert_opportunity_watchlist(
+    conn,
+    symbols: List[tuple],
+    added_at: str,
+) -> int:
+    """Insert (symbol, market) pairs from *symbols* into opportunity_watchlist.
+
+    Uses INSERT OR IGNORE so existing entries keep their original added_at.
+    Returns the number of rows newly inserted.
+    """
+    inserted = 0
+    for sym, mkt in symbols:
+        sym = (sym or "").strip().upper()
+        mkt = (mkt or "bcba").strip().lower()
+        if not sym:
+            continue
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO opportunity_watchlist (symbol, market, added_at) VALUES (?, ?, ?)",
+            (sym, mkt, added_at),
+        )
+        inserted += cur.rowcount
+    return inserted
+
+
+def remove_opportunity_watchlist(conn, symbol: str, market: str = "bcba") -> bool:
+    """Remove a single (symbol, market) entry. Returns True if a row was deleted."""
+    cur = conn.execute(
+        "DELETE FROM opportunity_watchlist WHERE symbol = ? AND market = ?",
+        (symbol.strip().upper(), market.strip().lower()),
+    )
+    return cur.rowcount > 0
+
+
+def load_ohlcv_volume_averages(conn, as_of: str, n_days: int = 20) -> Dict[str, float]:
+    """Return {symbol: avg_volume} from symbol_daily_ohlcv over the last n_days.
+
+    Only symbols with >= 3 observations are included (sparse data excluded).
+    Used to supplement market_symbol_snapshots volume when the panel didn't
+    report the symbol every day.
+    """
+    cutoff = (date.fromisoformat(as_of) - timedelta(days=int(n_days))).isoformat()
+    rows = conn.execute(
+        """
+        SELECT symbol, AVG(volume) AS avg_volume
+        FROM symbol_daily_ohlcv
+        WHERE trade_date > ? AND trade_date <= ? AND volume IS NOT NULL
+        GROUP BY symbol
+        HAVING COUNT(*) >= 3
+        """,
+        (cutoff, as_of),
+    ).fetchall()
+    return {str(r["symbol"]): float(r["avg_volume"]) for r in rows}
+
+
 def load_market_snapshot_rows(conn, as_of: str) -> List[Dict[str, Any]]:
     rows = conn.execute(
         """

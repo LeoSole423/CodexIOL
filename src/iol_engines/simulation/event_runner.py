@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from .event_bot_config import EventBotConfig, EventReactionRule, get_event_preset, list_event_presets
 from .event_detector import EngineEvent, detect_all_events
 from .metrics import EquityCurve, build_metrics_dict
-from .portfolio_sim import SimulatedPortfolio, load_prices_for_date, load_trading_dates
+from .portfolio_sim import Position, SimulatedPortfolio, load_execution_metadata_for_date, load_prices_for_date, load_trading_dates
+from .cost_model import ExecutionCostModel, ExecutionFill
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -57,16 +58,17 @@ def _create_run_row(
     date_to: str,
     initial_cash: float,
     mode: str = "backtest",
+    cost_model_version: Optional[str] = None,
 ) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO event_simulation_runs
-            (bot_name, date_from, date_to, initial_cash, mode, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'running', ?)
+            (bot_name, date_from, date_to, initial_cash, mode, status, created_at, cost_model_version)
+        VALUES (?, ?, ?, ?, ?, 'running', ?, ?)
         """,
-        (bot_name, date_from, date_to, initial_cash, mode, now),
+        (bot_name, date_from, date_to, initial_cash, mode, now, cost_model_version),
     )
     conn.commit()
     return cur.lastrowid or 0
@@ -85,19 +87,58 @@ def _persist_trade(
     event_type: str,
     event_description: str,
     portfolio_value: float,
+    fill: Optional[ExecutionFill] = None,
 ) -> None:
+    fill_values = (
+        fill.gross_amount_ars if fill else None,
+        fill.net_amount_ars if fill else None,
+        fill.commission_ars if fill else None,
+        fill.market_fee_ars if fill else None,
+        fill.iva_ars if fill else None,
+        fill.slippage_ars if fill else None,
+        fill.total_cost_ars if fill else None,
+        fill.effective_price if fill else None,
+        fill.instrument_type if fill else None,
+        fill.to_json() if fill else None,
+    )
     conn.execute(
         """
         INSERT INTO event_simulation_trades
             (run_id, symbol, trade_date, action, quantity, price, amount_ars,
-             pnl_ars, trigger_event_type, trigger_event_description, portfolio_value_after)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             pnl_ars, trigger_event_type, trigger_event_description, portfolio_value_after,
+             gross_amount_ars, net_amount_ars, commission_ars, market_fee_ars,
+             iva_ars, slippage_ars, total_cost_ars, execution_price,
+             instrument_type, cost_model_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (run_id, symbol, trade_date, action, quantity, price,
          round(amount_ars, 2),
          round(pnl_ars, 2) if pnl_ars is not None else None,
-         event_type, event_description, round(portfolio_value, 2)),
+         event_type, event_description, round(portfolio_value, 2), *fill_values),
     )
+
+
+_BENCHMARK_SYMBOL = "SPY"
+
+
+def _get_benchmark_price(conn: sqlite3.Connection, symbol: str, date: str) -> Optional[float]:
+    row = conn.execute(
+        """
+        SELECT last_price FROM market_symbol_snapshots
+        WHERE symbol=? AND snapshot_date<=? AND last_price>0
+        ORDER BY snapshot_date DESC LIMIT 1
+        """,
+        (symbol, date),
+    ).fetchone()
+    return float(row[0]) if row else None
+
+
+def _load_open_price(conn: sqlite3.Connection, symbol: str, date: str) -> Optional[float]:
+    row = conn.execute(
+        "SELECT open FROM symbol_daily_ohlcv WHERE symbol=? AND trade_date=?",
+        (symbol, date),
+    ).fetchone()
+    return float(row[0]) if row and row[0] else None
 
 
 def _finalize_run(
@@ -108,6 +149,7 @@ def _finalize_run(
     total_traded: float,
     total_trades: int,
     total_events: int,
+    benchmark_return_pct: Optional[float] = None,
 ) -> None:
     metrics = build_metrics_dict(curve, trade_pnls, total_traded)
     final_value = curve[-1][1] if curve else 0.0
@@ -121,6 +163,8 @@ def _finalize_run(
             win_rate_pct = ?,
             total_events_triggered = ?,
             total_trades = ?,
+            benchmark_symbol = ?,
+            benchmark_return_pct = ?,
             status = 'done'
         WHERE id = ?
         """,
@@ -132,13 +176,75 @@ def _finalize_run(
             metrics["win_rate_pct"],
             total_events,
             total_trades,
+            _BENCHMARK_SYMBOL,
+            round(benchmark_return_pct, 2) if benchmark_return_pct is not None else None,
             run_id,
         ),
     )
     conn.commit()
 
 
+def _mark_other_event_live_runs_stale(conn: sqlite3.Connection, keep_run_id: int, bot_name: str) -> None:
+    conn.execute(
+        """
+        UPDATE event_simulation_runs
+        SET status = 'stale'
+        WHERE mode = 'live'
+          AND status = 'running'
+          AND bot_name = ?
+          AND id <> ?
+        """,
+        (bot_name, int(keep_run_id)),
+    )
+
+
+def _event_live_metrics(
+    conn: sqlite3.Connection,
+    run_id: int,
+    date_from: str,
+    initial_cash_ars: float,
+    as_of: str,
+    final_value: float,
+) -> Dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT trade_date, amount_ars, pnl_ars, portfolio_value_after
+        FROM event_simulation_trades
+        WHERE run_id = ?
+        ORDER BY trade_date, id
+        """,
+        (int(run_id),),
+    ).fetchall()
+    curve: EquityCurve = [(date_from, float(initial_cash_ars))]
+    for row in rows:
+        if row["portfolio_value_after"] is not None:
+            curve.append((str(row["trade_date"]), float(row["portfolio_value_after"])))
+    if curve[-1][0] != as_of or abs(curve[-1][1] - final_value) > 0.01:
+        curve.append((as_of, float(final_value)))
+    trade_pnls = [float(r["pnl_ars"]) for r in rows if r["pnl_ars"] is not None]
+    total_traded = sum(float(r["amount_ars"] or 0.0) for r in rows)
+    metrics = build_metrics_dict(curve, trade_pnls, total_traded)
+    metrics["total_trades"] = len(rows)
+    return metrics
+
+
 # ── Event reaction execution ──────────────────────────────────────────────────
+
+def _execution_context(
+    portfolio: SimulatedPortfolio,
+    metadata: Dict[str, Dict[str, object]],
+    symbol: str,
+    *,
+    price_source: str = "market_symbol_snapshots",
+) -> Dict[str, Any]:
+    meta = metadata.get(symbol, {})
+    volume = meta.get("volume_amount")
+    return {
+        "instrument_type": portfolio.cost_model.instrument_type_for(symbol, meta.get("instrument_type")),
+        "volume_amount": volume if isinstance(volume, (int, float)) else None,
+        "price_source": price_source,
+    }
+
 
 def _apply_reaction(
     portfolio: SimulatedPortfolio,
@@ -157,6 +263,7 @@ def _apply_reaction(
 ) -> None:
     """Execute a single reaction rule triggered by an event."""
     total_value = portfolio.mark_to_market(prices)
+    metadata = load_execution_metadata_for_date(conn, date)
 
     if rule.reaction == "buy_top_candidates":
         candidates = [
@@ -178,13 +285,15 @@ def _apply_reaction(
             amount = min(per_position, portfolio.cash_ars - min_cash)
             if amount < 500:
                 continue
-            qty = portfolio.buy(sym, amount, price)
-            cost_basis[sym] = price
-            total_traded_ref[0] += amount
+            fill = portfolio.buy(sym, amount, price, **_execution_context(portfolio, metadata, sym))
+            if fill.quantity <= 0:
+                continue
+            cost_basis[sym] = portfolio.holdings[sym].avg_price
+            total_traded_ref[0] += fill.gross_amount_ars
             total_trades_ref[0] += 1
             pv = portfolio.mark_to_market(prices)
-            _persist_trade(conn, run_id, sym, date, "buy", qty, price, amount, None,
-                           event.event_type, event.description, pv)
+            _persist_trade(conn, run_id, sym, date, "buy", fill.quantity, fill.effective_price,
+                           fill.net_cash_impact_ars, None, event.event_type, event.description, pv, fill=fill)
 
     elif rule.reaction == "trim_all":
         for sym in list(portfolio.holdings.keys()):
@@ -195,15 +304,16 @@ def _apply_reaction(
             trim_amount = pos_val * rule.magnitude_pct
             if trim_amount < 100:
                 continue
-            cb = cost_basis.get(sym, price)
-            pnl = (price - cb) * (trim_amount / price)
-            qty = portfolio.sell(sym, trim_amount, price)
+            fill = portfolio.sell(sym, trim_amount, price, **_execution_context(portfolio, metadata, sym))
+            if fill.quantity <= 0:
+                continue
+            pnl = float(fill.realized_pnl_ars or 0.0)
             trade_pnls.append(pnl)
-            total_traded_ref[0] += trim_amount
+            total_traded_ref[0] += fill.gross_amount_ars
             total_trades_ref[0] += 1
             pv = portfolio.mark_to_market(prices)
-            _persist_trade(conn, run_id, sym, date, "trim", qty, price, trim_amount,
-                           pnl, event.event_type, event.description, pv)
+            _persist_trade(conn, run_id, sym, date, "trim", fill.quantity, fill.effective_price,
+                           fill.gross_amount_ars, pnl, event.event_type, event.description, pv, fill=fill)
 
     elif rule.reaction == "exit_all":
         for sym in list(portfolio.holdings.keys()):
@@ -211,15 +321,16 @@ def _apply_reaction(
             if not price:
                 continue
             pos_val = portfolio.position_value(sym, price)
-            cb = cost_basis.get(sym, price)
-            pnl = (price - cb) * portfolio.holdings[sym].quantity
-            qty = portfolio.sell(sym, pos_val, price)
+            fill = portfolio.sell(sym, pos_val, price, **_execution_context(portfolio, metadata, sym))
+            if fill.quantity <= 0:
+                continue
+            pnl = float(fill.realized_pnl_ars or 0.0)
             trade_pnls.append(pnl)
-            total_traded_ref[0] += pos_val
+            total_traded_ref[0] += fill.gross_amount_ars
             total_trades_ref[0] += 1
             pv = portfolio.mark_to_market(prices)
-            _persist_trade(conn, run_id, sym, date, "exit", qty, price, pos_val,
-                           pnl, event.event_type, event.description, pv)
+            _persist_trade(conn, run_id, sym, date, "exit", fill.quantity, fill.effective_price,
+                           fill.gross_amount_ars, pnl, event.event_type, event.description, pv, fill=fill)
 
     elif rule.reaction == "increase_cash":
         target_cash = total_value * rule.target_cash_pct
@@ -240,17 +351,18 @@ def _apply_reaction(
                 continue
             pos_val = portfolio.position_value(sym, price)
             liquidate = min(pos_val, remaining_deficit)
-            cb = cost_basis.get(sym, price)
-            pnl = (price - cb) * (liquidate / price)
-            qty = portfolio.sell(sym, liquidate, price)
+            fill = portfolio.sell(sym, liquidate, price, **_execution_context(portfolio, metadata, sym))
+            if fill.quantity <= 0:
+                continue
+            pnl = float(fill.realized_pnl_ars or 0.0)
             trade_pnls.append(pnl)
-            total_traded_ref[0] += liquidate
+            total_traded_ref[0] += fill.gross_amount_ars
             total_trades_ref[0] += 1
             remaining_deficit -= liquidate
             pv = portfolio.mark_to_market(prices)
             action = "exit" if liquidate >= pos_val * 0.95 else "trim"
-            _persist_trade(conn, run_id, sym, date, action, qty, price, liquidate,
-                           pnl, event.event_type, event.description, pv)
+            _persist_trade(conn, run_id, sym, date, action, fill.quantity, fill.effective_price,
+                           fill.gross_amount_ars, pnl, event.event_type, event.description, pv, fill=fill)
 
     elif rule.reaction == "buy_symbol":
         sym = event.symbol or rule.symbol
@@ -261,13 +373,15 @@ def _apply_reaction(
         amount = min(total_value * rule.magnitude_pct, portfolio.cash_ars - min_cash)
         if amount < 500 or portfolio.n_positions >= config.max_positions:
             return
-        qty = portfolio.buy(sym, amount, price)
-        cost_basis[sym] = price
-        total_traded_ref[0] += amount
+        fill = portfolio.buy(sym, amount, price, **_execution_context(portfolio, metadata, sym))
+        if fill.quantity <= 0:
+            return
+        cost_basis[sym] = portfolio.holdings[sym].avg_price
+        total_traded_ref[0] += fill.gross_amount_ars
         total_trades_ref[0] += 1
         pv = portfolio.mark_to_market(prices)
-        _persist_trade(conn, run_id, sym, date, "buy", qty, price, amount, None,
-                       event.event_type, event.description, pv)
+        _persist_trade(conn, run_id, sym, date, "buy", fill.quantity, fill.effective_price,
+                       fill.net_cash_impact_ars, None, event.event_type, event.description, pv, fill=fill)
 
     elif rule.reaction == "sell_symbol":
         sym = event.symbol or rule.symbol
@@ -280,16 +394,17 @@ def _apply_reaction(
         sell_amount = pos_val * rule.magnitude_pct
         if sell_amount < 100:
             return
-        cb = cost_basis.get(sym, price)
-        pnl = (price - cb) * (sell_amount / price)
-        qty = portfolio.sell(sym, sell_amount, price)
+        fill = portfolio.sell(sym, sell_amount, price, **_execution_context(portfolio, metadata, sym))
+        if fill.quantity <= 0:
+            return
+        pnl = float(fill.realized_pnl_ars or 0.0)
         trade_pnls.append(pnl)
-        total_traded_ref[0] += sell_amount
+        total_traded_ref[0] += fill.gross_amount_ars
         total_trades_ref[0] += 1
         action = "exit" if rule.magnitude_pct >= 0.95 else "trim"
         pv = portfolio.mark_to_market(prices)
-        _persist_trade(conn, run_id, sym, date, action, qty, price, sell_amount,
-                       pnl, event.event_type, event.description, pv)
+        _persist_trade(conn, run_id, sym, date, action, fill.quantity, fill.effective_price,
+                       fill.gross_amount_ars, pnl, event.event_type, event.description, pv, fill=fill)
 
     conn.commit()
 
@@ -303,8 +418,11 @@ def run_event_backtest(
     date_to: str,
     initial_cash_ars: float,
     *,
+    commission_rate: float = 0.0,
+    commission_min: float = 0.0,
     verbose: bool = True,
     existing_run_id: Optional[int] = None,
+    cost_model: Optional[ExecutionCostModel] = None,
 ) -> int:
     """Run a full event-driven backtest. Returns event_simulation_runs.id."""
 
@@ -313,12 +431,18 @@ def run_event_backtest(
             from rich.console import Console
             Console().print(msg)
 
+    enforce_cost_model_version = cost_model is not None
+    cost_model = cost_model or ExecutionCostModel.from_config(
+        commission_min=commission_min,
+        legacy_commission_rate=commission_rate if commission_rate > 0 else None,
+    )
     run_id = existing_run_id or _create_run_row(
-        conn, config.name, date_from, date_to, initial_cash_ars
+        conn, config.name, date_from, date_to, initial_cash_ars,
+        cost_model_version=cost_model.version,
     )
     log(
         f"[bold]Event backtest run #{run_id}[/bold] bot=[cyan]{config.name}[/cyan] "
-        f"{date_from} to {date_to}"
+        f"{date_from} to {date_to} | commission={commission_rate*100:.2f}% slippage={config.slippage_pct*100:.2f}%"
     )
 
     trading_dates = load_trading_dates(conn, date_from, date_to)
@@ -327,7 +451,14 @@ def run_event_backtest(
         log("[red]No market data found in date range.[/red]")
         return run_id
 
-    portfolio = SimulatedPortfolio(cash_ars=initial_cash_ars)
+    portfolio = SimulatedPortfolio(
+        cash_ars=initial_cash_ars,
+        commission_rate=commission_rate,
+        commission_min=commission_min,
+        slippage_pct=config.slippage_pct,
+        cost_model=cost_model,
+    )
+    bm_price_start = _get_benchmark_price(conn, _BENCHMARK_SYMBOL, date_from)
     curve: EquityCurve = []
     trade_pnls: List[float] = []
     total_traded_ref = [0.0]
@@ -386,15 +517,21 @@ def run_event_backtest(
                 f"events={total_events}"
             )
 
+    bm_price_end = _get_benchmark_price(conn, _BENCHMARK_SYMBOL, date_to)
+    bm_return: Optional[float] = None
+    if bm_price_start and bm_price_end:
+        bm_return = (bm_price_end - bm_price_start) / bm_price_start * 100.0
+
     _finalize_run(
         conn, run_id, curve, trade_pnls,
-        total_traded_ref[0], total_trades_ref[0], total_events,
+        total_traded_ref[0], total_trades_ref[0], total_events, bm_return,
     )
     final_val = curve[-1][1] if curve else initial_cash_ars
     ret = (final_val - initial_cash_ars) / initial_cash_ars * 100 if initial_cash_ars else 0
+    bm_str = f"  benchmark({_BENCHMARK_SYMBOL})=[cyan]{bm_return:+.1f}%[/cyan]" if bm_return is not None else ""
     log(
         f"\n[bold green]Event backtest complete.[/bold green] "
-        f"Return: [{'green' if ret >= 0 else 'red'}]{ret:+.1f}%[/]  "
+        f"Return: [{'green' if ret >= 0 else 'red'}]{ret:+.1f}%[/]{bm_str}  "
         f"Final: ARS {final_val:,.0f}  Events: {total_events}  Trades: {total_trades_ref[0]}"
     )
     return run_id
@@ -408,7 +545,10 @@ def run_event_live_step(
     as_of: str,
     initial_cash_ars: float = 1_000_000.0,
     *,
+    commission_rate: float = 0.0,
+    commission_min: float = 0.0,
     verbose: bool = True,
+    cost_model: Optional[ExecutionCostModel] = None,
 ) -> List[int]:
     """Execute one daily event-driven step for each bot."""
 
@@ -417,6 +557,11 @@ def run_event_live_step(
             from rich.console import Console
             Console().print(msg)
 
+    enforce_cost_model_version = cost_model is not None
+    cost_model = cost_model or ExecutionCostModel.from_config(
+        commission_min=commission_min,
+        legacy_commission_rate=commission_rate if commission_rate > 0 else None,
+    )
     events = detect_all_events(conn, as_of)
     log(
         f"[bold]Event live step[/bold] {as_of}  "
@@ -447,12 +592,34 @@ def run_event_live_step(
             (bot_name, f"{period}%"),
         )
         row = cur.fetchone()
-        run_id = row[0] if row else _create_run_row(
-            conn, bot_name, f"{period}-01", as_of, initial_cash_ars, mode="live"
-        )
+        if row:
+            run_id = row[0]
+            version_row = conn.execute(
+                "SELECT cost_model_version FROM event_simulation_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if enforce_cost_model_version and version_row and version_row[0] != cost_model.version:
+                conn.execute("UPDATE event_simulation_runs SET status='stale' WHERE id=?", (run_id,))
+                run_id = _create_run_row(
+                    conn, bot_name, f"{period}-01", as_of, initial_cash_ars,
+                    mode="live", cost_model_version=cost_model.version,
+                )
+        else:
+            run_id = _create_run_row(
+                conn, bot_name, f"{period}-01", as_of, initial_cash_ars, mode="live",
+                cost_model_version=cost_model.version if enforce_cost_model_version else None,
+            )
+        _mark_other_event_live_runs_stale(conn, int(run_id), bot_name)
+        conn.commit()
 
         # Reconstruct portfolio from trade history
-        portfolio = SimulatedPortfolio(cash_ars=initial_cash_ars)
+        portfolio = SimulatedPortfolio(
+            cash_ars=initial_cash_ars,
+            commission_rate=commission_rate,
+            commission_min=commission_min,
+            slippage_pct=config.slippage_pct,
+            cost_model=cost_model,
+        )
         cost_basis: Dict[str, float] = {}
         trade_rows = conn.execute(
             """
@@ -465,8 +632,18 @@ def run_event_live_step(
         ).fetchall()
         for sym, action, qty, price, amount in trade_rows:
             if action == "buy" and price:
-                portfolio.buy(sym, float(amount), float(price))
-                cost_basis[sym] = float(price)
+                qty_f = float(qty or 0.0)
+                amount_f = float(amount or 0.0)
+                if qty_f > 0:
+                    existing = portfolio.holdings.get(sym)
+                    if existing:
+                        total_qty = existing.quantity + qty_f
+                        total_basis = existing.cost_basis + amount_f
+                        portfolio.holdings[sym] = Position(sym, total_qty, total_basis / total_qty)
+                    else:
+                        portfolio.holdings[sym] = Position(sym, qty_f, amount_f / qty_f)
+                    portfolio.cash_ars -= amount_f
+                    cost_basis[sym] = portfolio.holdings[sym].avg_price
             elif action in ("trim", "exit") and price:
                 portfolio.sell(sym, float(amount), float(price))
 
@@ -532,6 +709,14 @@ def run_event_live_step(
             "SELECT argentina_macro_stress FROM engine_macro_snapshots ORDER BY as_of DESC LIMIT 1"
         ).fetchone()
 
+        # Benchmark return
+        period = as_of[:7]
+        bm_start = _get_benchmark_price(conn, _BENCHMARK_SYMBOL, f"{period}-01")
+        bm_end = _get_benchmark_price(conn, _BENCHMARK_SYMBOL, as_of)
+        bm_return: Optional[float] = None
+        if bm_start and bm_end:
+            bm_return = (bm_end - bm_start) / bm_start * 100.0
+
         plan = {
             "as_of": as_of,
             "regime": _reg[0] if _reg else "unknown",
@@ -542,23 +727,56 @@ def run_event_live_step(
             "exits": step_exits,
             "portfolio_value_ars": round(final_val, 2),
             "open_positions": list(portfolio.holdings.keys()),
+            "benchmark_symbol": _BENCHMARK_SYMBOL,
+            "benchmark_return_pct": round(bm_return, 2) if bm_return is not None else None,
         }
+        run_row = conn.execute(
+            "SELECT date_from, initial_cash FROM event_simulation_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        run_date_from = str(run_row["date_from"] if run_row else f"{period}-01")
+        run_initial = float(run_row["initial_cash"] if run_row and run_row["initial_cash"] else initial_cash_ars)
+        metrics = _event_live_metrics(conn, run_id, run_date_from, run_initial, as_of, final_val)
 
         conn.execute(
-            "UPDATE event_simulation_runs SET final_value=?, total_return_pct=?, plan_json=? WHERE id=?",
+            """
+            UPDATE event_simulation_runs SET
+                final_value=?,
+                total_return_pct=?,
+                sharpe_ratio=?,
+                max_drawdown_pct=?,
+                win_rate_pct=?,
+                total_events_triggered=?,
+                total_trades=?,
+                status='running',
+                benchmark_symbol=?,
+                benchmark_return_pct=?,
+                plan_json=?,
+                cost_model_version=?
+            WHERE id=?
+            """,
             (
                 round(final_val, 2),
-                round((final_val - initial_cash_ars) / initial_cash_ars * 100, 2),
+                metrics["total_return_pct"],
+                metrics["sharpe_ratio"],
+                metrics["max_drawdown_pct"],
+                metrics["win_rate_pct"],
+                int(total_events_triggered),
+                metrics["total_trades"],
+                _BENCHMARK_SYMBOL,
+                round(bm_return, 2) if bm_return is not None else None,
                 json.dumps(plan),
+                cost_model.version,
                 run_id,
             ),
         )
         conn.commit()
+        bm_str = f"  bm={bm_return:+.1f}%" if bm_return is not None else ""
         log(
             f"  [cyan]{bot_name}[/cyan] #{run_id}  "
             f"value=[yellow]ARS {final_val:,.0f}[/yellow]  "
             f"positions={portfolio.n_positions}  "
-            f"events_reacted={total_events_triggered}"
+            f"events_reacted={total_events_triggered}{bm_str}"
         )
         run_ids.append(run_id)
 
