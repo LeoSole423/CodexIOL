@@ -1,1 +1,3 @@
-__all__ = ["cli", "iol_client", "config", "storage", "util", "db", "snapshot"]
+"""Minimal operational CLI for the InvertirOnline API."""
+
+__version__ = "1.0.0"

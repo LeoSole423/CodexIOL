@@ -1,5 +1,5 @@
 services:
-  iol:
+  iol-cli:
     build: .
     container_name: iol-cli
     restart: unless-stopped
@@ -8,52 +8,7 @@ services:
     environment:
       - TZ=America/Argentina/Buenos_Aires
     volumes:
-      - ./:/app
-    working_dir: /app
+      - ./data/cli-state:/app/data/cli-state
+    stdin_open: true
+    tty: true
     command: ["tail", "-f", "/dev/null"]
-  scheduler:
-    build: .
-    container_name: iol-scheduler
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - TZ=America/Argentina/Buenos_Aires
-    volumes:
-      - ./:/app
-    working_dir: /app
-    command:
-      - sh
-      - -c
-      - "tr -d '\r' < /app/scripts/scheduler_entrypoint.sh > /tmp/scheduler_entrypoint.sh && exec sh /tmp/scheduler_entrypoint.sh"
-  web:
-    build: .
-    container_name: iol-web
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - TZ=America/Argentina/Buenos_Aires
-    volumes:
-      - ./:/app
-    working_dir: /app
-    ports:
-      - "8000:8000"
-    command: ["uvicorn", "iol_web.app:app", "--host", "0.0.0.0", "--port", "8000"]
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.dev
-    container_name: iol-frontend
-    restart: unless-stopped
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_TELEMETRY_DISABLED=1
-      - API_BASE_URL=http://web:8000
-    depends_on:
-      - web

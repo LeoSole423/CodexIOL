@@ -49,6 +49,7 @@ htmlcov/
 output/
 =
 scripts/grant_codex_sandbox_docker_access.ps1
+legacy/automations/scripts/grant_codex_sandbox_docker_access.ps1
 
 # ---- Editor / OS ----
 .vscode/
@@ -64,6 +65,11 @@ Desktop.ini
 # Keep only folder structure (README/.gitkeep), never real contents.
 data/*
 reports/*
+
+# Active CLI runtime state
+!data/cli-state/
+data/cli-state/*
+!data/cli-state/.gitkeep
 
 # Allow directory skeleton metadata
 !data/README.md
