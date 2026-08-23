@@ -15,3 +15,20 @@ services:
     stdin_open: true
     tty: true
     command: ["tail", "-f", "/dev/null"]
+
+  iol-mcp:
+    build: .
+    container_name: iol-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=America/Argentina/Buenos_Aires
+      - IOL_MCP_HOST=0.0.0.0
+    volumes:
+      - ./data/review:/app/data/review:ro
+      - ./reports/monthly:/app/reports/monthly:ro
+      - ./config:/app/config:ro
+    ports:
+      - "127.0.0.1:${IOL_MCP_PORT:-8000}:8000"
+    command: ["iol-mcp"]
