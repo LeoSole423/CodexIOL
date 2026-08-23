@@ -54,8 +54,10 @@ docker exec -it iol-cli iol auth test
 - Git es parte de la superficie de seguridad del proyecto: un commit o push nunca debe publicar credenciales, datos de cuenta, informes privados ni artefactos de operación.
 - Antes de modificar archivos, inspeccionar `git status --short --branch`, la rama actual y el remoto configurado. Un árbol de trabajo sucio puede contener cambios legítimos del usuario: no descartarlos, sobrescribirlos ni incluirlos por defecto.
 - Usar ramas con prefijo `codex/` para trabajo nuevo. No crear, cambiar, fusionar ni borrar ramas salvo que la tarea lo requiera o el usuario lo autorice.
-- `main` es la rama de integración. Un commit o push directo a `main` requiere una solicitud explícita del usuario. Para cambios de agentes, preferir una rama `codex/<tema>` y un PR revisable.
-- No hacer `git push`, abrir/mergear PRs, cambiar la configuración de GitHub ni tocar protecciones de rama sin autorización explícita. Nunca usar `--force`, `--force-with-lease`, `git reset --hard`, `git clean`, `git checkout --`, `git restore` destructivo ni reescribir historia, salvo instrucción inequívoca del usuario.
+- `main` es la rama de integración. Nunca hacer commits ni pushes directos a `main`: los cambios se integran mediante un PR desde una rama `codex/<tema>`.
+- Tras completar una implementación y pasar las verificaciones requeridas, publicar automáticamente la rama, abrir o actualizar un PR hacia `main` y fusionarlo. Antes del merge, verificar que la rama objetivo sigue siendo `main`, que el árbol está limpio, que los checks obligatorios y las revisiones exigidas por GitHub están aprobados y que el PR no tiene conflictos.
+- Si el push, PR, checks, revisión requerida, protección de rama o merge falla, no intentar eludirlo: informar el bloqueo y conservar la rama para revisión humana. No cambiar configuración de GitHub ni protecciones de rama automáticamente.
+- Nunca usar `--force`, `--force-with-lease`, `git reset --hard`, `git clean`, `git checkout --`, `git restore` destructivo ni reescribir historia, salvo instrucción inequívoca del usuario.
 
 ### Preparación y revisión de commits
 
@@ -74,9 +76,9 @@ docker exec -it iol-cli iol auth test
 
 ### Publicación y cierre
 
-- Antes de hacer push, confirmar rama, remoto, commit objetivo y que `git status --short` no contiene cambios no intencionales. Hacer push sólo de la rama autorizada.
-- Después del push, verificar el tracking branch y el commit remoto con `git status --short --branch` y `git log -1 --oneline`. Informar hash, rama, remoto y verificaciones realizadas, sin exponer información sensible.
-- Si el remoto avanzó o existe un conflicto, no hacer pull, rebase ni merge automáticamente: informar la divergencia y solicitar dirección.
+- Antes de hacer push, confirmar rama, remoto, commit objetivo y que `git status --short` no contiene cambios no intencionales. Hacer push sólo de la rama `codex/` de trabajo.
+- Después del push, verificar el tracking branch y el commit remoto con `git status --short --branch` y `git log -1 --oneline`. Crear o actualizar el PR contra `main`, esperar/consultar los checks y fusionar sólo cuando estén aprobados.
+- Si el remoto avanzó o existe un conflicto, actualizar la rama mediante un procedimiento no destructivo y volver a ejecutar las verificaciones; si no es posible, informar la divergencia y solicitar dirección.
 
 ## Arquitectura activa
 
