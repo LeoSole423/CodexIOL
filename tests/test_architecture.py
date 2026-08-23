@@ -15,3 +15,16 @@ def test_review_is_separated_from_execution_code():
         text = path.read_text(encoding="utf-8").lower()
         for name in forbidden_imports:
             assert name not in text, f"{path} contains execution dependency {name}"
+
+
+def test_mcp_is_recursively_separated_from_execution_code():
+    forbidden_imports = (
+        "commands_orders", "commands_funds", "commands_api", "tickets", "iol_client",
+        "legacy", "raw_request", ".buy(", ".sell(", ".cancel_order(", ".fci_",
+    )
+    for path in Path("src/iol_mcp").rglob("*.py"):
+        if path.name == "security.py":
+            continue
+        text = path.read_text(encoding="utf-8").lower()
+        for name in forbidden_imports:
+            assert name not in text, f"{path} contains execution dependency {name}"

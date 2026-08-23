@@ -91,3 +91,24 @@ docker exec -it iol-cli iol-review context export
 El contexto se guarda en `data/review/` sin tokens ni respuestas HTTP crudas. Los informes y artefactos de revisión se guardan en `reports/monthly/` y `data/review/`; ambos directorios están ignorados por Git. Una propuesta es análisis, nunca una orden: para operar se sigue usando manualmente `iol orders prepare` y luego `iol orders execute` con confirmación explícita.
 
 Los comandos disponibles son `iol-review profile validate`, `iol-review context export [--as-of YYYY-MM-DD] [--out PATH]` e `iol-review decision record REVIEW_ID --status accepted|rejected|modified --notes TEXT`.
+
+## Integración ChatGPT / MCP
+
+`iol-mcp` es una app MCP privada y exclusivamente de lectura. Su objetivo es dar a ChatGPT contexto financiero estructurado, no control sobre la cuenta.
+
+```text
+CodexIOL MCP  = cartera actual, perfil y memoria de inversión (lectura)
+ChatGPT       = investigación y análisis
+CodexIOL CLI  = único camino para preparar y confirmar una operación
+```
+
+Construí e iniciá los servicios:
+
+```powershell
+docker compose up -d --build
+docker compose logs iol-mcp
+```
+
+El endpoint Streamable HTTP queda sólo en `http://127.0.0.1:8000/mcp`; no se publica en Internet. Para conectarlo a ChatGPT web, usá un túnel MCP seguro o desplegalo detrás de TLS, autenticación y rate limiting. Ver [guía de despliegue MCP](docs/MCP.md).
+
+Las seis herramientas disponibles son `get_portfolio_snapshot`, `get_investor_profile`, `get_movements`, `get_investment_history`, `get_asset_context` y `get_capabilities`. No existen tools para comprar, vender, preparar órdenes, cancelar, FCI ni requests IOL arbitrarios.
