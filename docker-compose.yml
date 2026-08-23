@@ -9,6 +9,9 @@ services:
       - TZ=America/Argentina/Buenos_Aires
     volumes:
       - ./data/cli-state:/app/data/cli-state
+      - ./data/review:/app/data/review
+      - ./reports/monthly:/app/reports/monthly
+      - ./config:/app/config
     stdin_open: true
     tty: true
     command: ["tail", "-f", "/dev/null"]

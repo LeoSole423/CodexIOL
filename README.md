@@ -74,3 +74,20 @@ El CLI vuelve a mostrar el ticket y exige escribir `CONFIRMAR`. Un ticket vence,
 - El código anterior está archivado y no soportado en [`legacy/`](legacy/README.md).
 
 La referencia de migración está en [`docs/MIGRATION.md`](docs/MIGRATION.md).
+
+## Revisión mensual con Codex
+
+CLI operativo para IOL y soporte separado para revisión mensual en modo lectura. La API configurada puede operar sobre una cuenta real: las operaciones exigen confirmación manual y la revisión mensual nunca crea ni ejecuta órdenes.
+
+## Uso de revisión mensual
+
+Copiá `config/investor-profile.example.toml` a `config/investor-profile.toml`, completalo y validalo:
+
+```powershell
+docker exec -it iol-cli iol-review profile validate
+docker exec -it iol-cli iol-review context export
+```
+
+El contexto se guarda en `data/review/` sin tokens ni respuestas HTTP crudas. Los informes y artefactos de revisión se guardan en `reports/monthly/` y `data/review/`; ambos directorios están ignorados por Git. Una propuesta es análisis, nunca una orden: para operar se sigue usando manualmente `iol orders prepare` y luego `iol orders execute` con confirmación explícita.
+
+Los comandos disponibles son `iol-review profile validate`, `iol-review context export [--as-of YYYY-MM-DD] [--out PATH]` e `iol-review decision record REVIEW_ID --status accepted|rejected|modified --notes TEXT`.

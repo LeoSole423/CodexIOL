@@ -21,13 +21,14 @@ dev = ["pytest>=8.2.0"]
 
 [project.scripts]
 iol = "iol_cli.cli:app"
+iol-review = "iol_review.cli:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["iol_cli*"]
+include = ["iol_cli*", "iol_review*"]
 exclude = ["legacy*"]
 
 [tool.pytest.ini_options]

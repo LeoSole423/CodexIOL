@@ -71,6 +71,15 @@ reports/*
 data/cli-state/*
 !data/cli-state/.gitkeep
 
+# Monthly review artifacts and private investor profile
+config/investor-profile.toml
+!data/review/
+data/review/*
+!data/review/.gitkeep
+!reports/monthly/
+reports/monthly/*
+!reports/monthly/.gitkeep
+
 # Allow directory skeleton metadata
 !data/README.md
 !data/.gitkeep

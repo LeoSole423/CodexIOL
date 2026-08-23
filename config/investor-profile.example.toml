@@ -1,0 +1,20 @@
+# Copy this file to config/investor-profile.toml. It is deliberately ignored by Git.
+# Complete every required field before enabling the monthly review.
+schema_version = 1
+objectives = "Preservar y hacer crecer el capital en términos reales."
+horizon = "5+ años"
+liquidity_needs = "Sin retiros previstos durante los próximos 12 meses."
+loss_tolerance = "Puedo tolerar caídas temporales de hasta 20%."
+allowed_markets = ["argentina", "estados_unidos"]
+allowed_instruments = ["acciones", "cedears", "bonos", "fci"]
+
+expected_contributions = "Aportes mensuales variables en pesos."
+currency_preferences = "Preferencia por exposición diversificada entre ARS y USD."
+benchmark = "Comparar contra una combinación razonable de inflación argentina y S&P 500."
+watchlist = []
+soft_concentration_limits = { single_asset_percent = 25, country_percent = 75 }
+personal_exclusions = []
+thesis = ""
+preferences = ""
+notes = ""
+continuity_document = "reports/monthly/YYYY-MM-transition-plan.md"
